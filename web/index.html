@@ -159,7 +159,7 @@ badge,.badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;bord
 .detect-custom{display:grid;grid-template-columns:1fr auto auto auto;gap:8px;align-items:center}
 .detect-custom input{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:4px;font:inherit;font-size:13px;outline:none;background:var(--input)}
 .detect-custom input:focus{border-color:var(--blue);background:#fff}
-.detect-files{margin-top:12px}
+.detect-files{margin-top:12px;overflow-x:auto}
 .numctl{width:64px;padding:5px 7px;border:1px solid var(--border);border-radius:4px;font:inherit;font-size:12px;background:var(--input)}
 .numctl.credit{width:76px}
 .numctl:focus{border-color:var(--blue);background:#fff;outline:none}
@@ -213,7 +213,7 @@ badge,.badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;bord
 .modal-h h3{font-size:15px;font-weight:700}
 .modal-h .x{border:none;background:none;font-size:20px;cursor:pointer;color:var(--fg3);padding:0 4px;line-height:1}
 .modal-h .x:hover{color:var(--fg)}
-.modal-b{padding:16px;overflow-y:auto;flex:1}
+.modal-b{padding:16px;overflow:auto;flex:1;min-width:0}
 .modal-f{padding:12px 16px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px}
 
 /* form */
@@ -259,6 +259,89 @@ badge,.badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;bord
   .detect-summary{display:block}.detect-actions{justify-content:flex-start;margin-top:10px}
   .control-row{align-items:stretch}.searchbox,.selectctl{width:100%;min-width:0}
 }
+
+/* Warm operations console */
+.layout{
+  --accent:#e85d13;--accent-strong:#c9480d;--accent-soft:#fff0df;--accent-border:#f3c096;
+  --bg:#e9e9e6;--fg:#1d1c19;--fg2:#64635e;--fg3:#8a8982;
+  --border:#d7d7d1;--border2:#e7e7e2;--hover:#f2f2ef;--input:#f7f7f4;
+  --blue:var(--accent);--blue-bg:var(--accent-soft);--blue-soft:#fff8ef;--blue-border:var(--accent-border);
+  --green:#128665;--green-bg:#e9f6f1;--red:#cf3f32;--red-bg:#fff0ed;
+  display:block;min-height:100vh;background:var(--bg);color:var(--fg)
+}
+.layout.theme-classic{--accent:#4b4d4d;--accent-strong:#252625;--accent-soft:#ededeb;--accent-border:#c9c9c4}
+.layout.theme-forest{--accent:#167a5d;--accent-strong:#0f5943;--accent-soft:#e8f4ef;--accent-border:#a9d3c3}
+body{background:#e9e9e6;letter-spacing:0;overflow-x:hidden}
+.topbar{position:sticky;top:0;z-index:500;min-height:72px;background:#1d1c1a;color:#fff;display:grid;grid-template-columns:minmax(220px,auto) minmax(480px,1fr) auto;align-items:center;gap:24px;padding:0 22px;border-bottom:1px solid #35332f}
+.brand-block{min-width:0;display:flex;align-items:center;gap:12px}
+.brand-symbol{width:34px;height:34px;border-radius:7px;background:var(--accent);color:#fff;display:grid;place-items:center;font-size:15px;font-weight:900;flex:0 0 auto}
+.brand-copy{min-width:0}.brand-title{font-size:18px;font-weight:800;line-height:1.05;white-space:nowrap}.brand-meta{font-size:10px;color:#9e9b93;margin-top:5px;text-transform:uppercase;letter-spacing:.8px}
+.topnav{min-width:0;display:flex;align-items:center;justify-content:center;gap:3px}
+.topnav .nav-item{border:1px solid transparent;border-left:1px solid transparent;border-radius:6px;padding:8px 11px;color:#aaa79f;font-size:12px;font-weight:600;gap:6px;white-space:nowrap}
+.topnav .nav-item:hover{background:#2c2a27;color:#fff}.topnav .nav-item.on{background:#34312d;border-color:#47423b;color:#fff;font-weight:700}
+.topnav .nav-item.on::after{content:'';position:absolute;left:10px;right:10px;bottom:-1px;height:2px;background:var(--accent)}
+.topnav .nav-item{position:relative}.topnav .nav-item svg{width:14px;height:14px;opacity:.8}.topnav .nav-item.on svg{color:var(--accent);opacity:1}
+.top-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0}
+.refresh-cta{height:40px;border:1px solid #ef6a25;background:var(--accent);color:#fff;border-radius:7px;padding:0 14px;font:inherit;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:7px;cursor:pointer;white-space:nowrap}
+.refresh-cta:hover{background:var(--accent-strong)}.refresh-cta svg{width:15px;height:15px}
+.theme-switch{height:40px;display:flex;align-items:center;padding:3px;border:1px solid #45413b;border-radius:7px;background:#171614}
+.theme-switch button{height:32px;border:0;border-radius:5px;background:transparent;color:#8f8c85;padding:0 9px;font:inherit;font-size:11px;font-weight:700;cursor:pointer}
+.theme-switch button.on{background:var(--accent);color:#fff}.theme-switch button:hover:not(.on){color:#fff}
+.node-pill{height:40px;border:1px solid #2d5b4d;border-radius:7px;padding:0 11px;display:flex;align-items:center;gap:8px;color:#d9e9e3;font-size:11px;font-weight:700;white-space:nowrap;background:#202522}
+.node-dot{width:8px;height:8px;border-radius:50%;background:#18aa7f;box-shadow:0 0 0 5px rgba(24,170,127,.12)}
+.token-tool{width:40px;height:40px;border:1px solid #45413b;background:#242220;color:#aaa79f;border-radius:7px;display:grid;place-items:center;cursor:pointer}
+.token-tool:hover{color:#fff;border-color:#625d55}.token-tool svg{width:16px;height:16px}
+.main{margin-left:0;min-width:0}.content{padding:18px;max-width:1600px;margin:0 auto}
+.phead{margin:0 0 12px;display:flex;align-items:baseline;gap:12px}.phead h1{font-size:21px;font-weight:800}.phead p{font-size:12px;color:var(--fg3);margin:0}
+.tbar{min-height:42px;margin-bottom:12px;padding:6px 8px;background:#f5f5f2;border:1px solid var(--border);border-radius:7px}
+.btn{min-height:32px;padding:6px 11px;border-color:#d4d4ce;background:#fff;border-radius:6px;font-weight:600}.btn:hover{background:#f4f3ef;border-color:#aaa89f}.btn.s{min-height:29px;padding:4px 8px}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff}.btn.pri:hover{background:var(--accent-strong);border-color:var(--accent-strong)}
+.btn.danger{background:#fff;color:var(--red);border-color:#edc3bd}.btn.danger:hover{background:var(--red-bg)}
+.card{background:#fff;border-color:var(--border);border-radius:8px;margin-bottom:14px;box-shadow:0 1px 0 rgba(28,27,24,.03);overflow:hidden}
+.card:has(>table){overflow-x:auto}.card>table{min-width:720px}.card>table.mini-table{min-width:620px}
+.card-h{min-height:51px;padding:12px 16px;border-bottom-color:var(--border2);font-size:16px;font-weight:800}.card-h .sub{font-size:11px;color:var(--fg3)}.card-p{padding:15px 16px}
+.stats{grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}.stat{position:relative;min-height:126px;padding:15px 16px;background:#fff;border-color:var(--border);border-radius:8px;overflow:hidden}
+.stat::before{content:'';position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--accent)}.stat .sl{font-size:10px;font-weight:700;color:var(--fg3)}.stat .sv{font-size:28px;margin-top:10px;letter-spacing:0}.stat .ss{margin-top:2px}.stat .sd{padding-top:9px;border-top:1px solid var(--border2);margin-top:10px}
+.dash-hero{grid-template-columns:minmax(0,1.35fr) minmax(360px,.65fr);gap:14px;padding:16px 18px;background:#fff;border-color:var(--border);border-radius:8px;margin-bottom:14px}
+.health-title{font-size:20px;font-weight:800}.health-sub{font-size:11px}.health-dot{width:9px;height:9px}.health-kpis{gap:0;border:1px solid var(--border2);border-radius:7px;overflow:hidden}
+.health-kpi{border:0;border-right:1px solid var(--border2);border-radius:0;padding:10px 12px;background:#fafaf8}.health-kpi:last-child{border-right:0}.health-kpi .v{font-size:18px}
+.dash-grid{gap:14px;margin-bottom:0}.dash-grid.wide{grid-template-columns:minmax(0,1.35fr) minmax(330px,.65fr)}
+.metric-row{gap:0;border:1px solid var(--border2);border-radius:7px;overflow:hidden}.metric{border:0;border-right:1px solid var(--border2);border-radius:0;background:#fafaf8;padding:12px 14px}.metric:last-child{border-right:0}.metric .m-value{font-size:20px;letter-spacing:0}
+.progress{height:6px;background:#e4e4df}.progress span{background:var(--accent)}
+.rank-list{gap:0}.rank-item{padding:10px 0;border-bottom:1px solid var(--border2)}.rank-item:last-child{border-bottom:0}
+.chart-box{padding:13px 16px}.bars{height:150px}.bar{background:#f4b37f}.bar:hover{background:var(--accent)}
+.activity-scroll{overflow-x:auto;padding-bottom:3px}.activity-map{min-width:710px;display:grid;grid-template-columns:86px repeat(7,minmax(72px,1fr));gap:6px;align-items:stretch}
+.activity-corner,.activity-head{font-size:10px;color:var(--fg3);font-weight:700;display:flex;align-items:center;padding:0 7px;height:27px}.activity-head{justify-content:center}
+.activity-label{min-height:54px;display:flex;align-items:center;padding:0 7px;font-size:11px;font-weight:700;color:var(--fg2)}
+.activity-cell{min-height:54px;border-radius:6px;display:flex;flex-direction:column;justify-content:center;align-items:center;font-size:10px;transition:transform .12s;color:#75451d}.activity-cell:hover{transform:translateY(-1px)}.activity-cell strong{font-size:13px;letter-spacing:0}
+.heat-legend{display:flex;align-items:center;gap:5px;margin-top:11px;font-size:10px;color:var(--fg3)}.heat-swatch{width:22px;height:7px;border-radius:2px}
+table{font-size:12px}.table-scroll{background:#fff}th{padding:9px 12px;background:#f5f5f2;color:#77756e;font-size:10px;letter-spacing:.2px}td{padding:9px 12px}tr:hover td{background:#fff9f3}
+.mini-table td,.mini-table th{padding:8px 11px}.mono,code{letter-spacing:0}
+.badge{border-radius:4px;padding:3px 7px}.badge.active,.badge.ok{background:var(--green-bg);color:var(--green)}.badge.warn{background:#fff1da;color:#9a5c14}.badge.inactive{background:#eeeeeb;color:#77756f}
+.tag{background:#efefec;color:#6e6d67;border:1px solid #e1e1dc;border-radius:4px}.tag.warn{background:#fff1da;color:#9a5c14;border-color:#f1d5a8}
+.searchbox,.selectctl,.numctl,.field input,.field textarea,.field select{background:#fff;border-color:#d3d3cd;border-radius:6px}.searchbox:focus,.selectctl:focus,.numctl:focus,.field input:focus,.field textarea:focus{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 12%,transparent)}
+.seg{border-radius:6px;background:#fff}.seg button{background:#fff}.seg button.on{background:#3f3f3d;color:#fff}
+.codeblk{background:#242321;color:#d8d4cc;border-color:#383632;border-radius:6px}.codeblk .k{color:#ff8a48}.codeblk .s{color:#ffd19a}
+.callout{background:#f7f7f4}.quick-row .qv,.info-row .v{background:#f5f5f2}.setup-tabs button{border-radius:6px}.setup-tabs button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.modal{border-radius:8px;box-shadow:0 24px 80px rgba(0,0,0,.25)}.ov{background:rgba(29,28,26,.5);backdrop-filter:blur(2px)}
+.toasts{top:82px}.toast{border-radius:6px;box-shadow:0 10px 30px rgba(0,0,0,.14)}.toast.info{background:#3f3f3d}
+.load{padding:60px}.spin{border-color:#ddd8d1;border-top-color:var(--accent)}
+.empty .em{font-size:22px}.pager{padding:0 12px 12px}
+
+@media (max-width:1180px){
+  .topbar{grid-template-columns:auto 1fr;padding:10px 16px;gap:10px}.topnav{grid-column:1/-1;grid-row:2;justify-content:flex-start;overflow-x:auto;padding-bottom:1px}.top-actions{grid-column:2;grid-row:1}.node-pill{display:none}
+  .dash-grid.wide{grid-template-columns:1fr 1fr}.stats{grid-template-columns:repeat(2,1fr)}.health-kpis,.metric-row{grid-template-columns:repeat(3,1fr)}.content{padding:14px}
+}
+@media (max-width:760px){
+  .topbar{position:sticky;grid-template-columns:1fr auto;padding:9px 10px}.brand-symbol{width:30px;height:30px}.brand-title{font-size:15px}.brand-meta{display:none}
+  .top-actions{gap:5px}.refresh-cta{width:36px;height:36px;padding:0;justify-content:center}.refresh-cta span:last-child{display:none}.theme-switch{height:36px}.theme-switch button{height:28px;padding:0 7px;font-size:10px}.token-tool{width:36px;height:36px}
+  .topnav{margin:0 -10px -9px;padding:6px 10px;background:#171614}.topnav .nav-item{padding:7px 9px}.topnav .nav-item span{display:none}
+  .content{padding:10px}.phead{display:block;margin-bottom:9px}.phead h1{font-size:18px}.phead p{margin-top:2px}.tbar{align-items:stretch;overflow-x:auto;flex-wrap:nowrap}
+  .stats{grid-template-columns:1fr 1fr}.stat{min-height:108px}.stat .sv{font-size:22px}
+  .dash-hero,.dash-grid,.dash-grid.wide,.dash-grid.thirds,.detect-grid,.detect-custom,.form-grid,.info-row,.setup-panel,.detail-grid{grid-template-columns:1fr}
+  .dash-hero{padding:14px}.health-kpis{grid-template-columns:repeat(3,1fr)}.metric-row{grid-template-columns:1fr}.metric{border-right:0;border-bottom:1px solid var(--border2)}.metric:last-child{border-bottom:0}
+  .card-h{font-size:14px}.card-h .sub{max-width:50%;text-align:right}.searchbox{min-width:190px}.modal{max-width:calc(100vw - 20px)}
+}
 </style>
 </head>
 <body>
@@ -290,32 +373,28 @@ createApp({
     const validPages=['dashboard','accounts','keys','models','logs','settings'];
     const savedPage=localStorage.getItem('cb_gw_page');
     const page=ref(validPages.includes(savedPage)?savedPage:'dashboard'),token=ref(localStorage.getItem('cb_gw_token')||''),ti=ref(''),st=ref(false),toasts=ref([]);
+    const validTones=['classic','warm','forest'],savedTone=localStorage.getItem('cb_gw_tone');
+    const tone=ref(validTones.includes(savedTone)?savedTone:'warm');
     function tf(m,t='ok'){const id=Date.now()+Math.random();toasts.value=[...toasts.value,{id,m,t}].slice(-4);setTimeout(()=>toasts.value=toasts.value.filter(x=>x.id!==id),2500)}
     function sv(){token.value=ti.value;localStorage.setItem('cb_gw_token',ti.value);st.value=false;ti.value='';tf('已保存')}
     function go(k){page.value=k;localStorage.setItem('cb_gw_page',k)}
+    function setTone(k){tone.value=k;localStorage.setItem('cb_gw_tone',k)}
+    function hardRefresh(){window.location.reload()}
     const nav=[{k:'dashboard',l:'Dashboard',i:I.dash},{k:'accounts',l:'账号管理',i:I.users},{k:'keys',l:'API Keys',i:I.key},{k:'models',l:'模型配置',i:I.cpu},{k:'logs',l:'请求日志',i:I.log},{k:'settings',l:'设置',i:I.gear}];
-    return{page,token,ti,st,toasts,tf,sv,go,nav,I}
+    return{page,token,ti,st,toasts,tone,tf,sv,go,setTone,hardRefresh,nav,I}
   },
   template:`
-  <div class="layout">
-    <div class="side">
-      <div class="side-brand"><span class="mark">Buddy 2 API</span><span class="ver">v1.2.1</span></div>
-      <div class="side-nav">
-        <div class="nav-grp">
-          <div class="nav-grp-label">概览</div>
-          <div v-for="n in nav.slice(0,1)" :key="n.k" class="nav-item" :class="{on:page===n.k}" @click="go(n.k)" v-html="n.i+'<span>'+n.l+'</span>'"></div>
-        </div>
-        <div class="nav-grp">
-          <div class="nav-grp-label">管理</div>
-          <div v-for="n in nav.slice(1,5)" :key="n.k" class="nav-item" :class="{on:page===n.k}" @click="go(n.k)" v-html="n.i+'<span>'+n.l+'</span>'"></div>
-        </div>
-        <div class="nav-grp">
-          <div class="nav-grp-label">系统</div>
-          <div v-for="n in nav.slice(5)" :key="n.k" class="nav-item" :class="{on:page===n.k}" @click="go(n.k)" v-html="n.i+'<span>'+n.l+'</span>'"></div>
-        </div>
+  <div class="layout" :class="'theme-'+tone">
+    <header class="topbar">
+      <div class="brand-block"><div class="brand-symbol">B2</div><div class="brand-copy"><div class="brand-title">Buddy 2 API</div><div class="brand-meta">Local model gateway · v1.4.0</div></div></div>
+      <nav class="topnav"><div v-for="n in nav" :key="n.k" class="nav-item" :class="{on:page===n.k}" @click="go(n.k)" v-html="n.i+'<span>'+n.l+'</span>'"></div></nav>
+      <div class="top-actions">
+        <button class="refresh-cta" @click="hardRefresh"><span v-html="I.refresh"></span><span>刷新</span></button>
+        <div class="theme-switch" aria-label="界面色调"><button :class="{on:tone==='classic'}" @click="setTone('classic')">经典</button><button :class="{on:tone==='warm'}" @click="setTone('warm')">橙色</button><button :class="{on:tone==='forest'}" @click="setTone('forest')">森林</button></div>
+        <div class="node-pill"><span class="node-dot"></span><span>节点 · 本机 02A</span></div>
+        <button class="token-tool" title="备用 Admin Token" @click="st=true;ti=token"><span v-html="I.gear"></span></button>
       </div>
-      <div class="side-foot"><a @click="st=true;ti=token"><span class="dot"></span>{{token?'备用 Token 已设':'本机自动验证'}}</a></div>
-    </div>
+    </header>
     <div class="main">
       <div class="content" v-if="page==='dashboard'"><dash :token="token" :toast="tf"/></div>
       <div class="content" v-if="page==='accounts'"><accs :token="token" :toast="tf"/></div>
@@ -345,11 +424,18 @@ createApp({
   function age(v){v=Number(v||0);if(v<60)return v+'s';if(v<3600)return Math.floor(v/60)+'m';return Math.floor(v/3600)+'h'}
   function expireMeta(a){if(a.next_expire_days===null||a.next_expire_days===undefined)return '无明确到期';return a.next_expire_days+' 天 · '+(a.next_expire_time||'-')}
   const mx=computed(()=>s.value?.daily?.length?Math.max(...s.value.daily.map(d=>d.requests),1):1);
+  const heatRows=computed(()=>{const d=s.value?.daily||[];return[
+    {name:'调用',kind:'requests',values:d.map(x=>Number(x.requests||0)),max:Math.max(...d.map(x=>Number(x.requests||0)),1)},
+    {name:'Token',kind:'tokens',values:d.map(x=>Number(x.tokens||0)),max:Math.max(...d.map(x=>Number(x.tokens||0)),1)},
+    {name:'Credit',kind:'credit',values:d.map(x=>Number(x.credits||0)),max:Math.max(...d.map(x=>Number(x.credits||0)),1)},
+  ]});
+  function heatStyle(v,max){const r=Math.max(0,Math.min(1,Number(v||0)/Math.max(Number(max||1),1)));if(!v)return{background:'#e8e9e6',color:'#777872'};if(r<.25)return{background:'#fff0ce',color:'#8a5d22'};if(r<.5)return{background:'#ffc98f',color:'#734217'};if(r<.75)return{background:'#ff9855',color:'#592b0e'};if(r<.9)return{background:'#f15f14',color:'#fff'};return{background:'#3f403e',color:'#fff'}}
+  function heatValue(kind,v){return kind==='tokens'?tok(v):(kind==='credit'?money(v):n(v))}
   onMounted(load);
-  return{s,credit,ld,cld,copied,err,updatedAt,load,refreshCredit,n,tok,pct,money,ms,fmt,healthClass,healthText,rateWidth,modelPct,copy,age,expireMeta,mx,I}
+  return{s,credit,ld,cld,copied,err,updatedAt,load,refreshCredit,n,tok,pct,money,ms,fmt,healthClass,healthText,rateWidth,modelPct,copy,age,expireMeta,mx,heatRows,heatStyle,heatValue,I}
 },template:`
 <div>
-  <div class="phead"><h1>Dashboard</h1><p>网关运行状态、今日用量和最近请求</p></div>
+  <div class="phead"><h1>运行总览</h1><p>网关状态、额度和调用强度</p></div>
   <div class="tbar"><button class="btn s" @click="load(false)" :disabled="ld"><span v-html="I.refresh"></span>{{ld?'刷新中':'刷新'}}</button><button class="btn s" @click="refreshCredit" :disabled="cld||ld">{{cld?'刷新中':'强制刷新官方额度'}}</button><div class="spacer"></div><span class="tag" v-if="updatedAt">更新 {{updatedAt}}</span><span class="tag" v-if="s">Base URL · 127.0.0.1:8787/v1</span></div>
   <div v-if="ld" class="load"><div class="spin"></div></div>
   <div class="card card-p empty" v-else-if="err"><div class="em">!</div><p style="font-weight:600;color:var(--fg)">{{err}}</p><p style="margin-top:6px">本机访问通常刷新页面即可重新获取管理凭证。</p></div>
@@ -408,10 +494,14 @@ createApp({
 
     <div class="dash-grid wide">
       <div class="card">
-        <div class="card-h">7 天请求趋势<span class="sub">Requests / Tokens / Credit</span></div>
-        <div class="chart-box" v-if="s.daily?.length"><div class="bars">
-          <div class="bcol" v-for="d in s.daily" :key="d.date"><div class="bwrap"><div class="bar" :style="{height:(d.requests/mx*100)+'%'}"><div class="btip">{{d.requests}} req · {{tok(d.tokens)}} tok · {{money(d.credits)}} cr</div></div></div><div class="blabel">{{d.date.slice(5)}}</div></div>
-        </div></div>
+        <div class="card-h">7 天调用强度<span class="sub">每日请求 · Token · Credit</span></div>
+        <div class="chart-box" v-if="s.daily?.length">
+          <div class="activity-scroll"><div class="activity-map">
+            <div class="activity-corner">指标</div><div class="activity-head" v-for="d in s.daily" :key="'h-'+d.date">{{d.date.slice(5)}}</div>
+            <template v-for="row in heatRows" :key="row.kind"><div class="activity-label">{{row.name}}</div><div class="activity-cell" v-for="(v,i) in row.values" :key="row.kind+'-'+i" :style="heatStyle(v,row.max)"><strong>{{heatValue(row.kind,v)}}</strong></div></template>
+          </div></div>
+          <div class="heat-legend"><span>低</span><span class="heat-swatch" style="background:#fff0ce"></span><span class="heat-swatch" style="background:#ffc98f"></span><span class="heat-swatch" style="background:#ff9855"></span><span class="heat-swatch" style="background:#f15f14"></span><span class="heat-swatch" style="background:#3f403e"></span><span>高</span></div>
+        </div>
         <div class="empty" v-else>暂无趋势数据</div>
       </div>
       <div class="card">
@@ -618,7 +708,7 @@ createApp({
     {k:'nextchat',name:'NextChat',icon:'◉'},
   ];
   const presets={
-    codex:{name:'Codex',autoName:'Codex',configTpl:(key)=>`# ~/.codex/config.toml\nmodel = "auto"\nmodel_provider = "buddy2api"\n\n[model_providers.buddy2api]\nname = "Buddy2api"\nbase_url = "http://127.0.0.1:8787/v1"\nwire_api = "responses"\nenv_key = "OPENAI_API_KEY"\napi_key = "${key}"\n\n# ~/.codex/auth.json\n{"OPENAI_API_KEY":"${key}"}`,note:'Codex 强制 wire_api="responses"，本网关已内置协议转换+内容清洗+模型别名。配置后需完全重启 Codex。',canAutoWrite:true},
+    codex:{name:'Codex',autoName:'Codex',configTpl:(key)=>`# ~/.codex/config.toml\nmodel = "auto"\nmodel_provider = "buddy2api"\n\n[model_providers.buddy2api]\nname = "Buddy2api"\nbase_url = "http://127.0.0.1:8787/v1"\nwire_api = "responses"\nenv_key = "OPENAI_API_KEY"\n\n# ~/.codex/auth.json\n{"OPENAI_API_KEY":"${key}"}`,note:'Codex 强制 wire_api="responses"，本网关已内置协议转换+内容清洗+模型别名。配置后需完全重启 Codex。',canAutoWrite:true},
     opencode:{name:'OpenCode',autoName:'OpenCode',configTpl:(key)=>`# opencode.json\n{\n  "provider": {\n    "workbuddy": {\n      "name": "workbuddy",\n      "npm": "@ai-sdk/openai-compatible",\n      "options": {\n        "baseURL": "http://127.0.0.1:8787/v1",\n        "apiKey": "${key}"\n      },\n      "models": {\n        "auto": { "name": "Auto", "limit": { "context": 200000, "output": 32000 } }\n      }\n    }\n  }\n}`,note:'运行 opencode run -m workbuddy/auto "你好" 测试。',canAutoWrite:false},
     openclaw:{name:'OpenClaw',autoName:'OpenClaw',configTpl:(key)=>`# 环境变量\nexport OPENAI_BASE_URL=http://127.0.0.1:8787/v1\nexport OPENAI_API_KEY=${key}\nexport OPENAI_MODEL=auto`,note:'OpenClaw 通过环境变量配置，写入 shell profile 后 source 即可。',canAutoWrite:false},
     cherry:{name:'Cherry Studio',autoName:'Cherry Studio',configTpl:(key)=>`Base URL: http://127.0.0.1:8787/v1\nAPI Key: ${key}\nModel: auto\n供应商类型: OpenAI Compatible`,note:'Cherry Studio 设置 → 模型服务 → 添加自定义供应商。',canAutoWrite:false},
@@ -779,7 +869,7 @@ createApp({
     sub2api:{name:'sub2api Docker',base:'http://host.docker.internal:8787/v1',model:'auto',note:'sub2api 在 Docker 容器内访问宿主机时使用 host.docker.internal，不要填 localhost。'},
     cherry:{name:'Cherry Studio',base:'http://127.0.0.1:8787/v1',model:'auto',note:'供应商类型选择 OpenAI Compatible，Key 使用 API Keys 页面创建的 sk-cb。'},
     nextchat:{name:'NextChat',base:'http://127.0.0.1:8787/v1',model:'auto',note:'自定义接口地址填写到 /v1，模型填 auto 或模型配置页中的别名。'},
-    generic:{name:'通用 OpenAI Compatible',base:'http://127.0.0.1:8787/v1',model:'auto',note:'仅支持 /v1/chat/completions 和 /v1/models；不要把 /v1/responses 拼到 Base URL 后面。'},
+    generic:{name:'通用 OpenAI Compatible',base:'http://127.0.0.1:8787/v1',model:'auto',note:'支持 /v1/chat/completions、/v1/responses 和 /v1/models；Base URL 填写到 /v1。'},
     curl:{name:'curl',base:'http://127.0.0.1:8787/v1',model:'auto',note:'用于快速验证服务、Key 和模型映射是否正常。'},
   };
   async function load(){ld.value=true;try{const cfg=await api.get('/admin/settings',p.token);s.value={...defaults,...cfg};stats.value=await api.get('/admin/stats',p.token);keysList.value=await api.get('/admin/api-keys',p.token);if(keysList.value.length&&!codexKey.value)codexKey.value=keysList.value[0].name||'';try{codexStatus.value=await api.get('/admin/codex/status',p.token)}catch(e){}}catch(e){p.toast(apiErr(e,'加载失败'),'err')}ld.value=false}
@@ -802,7 +892,7 @@ createApp({
   const currentPreset=computed(()=>presets[setupTab.value]||presets.codex)
   function envBlock(){
     if(setupTab.value==='codex'){
-      return `# ~/.codex/config.toml\nmodel = "auto"\nmodel_provider = "buddy2api"\n\n[model_providers.buddy2api]\nname = "Buddy2api"\nbase_url = "http://127.0.0.1:8787/v1"\nwire_api = "responses"\nenv_key = "OPENAI_API_KEY"\napi_key = "YOUR_SK_CB_KEY"\n\n# ~/.codex/auth.json\n{"OPENAI_API_KEY":"YOUR_SK_CB_KEY"}`
+      return `# ~/.codex/config.toml\nmodel = "auto"\nmodel_provider = "buddy2api"\n\n[model_providers.buddy2api]\nname = "Buddy2api"\nbase_url = "http://127.0.0.1:8787/v1"\nwire_api = "responses"\nenv_key = "OPENAI_API_KEY"\n\n# ~/.codex/auth.json\n{"OPENAI_API_KEY":"YOUR_SK_CB_KEY"}`
     }
     const x=currentPreset.value;return `OPENAI_BASE_URL=${x.base}\nOPENAI_API_KEY=YOUR_SK_CB_KEY\nOPENAI_MODEL=${x.model}`
   }

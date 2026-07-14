@@ -14,7 +14,7 @@ This project is mainly for personal use and testing. Do not deploy publicly, do 
 
 ## Features
 
-- **OpenAI Compatible** - `/v1/chat/completions` and `/v1/models`
+- **OpenAI Compatible** - `/v1/chat/completions`, `/v1/responses`, and `/v1/models`
 - **Streaming Output** - SSE streaming and non-streaming aggregated responses
 - **Auto Import Accounts** - Scans Work Buddy / CodeBuddy auth files on startup
 - **Multi-Account Routing** - Higher priority accounts are used first; accounts at the same priority stay sticky when possible, with automatic failover
@@ -38,7 +38,8 @@ This project is mainly for personal use and testing. Do not deploy publicly, do 
 
 1. Work Buddy / CodeBuddy installed and logged in on this machine.
 2. Logged-in account has available model credits.
-3. Best to run this project and calling clients on the same machine.
+3. Python 3.10 or newer installed, unless you use Docker.
+4. Best to run this project and calling clients on the same machine.
 
 Default Windows scan path:
 
@@ -61,7 +62,7 @@ start.bat
 Or manually:
 
 ```powershell
-pip install fastapi "uvicorn[standard]" httpx
+pip install -r requirements.txt
 python server.py
 ```
 
@@ -70,7 +71,7 @@ For local browser access, the Web UI uses a same-origin HttpOnly admin cookie au
 For remote access or cookie fallback cases, set a fixed admin token:
 
 ```powershell
-$env:CB_GATEWAY_ADMIN_TOKEN="change-this-token"
+$env:CB_GATEWAY_ADMIN_TOKEN="cb-admin-replace-with-a-long-random-value"
 python server.py
 ```
 
@@ -110,10 +111,11 @@ Inside the container it appears as:
 
 So the Web UI "rescan / one-click import" flow can find accounts without manually pasting `.info` files.
 
-If you only want to start the service without mounting the Windows auth directory:
+To start without mounting the Windows auth directory, provide a random admin token first:
 
 ```bash
-docker-compose up -d
+export CB_GATEWAY_ADMIN_TOKEN="cb-admin-replace-with-a-long-random-value"
+docker compose up -d
 ```
 
 Open browser at:
@@ -153,10 +155,11 @@ Currently implemented OpenAI-compatible endpoints:
 
 ```text
 /v1/chat/completions
+/v1/responses
 /v1/models
 ```
 
-If your client lets you choose the API type, select **OpenAI Compatible / Chat Completions**. Clients that are hard-wired to `/v1/responses` are not supported yet.
+Regular clients can use **OpenAI Compatible / Chat Completions**. Codex and other Responses API clients can call `/v1/responses` directly.
 
 If the calling client runs inside Docker, `127.0.0.1` points to the container itself, not the Windows host. In that case the Base URL is usually:
 
@@ -231,13 +234,22 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 |---|---|
 | `CB_GATEWAY_ADMIN_TOKEN` | Fixed admin token |
 | `CB_GATEWAY_DB_PATH` | SQLite database path |
+| `CB_GATEWAY_MASTER_KEY` | Cross-platform credential master key; set a stable value for Docker or migrations |
+| `CB_GATEWAY_CREDENTIAL_KEY_FILE` | Local encryption key file used when no master key is configured |
+| `CB_GATEWAY_LOG_RETENTION_DAYS` | Request-log retention in days, default `90` |
+| `CB_GATEWAY_MAX_BODY_BYTES` | Maximum JSON request size, default `10485760` |
+| `CB_GATEWAY_CORS_ORIGINS` | Comma-separated browser origin allowlist; local origins by default |
+| `CB_GATEWAY_ALLOW_UNAUTHENTICATED_API` | Set to `1` to allow API calls before creating a key; disabled by default |
+| `CB_GATEWAY_SECURE_COOKIE` | Set to `1` to force the Secure flag on the admin cookie |
 | `CB_AUTH_DIR` | Work Buddy / CodeBuddy auth file directory |
 | `CB_HOST_AUTH_DIR` | Host auth directory used by Docker helper scripts |
 | `CB_CONTAINER_AUTH_DIR` | Auth mount directory inside Docker, default `/auth` |
 
 ## Data and Security
 
-- `codebuddy_gateway.db` stores imported account credentials and request logs.
+- Account tokens are encrypted before SQLite writes. Windows uses DPAPI; other platforms use the configured master key or a local `0600` key file.
+- Plaintext credentials in older databases are encrypted automatically on first startup. Set a stable `CB_GATEWAY_MASTER_KEY` before moving databases or containers.
+- Request logs are retained for 90 days by default; adjust `CB_GATEWAY_LOG_RETENTION_DAYS` when needed.
 - API keys are stored as hashes only; full key is never shown again after creation.
 - Do not share your database, auth files, `.lab-agent`, logs, or screenshots.
 - Do not expose the service to public network addresses.

@@ -10,10 +10,13 @@ FastAPI 应用，包含：
 """
 
 import argparse
+import asyncio
 import contextvars
+import json
 import os
 import secrets
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -21,19 +24,46 @@ import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from starlette.concurrency import run_in_threadpool
 
 import database as db
 import auth_manager
 import proxy
 import responses
+from version import VERSION
 
-app = FastAPI(title="Buddy 2 API", version="1.2.1")
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _cors_origins() -> list[str]:
+    value = os.environ.get(
+        "CB_GATEWAY_CORS_ORIGINS",
+        "http://127.0.0.1:8787,http://localhost:8787",
+    )
+    return [origin.strip() for origin in value.split(",") if origin.strip()]
+
+
+app = FastAPI(title="Buddy 2 API", version=VERSION)
+_CORS_ORIGINS = _cors_origins()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials="*" not in _CORS_ORIGINS,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Api-Key"],
 )
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -45,8 +75,31 @@ WEB_DIR = Path(__file__).parent / "web"
 
 ADMIN_TOKEN: str = ""
 ALLOW_NO_ADMIN_AUTH = False
+ALLOW_UNAUTHENTICATED_API = _env_flag("CB_GATEWAY_ALLOW_UNAUTHENTICATED_API", False)
 ADMIN_COOKIE_NAME = "cb_gw_admin_token"
+MAX_BODY_BYTES = max(1024, _env_int("CB_GATEWAY_MAX_BODY_BYTES", 10 * 1024 * 1024))
 _CURRENT_REQUEST: contextvars.ContextVar[Request | None] = contextvars.ContextVar("current_request", default=None)
+
+
+def _atomic_write(path: Path, content: str | bytes, mode: int = 0o600):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            payload = content.encode("utf-8") if isinstance(content, str) else content
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(temporary, mode)
+        except OSError:
+            pass
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 @app.middleware("http")
@@ -74,11 +127,21 @@ def _check_admin(authorization: str | None):
         raise HTTPException(status_code=401, detail="Invalid admin token")
 
 
-def _check_client_auth(authorization: str | None, x_api_key: str | None):
-    """检查客户端 API Key。如果没有配置任何 key 则不校验。"""
+def _check_client_auth(
+    authorization: str | None,
+    x_api_key: str | None,
+    *,
+    consume_quota: bool = True,
+):
+    """Validate a client API key and atomically reserve its daily quota."""
     keys = db.list_api_keys()
     if not keys:
-        return None  # 没有配置任何 key，放行
+        if ALLOW_UNAUTHENTICATED_API:
+            return None
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"message": "No API keys configured", "type": "server_error"}},
+        )
 
     token = ""
     if x_api_key:
@@ -95,14 +158,69 @@ def _check_client_auth(authorization: str | None, x_api_key: str | None):
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key", "type": "invalid_request_error"}})
 
     daily_limit = int(key_info.get("daily_limit") or 0)
-    if daily_limit > 0:
-        used_today = db.get_api_key_daily_requests(key_info["id"])
-        if used_today >= daily_limit:
-            raise HTTPException(
-                status_code=429,
-                detail={"error": {"message": "Daily API key request limit exceeded", "type": "rate_limit_error"}},
-            )
+    if consume_quota and not db.reserve_api_key_request(key_info["id"], daily_limit):
+        raise HTTPException(
+            status_code=429,
+            detail={"error": {"message": "Daily API key request limit exceeded", "type": "rate_limit_error"}},
+        )
     return key_info
+
+
+def _reserve_client_quota(key_info: dict | None):
+    if not key_info:
+        return
+    daily_limit = int(key_info.get("daily_limit") or 0)
+    if not db.reserve_api_key_request(key_info["id"], daily_limit):
+        raise HTTPException(
+            status_code=429,
+            detail={"error": {"message": "Daily API key request limit exceeded", "type": "rate_limit_error"}},
+        )
+
+
+def _check_model_access(api_key_info: dict | None, payload: dict):
+    if not api_key_info or not api_key_info.get("allowed_models"):
+        return
+    raw_model = payload.get("model", "auto")
+    resolved_model = proxy.resolve_model_alias(raw_model)
+    if raw_model not in api_key_info["allowed_models"] and resolved_model not in api_key_info["allowed_models"]:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": {"message": f"Model '{raw_model}' not allowed for this API key", "type": "invalid_request_error"}},
+        )
+
+
+async def _read_json(request: Request, *, allow_empty: bool = False):
+    chunks = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > MAX_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="Request body is too large")
+        chunks.append(chunk)
+    raw = b"".join(chunks)
+    if not raw and allow_empty:
+        return {}
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="Request body must be valid JSON")
+
+
+async def _read_json_object(request: Request, *, allow_empty: bool = False) -> dict:
+    data = await _read_json(request, allow_empty=allow_empty)
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+    return data
+
+
+async def _gather_limited(accounts: list[dict], operation, limit: int = 4) -> list[dict]:
+    semaphore = asyncio.Semaphore(max(1, limit))
+
+    async def run(account: dict):
+        async with semaphore:
+            return await operation(account)
+
+    return list(await asyncio.gather(*(run(account) for account in accounts)))
 
 
 # ============================================================
@@ -112,18 +230,24 @@ def _check_client_auth(authorization: str | None, x_api_key: str | None):
 @app.get("/health")
 async def health():
     accounts = db.list_accounts()
-    active = [a for a in accounts if a.get("status") == "active"]
-    statuses = auth_manager.check_all_accounts()
+    keys = db.list_api_keys()
     return {
         "status": "ok",
+        "version": VERSION,
         "accounts": len(accounts),
-        "active_accounts": len(active),
-        "account_statuses": statuses,
+        "active_accounts": sum(1 for account in accounts if account.get("status") == "active"),
+        "active_keys": sum(1 for key in keys if key.get("status") == "active"),
     }
 
 
 @app.get("/v1/models")
-async def list_models():
+async def list_models(
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+):
+    await run_in_threadpool(
+        lambda: _check_client_auth(authorization, x_api_key, consume_quota=False)
+    )
     models = db.get_setting("models", proxy.DEFAULT_MODELS)
     return {
         "object": "list",
@@ -140,27 +264,22 @@ async def chat_completions(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
 ):
-    api_key_info = _check_client_auth(authorization, x_api_key)
-
-    try:
-        payload = await request.json()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail={"error": {"message": f"bad json: {e}", "type": "invalid_request_error"}})
+    api_key_info = await run_in_threadpool(
+        lambda: _check_client_auth(authorization, x_api_key, consume_quota=False)
+    )
+    payload = await _read_json_object(request)
 
     messages = payload.get("messages") or []
-    if not messages:
+    if not isinstance(messages, list) or not messages or not all(isinstance(message, dict) for message in messages):
         raise HTTPException(status_code=400, detail={"error": {"message": "messages is required", "type": "invalid_request_error"}})
-
+    if "model" in payload and not isinstance(payload["model"], str):
+        raise HTTPException(status_code=400, detail={"error": {"message": "model must be a string", "type": "invalid_request_error"}})
     # Codex 类型 Key：自动应用内容清洗 + 工具过滤
     if api_key_info and api_key_info.get("client_type") == "codex":
         payload = responses.apply_codex_sanitize(payload)
 
-    # 检查 API Key 模型权限（同时匹配别名和真实模型 ID）
-    if api_key_info and api_key_info.get("allowed_models"):
-        raw_model = payload.get("model", "auto")
-        resolved_model = proxy.resolve_model_alias(raw_model)
-        if raw_model not in api_key_info["allowed_models"] and resolved_model not in api_key_info["allowed_models"]:
-            raise HTTPException(status_code=403, detail={"error": {"message": f"Model '{raw_model}' not allowed for this API key", "type": "invalid_request_error"}})
+    _check_model_access(api_key_info, payload)
+    await run_in_threadpool(_reserve_client_quota, api_key_info)
 
     result = await proxy.proxy_chat_completions(payload, api_key_info)
 
@@ -184,12 +303,19 @@ async def resp_responses(
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
 ):
     """OpenAI Responses API 兼容端点（Codex wire_api="responses" 支持）。"""
-    api_key_info = _check_client_auth(authorization, x_api_key)
-
-    try:
-        payload = await request.json()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail={"error": {"message": f"bad json: {e}", "type": "invalid_request_error"}})
+    api_key_info = await run_in_threadpool(
+        lambda: _check_client_auth(authorization, x_api_key, consume_quota=False)
+    )
+    payload = await _read_json_object(request)
+    if "input" not in payload:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"message": "input is required", "type": "invalid_request_error"}},
+        )
+    if "model" in payload and not isinstance(payload["model"], str):
+        raise HTTPException(status_code=400, detail={"error": {"message": "model must be a string", "type": "invalid_request_error"}})
+    _check_model_access(api_key_info, payload)
+    await run_in_threadpool(_reserve_client_quota, api_key_info)
 
     try:
         result = await responses.proxy_responses(payload, api_key_info)
@@ -230,9 +356,10 @@ async def admin_credit_summary(
     _check_admin(authorization)
     accounts = db.list_accounts()
     active_accounts = [a for a in accounts if a.get("status") == "active"]
-    resources = []
-    for account in active_accounts:
-        resources.append(auth_manager.fetch_account_resources(account, force=bool(force)))
+    resources = await _gather_limited(
+        active_accounts,
+        lambda account: auth_manager.fetch_account_resources(account, force=bool(force)),
+    )
 
     ok_resources = [r for r in resources if r.get("ok")]
     total_balance = round(sum(float(r.get("total_dosage") or r.get("available_total") or 0) for r in ok_resources), 4)
@@ -308,7 +435,7 @@ async def admin_discover_accounts(
     authorization: str | None = Header(default=None),
 ):
     _check_admin(authorization)
-    return auth_manager.discover_auth_files(auth_dir)
+    return await run_in_threadpool(auth_manager.discover_auth_files, auth_dir)
 
 
 @app.post("/admin/accounts/scan")
@@ -317,12 +444,9 @@ async def admin_scan_accounts(
     authorization: str | None = Header(default=None),
 ):
     _check_admin(authorization)
-    try:
-        data = await request.json()
-    except Exception:
-        data = {}
+    data = await _read_json_object(request, allow_empty=True)
     auth_dir = data.get("auth_dir") if isinstance(data, dict) else None
-    return auth_manager.auto_scan_and_import(auth_dir)
+    return await run_in_threadpool(auth_manager.auto_scan_and_import, auth_dir)
 
 
 @app.post("/admin/accounts")
@@ -331,10 +455,12 @@ async def admin_add_account(
     authorization: str | None = Header(default=None),
 ):
     _check_admin(authorization)
-    data = await request.json()
+    data = await _read_json_object(request)
     # 直接粘贴 auth JSON
     auth_data = data.get("auth", {})
     account_data = data.get("account", {})
+    if not isinstance(auth_data, dict) or not isinstance(account_data, dict):
+        raise HTTPException(status_code=400, detail="auth and account must be JSON objects")
     parsed = {
         "name": account_data.get("nickname", data.get("name", "")),
         "uid": account_data.get("uid", ""),
@@ -362,7 +488,7 @@ async def admin_update_account(
     authorization: str | None = Header(default=None),
 ):
     _check_admin(authorization)
-    data = await request.json()
+    data = await _read_json_object(request)
     allowed = {"name", "status", "weight", "priority", "credit_limit", "credit_baseline"}
     update_data = {k: data[k] for k in allowed if k in data}
     if "status" in update_data and update_data["status"] not in {"active", "inactive", "expired"}:
@@ -372,6 +498,14 @@ async def admin_update_account(
         if not account:
             raise HTTPException(status_code=404, detail="Account not found")
         update_data["credit_baseline"] = float(account.get("total_credits") or 0)
+    for field in ("weight", "priority", "credit_limit", "credit_baseline"):
+        if field in update_data:
+            try:
+                update_data[field] = float(update_data[field]) if field.startswith("credit_") else int(update_data[field])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail=f"{field} must be numeric")
+    if "weight" in update_data and update_data["weight"] < 1:
+        raise HTTPException(status_code=400, detail="weight must be at least 1")
     db.update_account(aid, update_data)
     return {"status": "ok"}
 
@@ -395,7 +529,7 @@ async def admin_refresh_account(
     account = db.get_account(aid)
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
-    ok = auth_manager.refresh_token(account)
+    ok = await auth_manager.refresh_token(account)
     return {"status": "ok" if ok else "failed"}
 
 
@@ -409,10 +543,7 @@ async def admin_test_account(
     account = db.get_account(aid)
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
-    try:
-        data = await request.json()
-    except Exception:
-        data = {}
+    data = await _read_json_object(request, allow_empty=True)
     model = data.get("model") if isinstance(data, dict) else None
     prompt = data.get("prompt") if isinstance(data, dict) else None
     return await proxy.test_account_chat(account, model or "auto", prompt or "ping")
@@ -428,7 +559,7 @@ async def admin_account_resources(
     account = db.get_account(aid)
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
-    return auth_manager.fetch_account_resources(account, force=bool(force))
+    return await auth_manager.fetch_account_resources(account, force=bool(force))
 
 
 @app.get("/admin/accounts/{aid}/checkin")
@@ -441,7 +572,7 @@ async def admin_checkin_status(
     account = db.get_account(aid)
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
-    return auth_manager.fetch_checkin_status(account, force=bool(force))
+    return await auth_manager.fetch_checkin_status(account, force=bool(force))
 
 
 @app.get("/admin/accounts/checkin-status-all")
@@ -451,10 +582,10 @@ async def admin_checkin_status_all(
 ):
     _check_admin(authorization)
     accounts = [a for a in db.list_accounts() if a.get("status") == "active"]
-    results = [
-        auth_manager.fetch_checkin_status(account, force=bool(force))
-        for account in accounts
-    ]
+    results = await _gather_limited(
+        accounts,
+        lambda account: auth_manager.fetch_checkin_status(account, force=bool(force)),
+    )
     return {
         "total": len(results),
         "ok": sum(1 for r in results if r.get("ok")),
@@ -476,9 +607,9 @@ async def admin_claim_checkin(
     account = db.get_account(aid)
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
-    result = auth_manager.claim_daily_checkin(account)
+    result = await auth_manager.claim_daily_checkin(account)
     if result.get("ok"):
-        result["resources"] = auth_manager.fetch_account_resources(account)
+        result["resources"] = await auth_manager.fetch_account_resources(account, force=True)
     return result
 
 
@@ -486,12 +617,13 @@ async def admin_claim_checkin(
 async def admin_claim_all_checkin(authorization: str | None = Header(default=None)):
     _check_admin(authorization)
     accounts = [a for a in db.list_accounts() if a.get("status") == "active"]
-    results = []
-    for account in accounts:
-        result = auth_manager.claim_daily_checkin(account)
+    async def claim(account: dict):
+        result = await auth_manager.claim_daily_checkin(account)
         if result.get("ok"):
-            result["resources"] = auth_manager.fetch_account_resources(account)
-        results.append(result)
+            result["resources"] = await auth_manager.fetch_account_resources(account, force=True)
+        return result
+
+    results = await _gather_limited(accounts, claim)
     return {
         "total": len(results),
         "claimed": sum(1 for r in results if r.get("claimed")),
@@ -516,11 +648,20 @@ async def admin_create_key(
     authorization: str | None = Header(default=None),
 ):
     _check_admin(authorization)
-    data = await request.json()
-    name = data.get("name", "")
+    data = await _read_json_object(request)
+    name = str(data.get("name", "")).strip()[:120]
     allowed = data.get("allowed_models")
-    daily_limit = data.get("daily_limit")
+    if allowed is not None and (
+        not isinstance(allowed, list) or not all(isinstance(model, str) for model in allowed)
+    ):
+        raise HTTPException(status_code=400, detail="allowed_models must be an array of strings")
+    try:
+        daily_limit = max(0, int(data.get("daily_limit") or 0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="daily_limit must be a non-negative integer")
     client_type = data.get("client_type", "custom")
+    if client_type not in {"custom", "codex"}:
+        raise HTTPException(status_code=400, detail="Invalid client_type")
     # 生成 sk- 前缀的 key
     key = f"sk-cb-{secrets.token_urlsafe(32)}"
     kid = db.add_api_key(key, name, allowed, daily_limit, client_type)
@@ -534,7 +675,21 @@ async def admin_update_key(
     authorization: str | None = Header(default=None),
 ):
     _check_admin(authorization)
-    data = await request.json()
+    data = await _read_json_object(request)
+    if "daily_limit" in data:
+        try:
+            data["daily_limit"] = max(0, int(data["daily_limit"] or 0))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="daily_limit must be a non-negative integer")
+    if "status" in data and data["status"] not in {"active", "inactive"}:
+        raise HTTPException(status_code=400, detail="Invalid API key status")
+    if "client_type" in data and data["client_type"] not in {"custom", "codex"}:
+        raise HTTPException(status_code=400, detail="Invalid client_type")
+    if "allowed_models" in data and (
+        data["allowed_models"] is not None
+        and (not isinstance(data["allowed_models"], list) or not all(isinstance(model, str) for model in data["allowed_models"]))
+    ):
+        raise HTTPException(status_code=400, detail="allowed_models must be an array of strings")
     db.update_api_key(kid, data)
     return {"status": "ok"}
 
@@ -558,7 +713,7 @@ async def admin_logs(
     authorization: str | None = Header(default=None),
 ):
     _check_admin(authorization)
-    return db.list_logs(limit, offset)
+    return db.list_logs(max(1, min(500, limit)), max(0, offset))
 
 
 @app.get("/admin/logs/search")
@@ -573,6 +728,10 @@ async def admin_logs_search(
     authorization: str | None = Header(default=None),
 ):
     _check_admin(authorization)
+    if account_id not in (None, "", "all") and not str(account_id).isdigit():
+        raise HTTPException(status_code=400, detail="account_id must be numeric")
+    if api_key_id not in (None, "", "all") and not str(api_key_id).isdigit():
+        raise HTTPException(status_code=400, detail="api_key_id must be numeric")
     return db.search_logs({
         "q": q or "",
         "status": status,
@@ -598,7 +757,21 @@ async def admin_update_settings(
     authorization: str | None = Header(default=None),
 ):
     _check_admin(authorization)
-    data = await request.json()
+    data = await _read_json_object(request)
+    allowed_settings = {"backend_url", "default_domain", "timeout"}
+    unknown = set(data) - allowed_settings
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unsupported settings: {', '.join(sorted(unknown))}")
+    if "timeout" in data:
+        try:
+            data["timeout"] = max(5, min(600, int(data["timeout"])))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="timeout must be an integer between 5 and 600")
+    if "backend_url" in data:
+        backend_url = str(data["backend_url"]).strip().rstrip("/")
+        if not backend_url.startswith("https://"):
+            raise HTTPException(status_code=400, detail="backend_url must use HTTPS")
+        data["backend_url"] = backend_url
     for k, v in data.items():
         db.set_setting(k, v)
     return {"status": "ok"}
@@ -618,7 +791,12 @@ async def admin_update_models(
     authorization: str | None = Header(default=None),
 ):
     _check_admin(authorization)
-    data = await request.json()
+    data = await _read_json(request)
+    if not isinstance(data, list) or not all(
+        isinstance(model, dict) and isinstance(model.get("id"), str) and model.get("id")
+        for model in data
+    ):
+        raise HTTPException(status_code=400, detail="Models must be an array of objects with an id")
     db.set_setting("models", data)
     return {"status": "ok"}
 
@@ -632,9 +810,9 @@ async def admin_codex_setup(
 ):
     """一键配置 Codex：写入 config.toml 和 auth.json。"""
     _check_admin(authorization)
-    data = await request.json()
-    api_key = data.get("api_key", "")
-    if not api_key:
+    data = await _read_json_object(request)
+    api_key = str(data.get("api_key", "")).strip()
+    if not api_key.startswith("sk-cb-") or len(api_key) > 256:
         raise HTTPException(status_code=400, detail="api_key is required")
 
     codex_dir = Path.home() / ".codex"
@@ -648,7 +826,7 @@ async def admin_codex_setup(
     for p in [config_path, auth_path]:
         if p.exists():
             bak = p.with_suffix(p.suffix + ".bak")
-            bak.write_bytes(p.read_bytes())
+            _atomic_write(bak, p.read_bytes())
             results["backed_up"].append(str(bak))
 
     # 读取现有 config.toml，保留 marketplaces 等非冲突段
@@ -688,32 +866,22 @@ name = "Buddy2api"
 base_url = "http://127.0.0.1:8787/v1"
 wire_api = "responses"
 env_key = "OPENAI_API_KEY"
-api_key = "{api_key}"
 
 '''
     # 保留原有内容（去掉了旧 model 配置）
     preserved = "\n".join(new_lines).strip()
     final_config = codex_config + ("\n" + preserved if preserved else "")
-    config_path.write_text(final_config, encoding="utf-8")
+    _atomic_write(config_path, final_config)
     results["written"].append(str(config_path))
 
     # 写 auth.json
     import json as _json
     auth_content = _json.dumps({"OPENAI_API_KEY": api_key}, indent=2)
-    auth_path.write_text(auth_content, encoding="utf-8")
+    _atomic_write(auth_path, auth_content)
     results["written"].append(str(auth_path))
 
-    # 同时设置环境变量（当前进程 + 用户级）
+    # 当前进程保留变量；持久化凭据只写入权限受限的 auth.json。
     os.environ["OPENAI_API_KEY"] = api_key
-    try:
-        if sys.platform == "win32":
-            import subprocess
-            subprocess.run(
-                ["setx", "OPENAI_API_KEY", api_key],
-                capture_output=True, timeout=5
-            )
-    except Exception:
-        pass
 
     results["status"] = "ok"
     results["message"] = "Codex 配置已写入。请完全关闭 Codex 后重新打开。"
@@ -773,7 +941,9 @@ async def admin_update_aliases(
     authorization: str | None = Header(default=None),
 ):
     _check_admin(authorization)
-    data = await request.json()
+    data = await _read_json_object(request)
+    if not all(isinstance(key, str) and isinstance(value, str) for key, value in data.items()):
+        raise HTTPException(status_code=400, detail="Aliases must map string names to string model IDs")
     # Only store user-defined aliases (not built-in ones)
     user_aliases = {k: v for k, v in data.items() if k not in proxy._BUILTIN_ALIASES}
     db.set_setting("model_aliases", user_aliases)
@@ -785,7 +955,7 @@ async def admin_update_aliases(
 # ============================================================
 
 @app.get("/")
-async def index():
+async def index(request: Request):
     response = FileResponse(str(WEB_DIR / "index.html"))
     if ADMIN_TOKEN and not ALLOW_NO_ADMIN_AUTH:
         response.set_cookie(
@@ -793,6 +963,7 @@ async def index():
             ADMIN_TOKEN,
             httponly=True,
             samesite="lax",
+            secure=request.url.scheme == "https" or _env_flag("CB_GATEWAY_SECURE_COOKIE"),
             max_age=30 * 24 * 3600,
         )
     return response
@@ -816,6 +987,9 @@ def main():
                     help="Log level")
     args = ap.parse_args()
 
+    if args.no_admin_auth and args.host not in {"127.0.0.1", "localhost", "::1"}:
+        ap.error("--no-admin-auth can only be used with a loopback host")
+
     ALLOW_NO_ADMIN_AUTH = args.no_admin_auth
     ADMIN_TOKEN = "" if ALLOW_NO_ADMIN_AUTH else (args.admin_token or f"cb-admin-{secrets.token_urlsafe(24)}")
 
@@ -828,13 +1002,13 @@ def main():
 
     accounts = db.list_accounts()
     sys.stderr.write(f"\n")
-    sys.stderr.write(f"  Buddy 2 API v1.2.1\n")
+    sys.stderr.write(f"  Buddy 2 API v{VERSION}\n")
     sys.stderr.write(f"  ========================\n")
     sys.stderr.write(f"  监听: http://{args.host}:{args.port}\n")
     sys.stderr.write(f"  账号: {len(accounts)} 个 ({sum(1 for a in accounts if a['status']=='active')} active)\n")
     sys.stderr.write(f"  Admin: {'no auth' if ALLOW_NO_ADMIN_AUTH else 'enabled'}\n")
     if ADMIN_TOKEN:
-        sys.stderr.write(f"  Admin Token: {ADMIN_TOKEN}\n")
+        sys.stderr.write("  Admin Token: configured (hidden)\n")
     sys.stderr.write(f"  ========================\n\n")
 
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)

@@ -14,12 +14,16 @@ import sqlite3
 import threading
 import time
 import os
+from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
+import credential_crypto
+
 DB_PATH = Path(os.environ.get("CB_GATEWAY_DB_PATH", Path(__file__).parent / "codebuddy_gateway.db"))
 _lock = threading.Lock()
+_CREDENTIAL_FIELDS = ("access_token", "refresh_token", "session_state")
 
 
 def _hash_api_key(key: str) -> str:
@@ -50,17 +54,42 @@ def _load_allowed_models(value: Any) -> Optional[list]:
 
 def get_conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, timeout=5)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
+@contextmanager
+def connection():
+    conn = get_conn()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def _protect_account_data(data: dict) -> dict:
+    protected = dict(data)
+    for field in _CREDENTIAL_FIELDS:
+        if field in protected:
+            protected[field] = credential_crypto.encrypt_secret(protected.get(field), DB_PATH)
+    return protected
+
+
+def _account_dict(row: sqlite3.Row) -> dict:
+    account = dict(row)
+    for field in _CREDENTIAL_FIELDS:
+        if field in account:
+            account[field] = credential_crypto.decrypt_secret(account.get(field), DB_PATH)
+    return account
+
+
 def init_db():
     with _lock:
         conn = get_conn()
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS accounts (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,12 +175,27 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at);
         CREATE INDEX IF NOT EXISTS idx_logs_api_key ON logs(api_key_id);
         CREATE INDEX IF NOT EXISTS idx_logs_account ON logs(account_id);
+        CREATE INDEX IF NOT EXISTS idx_logs_model ON logs(model);
+        CREATE INDEX IF NOT EXISTS idx_logs_status ON logs(status_code, finish_reason);
         CREATE INDEX IF NOT EXISTS idx_resource_cache_updated ON account_resource_cache(updated_at);
         CREATE INDEX IF NOT EXISTS idx_checkin_cache_date ON account_checkin_cache(checkin_date);
         """)
         _migrate_accounts(conn)
         _migrate_api_keys(conn)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS api_key_daily_usage (
+                api_key_id    INTEGER NOT NULL,
+                usage_date    TEXT NOT NULL,
+                request_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(api_key_id, usage_date),
+                FOREIGN KEY(api_key_id) REFERENCES api_keys(id) ON DELETE CASCADE
+            )
+        """)
+        _migrate_account_credentials(conn)
+        _migrate_daily_usage(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash)")
+        _prune_logs(conn)
+        conn.execute("PRAGMA optimize")
         conn.commit()
         conn.close()
 
@@ -233,11 +277,56 @@ def _migrate_api_keys(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE api_keys ADD COLUMN client_type TEXT DEFAULT 'custom'")
 
 
+def _migrate_account_credentials(conn: sqlite3.Connection):
+    rows = conn.execute(
+        "SELECT id, access_token, refresh_token, session_state FROM accounts"
+    ).fetchall()
+    for row in rows:
+        updates = {}
+        for field in _CREDENTIAL_FIELDS:
+            value = row[field]
+            if value and not credential_crypto.is_encrypted(value):
+                updates[field] = credential_crypto.encrypt_secret(value, DB_PATH)
+        if updates:
+            fields = ", ".join(f"{field}=?" for field in updates)
+            conn.execute(
+                f"UPDATE accounts SET {fields} WHERE id=?",
+                [*updates.values(), row["id"]],
+            )
+
+
+def _migrate_daily_usage(conn: sqlite3.Connection):
+    conn.execute(
+        """
+        INSERT INTO api_key_daily_usage (api_key_id, usage_date, request_count)
+        SELECT api_key_id, date(created_at, 'unixepoch', 'localtime'), COUNT(*)
+        FROM logs
+        WHERE api_key_id IS NOT NULL AND created_at >= ?
+        GROUP BY api_key_id, date(created_at, 'unixepoch', 'localtime')
+        ON CONFLICT(api_key_id, usage_date) DO UPDATE SET
+            request_count=MAX(api_key_daily_usage.request_count, excluded.request_count)
+        """,
+        (_today_start_ts(),),
+    )
+
+
+def _prune_logs(conn: sqlite3.Connection):
+    try:
+        retention_days = max(1, int(os.environ.get("CB_GATEWAY_LOG_RETENTION_DAYS", "90")))
+    except ValueError:
+        retention_days = 90
+    cutoff_ts = int(time.time()) - retention_days * 86400
+    cutoff_date = (date.today() - timedelta(days=retention_days)).isoformat()
+    conn.execute("DELETE FROM logs WHERE created_at < ?", (cutoff_ts,))
+    conn.execute("DELETE FROM api_key_daily_usage WHERE usage_date < ?", (cutoff_date,))
+
+
 # ============================================================
 # Accounts
 # ============================================================
 
 def add_account(data: dict) -> int:
+    data = _protect_account_data(data)
     now = int(time.time())
     weight = max(1, int(data.get("weight", 1) or 1))
     priority = int(data.get("priority", 0) or 0)
@@ -278,6 +367,7 @@ def add_account(data: dict) -> int:
 
 
 def update_account(aid: int, data: dict):
+    data = _protect_account_data(data)
     now = int(time.time())
     fields = []
     values = []
@@ -320,14 +410,14 @@ def get_account(aid: int) -> Optional[dict]:
     conn = get_conn()
     row = conn.execute("SELECT * FROM accounts WHERE id=?", (aid,)).fetchone()
     conn.close()
-    return dict(row) if row else None
+    return _account_dict(row) if row else None
 
 
 def list_accounts() -> list[dict]:
     conn = get_conn()
     rows = conn.execute("SELECT * FROM accounts ORDER BY id").fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    return [_account_dict(r) for r in rows]
 
 
 def get_active_accounts() -> list[dict]:
@@ -343,7 +433,7 @@ def get_active_accounts() -> list[dict]:
         """
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    return [_account_dict(r) for r in rows]
 
 
 def account_increment_usage(aid: int, tokens: int, credit: float):
@@ -518,7 +608,16 @@ def get_api_key_by_key(key: str) -> Optional[dict]:
 
 def list_api_keys() -> list[dict]:
     conn = get_conn()
-    rows = conn.execute("SELECT * FROM api_keys ORDER BY id DESC").fetchall()
+    rows = conn.execute(
+        """
+        SELECT k.*, COALESCE(u.request_count, 0) AS today_requests
+        FROM api_keys AS k
+        LEFT JOIN api_key_daily_usage AS u
+          ON u.api_key_id=k.id AND u.usage_date=?
+        ORDER BY k.id DESC
+        """,
+        (date.today().isoformat(),),
+    ).fetchall()
     conn.close()
     result = []
     for r in rows:
@@ -526,7 +625,6 @@ def list_api_keys() -> list[dict]:
         d.pop("key_hash", None)
         d.pop("key", None)
         d["allowed_models"] = _load_allowed_models(d.get("allowed_models"))
-        d["today_requests"] = get_api_key_daily_requests(d["id"])
         result.append(d)
     return result
 
@@ -534,11 +632,38 @@ def list_api_keys() -> list[dict]:
 def get_api_key_daily_requests(kid: int) -> int:
     conn = get_conn()
     row = conn.execute(
-        "SELECT COUNT(*) AS c FROM logs WHERE api_key_id=? AND created_at>=?",
-        (kid, _today_start_ts()),
+        "SELECT request_count AS c FROM api_key_daily_usage WHERE api_key_id=? AND usage_date=?",
+        (kid, date.today().isoformat()),
     ).fetchone()
     conn.close()
     return int(row["c"] if row else 0)
+
+
+def reserve_api_key_request(kid: int, daily_limit: int) -> bool:
+    """Atomically reserve one daily request slot for an API key."""
+    today = date.today().isoformat()
+    with _lock:
+        with connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT request_count FROM api_key_daily_usage WHERE api_key_id=? AND usage_date=?",
+                (kid, today),
+            ).fetchone()
+            current = int(row["request_count"] if row else 0)
+            if daily_limit > 0 and current >= daily_limit:
+                conn.rollback()
+                return False
+            conn.execute(
+                """
+                INSERT INTO api_key_daily_usage (api_key_id, usage_date, request_count)
+                VALUES (?, ?, 1)
+                ON CONFLICT(api_key_id, usage_date) DO UPDATE SET
+                    request_count=request_count + 1
+                """,
+                (kid, today),
+            )
+            conn.commit()
+            return True
 
 
 def api_key_increment_usage(kid: int, tokens: int):
@@ -582,6 +707,77 @@ def add_log(data: dict):
         ))
         conn.commit()
         conn.close()
+
+
+def record_request(data: dict):
+    """Write a request log and update account/key counters in one transaction."""
+    now = int(time.time())
+    with _lock:
+        with connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO logs
+                    (api_key_id, api_key_name, account_id, account_name, model, stream,
+                     prompt_tokens, completion_tokens, total_tokens, credit,
+                     finish_reason, duration_ms, status_code, error_msg, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    data.get("api_key_id"), data.get("api_key_name"),
+                    data.get("account_id"), data.get("account_name"),
+                    data.get("model", ""), data.get("stream", 0),
+                    data.get("prompt_tokens", 0), data.get("completion_tokens", 0),
+                    data.get("total_tokens", 0), data.get("credit", 0),
+                    data.get("finish_reason", ""), data.get("duration_ms", 0),
+                    data.get("status_code", 200), data.get("error_msg", ""), now,
+                ),
+            )
+            if data.get("account_id") and data.get("increment_usage", True):
+                conn.execute(
+                    """
+                    UPDATE accounts SET
+                        total_requests=total_requests + 1,
+                        total_tokens=total_tokens + ?,
+                        total_credits=total_credits + ?,
+                        last_used_at=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        data.get("total_tokens", 0), data.get("credit", 0),
+                        now, now, data["account_id"],
+                    ),
+                )
+            if data.get("api_key_id") and data.get("increment_usage", True):
+                conn.execute(
+                    """
+                    UPDATE api_keys SET
+                        total_requests=total_requests + 1,
+                        total_tokens=total_tokens + ?,
+                        last_used_at=?
+                    WHERE id=?
+                    """,
+                    (data.get("total_tokens", 0), now, data["api_key_id"]),
+                )
+            conn.commit()
+
+
+def prune_logs(retention_days: int | None = None) -> int:
+    """Delete expired request logs and return the number of removed rows."""
+    if retention_days is None:
+        try:
+            retention_days = int(os.environ.get("CB_GATEWAY_LOG_RETENTION_DAYS", "90"))
+        except ValueError:
+            retention_days = 90
+    retention_days = max(1, retention_days)
+    cutoff_ts = int(time.time()) - retention_days * 86400
+    cutoff_date = (date.today() - timedelta(days=retention_days)).isoformat()
+    with _lock:
+        with connection() as conn:
+            cursor = conn.execute("DELETE FROM logs WHERE created_at < ?", (cutoff_ts,))
+            conn.execute("DELETE FROM api_key_daily_usage WHERE usage_date < ?", (cutoff_date,))
+            conn.commit()
+            return max(0, cursor.rowcount)
 
 
 def list_logs(limit: int = 100, offset: int = 0) -> list[dict]:

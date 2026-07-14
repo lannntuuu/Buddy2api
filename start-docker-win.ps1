@@ -2,6 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ProjectRoot
+New-Item -ItemType Directory -Force -Path (Join-Path $ProjectRoot "data") | Out-Null
 
 function Convert-ToDockerPath {
     param([Parameter(Mandatory=$true)][string]$Path)
@@ -34,7 +35,8 @@ $dockerAuthDir = Convert-ToDockerPath $authDir
 $env:CB_HOST_AUTH_DIR = $dockerAuthDir
 
 if (-not $env:CB_GATEWAY_ADMIN_TOKEN) {
-    $env:CB_GATEWAY_ADMIN_TOKEN = "change-this-token"
+    $env:CB_GATEWAY_ADMIN_TOKEN = "cb-admin-$([guid]::NewGuid().ToString('N'))"
+    Write-Host "  [security] Generated a temporary admin token for this session." -ForegroundColor Green
 }
 
 Write-Host "  [auth] $authDir"

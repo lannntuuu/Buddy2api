@@ -2,6 +2,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
+mkdir -p data
 
 echo ""
 echo "  ========================================"
@@ -36,7 +37,11 @@ if [ -z "$auth_dir" ] || [ ! -d "$auth_dir" ]; then
 fi
 
 export CB_HOST_AUTH_DIR="$auth_dir"
-export CB_GATEWAY_ADMIN_TOKEN="${CB_GATEWAY_ADMIN_TOKEN:-change-this-token}"
+if [ -z "${CB_GATEWAY_ADMIN_TOKEN:-}" ]; then
+    CB_GATEWAY_ADMIN_TOKEN="cb-admin-$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
+    export CB_GATEWAY_ADMIN_TOKEN
+    echo "  [安全] 已为本次会话生成随机管理 Token。"
+fi
 
 echo "  [auth] $auth_dir"
 echo "  [挂载] $auth_dir -> /auth:ro"

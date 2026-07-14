@@ -10,6 +10,7 @@ proxy.py — 请求代理转发
   - 账号故障自动切换
 """
 
+import asyncio
 import json
 import os
 import time
@@ -21,6 +22,7 @@ import database as db
 import auth_manager
 
 BACKEND = "https://copilot.tencent.com"
+RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 
 # 腾讯内容审核拦截时返回的固定话术特征（HTTP 200 + 正文是这段话）
 _AUDIT_PHRASES = (
@@ -38,6 +40,14 @@ def _looks_like_audit_block(text: str) -> bool:
     if not text:
         return False
     return any(p in text for p in _AUDIT_PHRASES)
+
+
+def _is_retryable_status(status: int) -> bool:
+    return status in RETRYABLE_STATUS_CODES or status in {401, 403}
+
+
+async def _retry_delay(attempt: int):
+    await asyncio.sleep(min(2.0, 0.25 * (2 ** attempt)))
 
 PASSTHROUGH_BODY_KEYS = {
     "model", "messages", "tools", "tool_choice", "temperature",
@@ -144,8 +154,9 @@ def _err_sse_event(raw: bytes, status: int) -> bytes:
 
 
 def _log_request(api_key_info, account, model_name, stream,
-                 prompt_t, completion_t, total_t, credit,
-                 finish_reason, status_code, error_msg, t0):
+                  prompt_t, completion_t, total_t, credit,
+                  finish_reason, status_code, error_msg, t0,
+                  increment_usage: bool = True):
     elapsed_ms = int((time.time() - t0) * 1000)
     log_data = {
         "api_key_id": api_key_info["id"] if api_key_info else None,
@@ -162,21 +173,12 @@ def _log_request(api_key_info, account, model_name, stream,
         "duration_ms": elapsed_ms,
         "status_code": status_code,
         "error_msg": error_msg,
+        "increment_usage": increment_usage,
     }
     try:
-        db.add_log(log_data)
+        db.record_request(log_data)
     except Exception:
         pass
-    if account:
-        try:
-            db.account_increment_usage(account["id"], total_t, credit)
-        except Exception:
-            pass
-    if api_key_info:
-        try:
-            db.api_key_increment_usage(api_key_info["id"], total_t)
-        except Exception:
-            pass
 
 
 async def proxy_chat_completions(
@@ -195,39 +197,62 @@ async def proxy_chat_completions(
     body = build_backend_body(payload)
     model_name = payload.get("model", "auto")
 
+    if client_wants_stream:
+        return (
+            "stream",
+            _stream_upstream(body, api_key_info, model_name),
+        )
+
     tried_ids: set[int] = set()
     max_retries = 3
+    last_error = None
 
     for attempt in range(max_retries):
-        account = auth_manager.pick_account_with_fallback(tried_ids)
+        account = await auth_manager.pick_account_with_fallback(tried_ids)
         if not account:
-            return ("error", (503, {"error": {"message": "No available accounts", "type": "server_error"}}))
+            break
 
         tried_ids.add(account["id"])
-        headers = auth_manager.get_valid_headers(account)
+        headers = await auth_manager.get_valid_headers(account)
         if not headers:
+            auth_manager.mark_account_failure(account["id"], 401)
             continue
 
-        url = f"{BACKEND}/v2/chat/completions"
+        url = f"{auth_manager.backend_url()}/v2/chat/completions"
         t0 = time.time()
-
-        if client_wants_stream:
-            gen = _stream_upstream(url, headers, body, account, api_key_info, model_name, t0)
-            return ("stream", gen)
-        else:
-            result = await _collect_stream(url, headers, body, account, api_key_info, model_name, t0)
-            if result[0] == "error" and attempt < max_retries - 1:
-                err_status = result[1][0]
-                if err_status in (401, 403):
-                    continue
+        result = await _collect_stream(url, headers, body, account, api_key_info, model_name, t0)
+        if result[0] == "json":
+            auth_manager.mark_account_success(account["id"])
             return result
 
-    return ("error", (503, {"error": {"message": "All accounts failed", "type": "server_error"}}))
+        last_error = result
+        err_status = result[1][0]
+        auth_manager.mark_account_failure(account["id"], err_status)
+        will_retry = _is_retryable_status(err_status) and attempt < max_retries - 1
+        detail = result[1][1]
+        error_message = detail
+        if isinstance(detail, dict):
+            error_data = detail.get("error") if isinstance(detail.get("error"), dict) else detail
+            error_message = error_data.get("message", detail) if isinstance(error_data, dict) else detail
+        _log_request(
+            api_key_info, account, model_name, False,
+            0, 0, 0, 0, "retry" if will_retry else "error",
+            err_status, str(error_message)[:500], t0,
+            increment_usage=not will_retry,
+        )
+        if not will_retry:
+            return result
+        await _retry_delay(attempt)
+
+    return last_error or (
+        "error",
+        (503, {"error": {"message": "No available accounts", "type": "server_error"}}),
+    )
 
 
 async def test_account_chat(account: dict, model: str = "auto", prompt: str = "ping") -> dict:
     """Run a small non-streaming request against one specific account."""
-    headers = auth_manager.get_valid_headers(account)
+    headers = await auth_manager.get_valid_headers(account)
     if not headers:
         return {
             "ok": False,
@@ -241,7 +266,7 @@ async def test_account_chat(account: dict, model: str = "auto", prompt: str = "p
         "messages": [{"role": "user", "content": prompt or "ping"}],
         "stream": False,
     })
-    url = f"{BACKEND}/v2/chat/completions"
+    url = f"{auth_manager.backend_url()}/v2/chat/completions"
     t0 = time.time()
     result = await _collect_stream(url, headers, body, account, None, f"account-test:{model or 'auto'}", t0)
     duration_ms = int((time.time() - t0) * 1000)
@@ -273,31 +298,75 @@ async def test_account_chat(account: dict, model: str = "auto", prompt: str = "p
 
 
 async def _stream_upstream(
-    url: str, headers: dict, body: dict,
-    account: dict, api_key_info: Optional[dict],
-    model_name: str, t0: float,
+    body: dict,
+    api_key_info: Optional[dict],
+    model_name: str,
 ) -> AsyncGenerator[bytes, None]:
-    """流式转发后端 SSE，同时统计 usage。"""
-    finish_reason = None
-    usage: dict = {}
-    buf = b""
-    error_occurred = False
-    content_parts: list[str] = []  # 用于事后检测腾讯审核拦截话术
+    """Stream upstream SSE with pre-output account failover and backoff."""
+    tried_ids: set[int] = set()
+    last_error = b"No available accounts"
+    last_status = 503
+    last_account = None
+    last_started = time.time()
 
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=300, write=30, pool=10)) as c:
-            async with c.stream("POST", url, headers=headers, json=body) as r:
-                if r.status_code != 200:
-                    err = await r.aread()
-                    error_occurred = True
-                    yield _err_sse_event(err, r.status_code)
-                    _log_request(api_key_info, account, model_name, True,
-                                 0, 0, 0, 0, "error", r.status_code,
-                                 err.decode("utf-8", "replace")[:500], t0)
-                    return
+    for attempt in range(3):
+        account = await auth_manager.pick_account_with_fallback(tried_ids)
+        if not account:
+            break
+        last_account = account
+        tried_ids.add(account["id"])
+        headers = await auth_manager.get_valid_headers(account)
+        if not headers:
+            auth_manager.mark_account_failure(account["id"], 401)
+            last_error = b"Account credentials are invalid"
+            last_status = 401
+            continue
 
-                async for chunk in r.aiter_bytes():
-                    if chunk:
+        url = f"{auth_manager.backend_url()}/v2/chat/completions"
+        t0 = time.time()
+        last_started = t0
+        finish_reason = None
+        usage: dict = {}
+        buf = b""
+        content_parts: list[str] = []
+        output_started = False
+
+        try:
+            timeout = httpx.Timeout(
+                connect=10,
+                read=auth_manager.request_timeout(300),
+                write=30,
+                pool=10,
+            )
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream("POST", url, headers=headers, json=body) as response:
+                    if response.status_code != 200:
+                        raw_error = await response.aread()
+                        last_error = raw_error
+                        last_status = response.status_code
+                        auth_manager.mark_account_failure(account["id"], response.status_code)
+                        if _is_retryable_status(response.status_code) and attempt < 2:
+                            _log_request(
+                                api_key_info, account, model_name, True,
+                                0, 0, 0, 0, "retry", response.status_code,
+                                raw_error.decode("utf-8", "replace")[:500], t0,
+                                increment_usage=False,
+                            )
+                            await _retry_delay(attempt)
+                            continue
+                        yield _err_sse_event(raw_error, response.status_code)
+                        _log_request(
+                            api_key_info, account, model_name, True,
+                            0, 0, 0, 0, "error", response.status_code,
+                            raw_error.decode("utf-8", "replace")[:500], t0,
+                        )
+                        return
+
+                    auth_manager.mark_account_success(account["id"])
+                    async for chunk in response.aiter_bytes():
+                        if not chunk:
+                            continue
+                        output_started = True
                         buf += chunk
                         while b"\n" in buf:
                             line, buf = buf.split(b"\n", 1)
@@ -309,37 +378,56 @@ async def _stream_upstream(
                                 continue
                             try:
                                 obj = json.loads(data)
-                            except Exception:
+                            except (json.JSONDecodeError, UnicodeDecodeError):
                                 continue
                             if obj.get("usage"):
                                 usage.update(obj["usage"])
-                            for ch in obj.get("choices") or []:
-                                if ch.get("finish_reason"):
-                                    finish_reason = ch["finish_reason"]
-                                delta = ch.get("delta") or {}
+                            for choice in obj.get("choices") or []:
+                                if choice.get("finish_reason"):
+                                    finish_reason = choice["finish_reason"]
+                                delta = choice.get("delta") or {}
                                 if delta.get("content"):
                                     content_parts.append(delta["content"])
                         yield chunk
-    except httpx.HTTPError as e:
-        error_occurred = True
-        yield _err_sse_event(str(e).encode(), 502)
-        _log_request(api_key_info, account, model_name, True,
-                     0, 0, 0, 0, "network_error", 502, str(e)[:500], t0)
-        return
+        except httpx.HTTPError as exc:
+            last_error = str(exc).encode("utf-8", "replace")
+            last_status = 502
+            auth_manager.mark_account_failure(account["id"], 502)
+            if not output_started and attempt < 2:
+                _log_request(
+                    api_key_info, account, model_name, True,
+                    0, 0, 0, 0, "retry", 502, str(exc)[:500], t0,
+                    increment_usage=False,
+                )
+                await _retry_delay(attempt)
+                continue
+            yield _err_sse_event(last_error, 502)
+            _log_request(
+                api_key_info, account, model_name, True,
+                0, 0, 0, 0, "network_error", 502, str(exc)[:500], t0,
+            )
+            return
 
-    if not error_occurred:
         full_text = "".join(content_parts)
         audit_blocked = _looks_like_audit_block(full_text)
         log_finish = "content_filter" if audit_blocked else (finish_reason or "stop")
-        log_err = ("[audit blocked] " + full_text[:300]) if audit_blocked else ""
+        log_error = ("[audit blocked] " + full_text[:300]) if audit_blocked else ""
         _log_request(
             api_key_info, account, model_name, True,
             usage.get("prompt_tokens", 0),
             usage.get("completion_tokens", 0),
             usage.get("total_tokens", 0),
             usage.get("credit", 0),
-            log_finish, 200, log_err, t0,
+            log_finish, 200, log_error, t0,
         )
+        return
+
+    yield _err_sse_event(last_error, last_status)
+    _log_request(
+        api_key_info, last_account, model_name, True,
+        0, 0, 0, 0, "error", last_status,
+        last_error.decode("utf-8", "replace")[:500], last_started,
+    )
 
 
 async def _collect_stream(
@@ -356,14 +444,11 @@ async def _collect_stream(
     usage: dict | None = None
 
     try:
-        async with httpx.AsyncClient(timeout=300) as c:
+        async with httpx.AsyncClient(timeout=auth_manager.request_timeout(300)) as c:
             async with c.stream("POST", url, headers=headers, json=body) as r:
                 if r.status_code != 200:
                     raw = await r.aread()
                     detail = _safe_err(raw, r.status_code)
-                    _log_request(api_key_info, account, model_name, False,
-                                 0, 0, 0, 0, "error", r.status_code,
-                                 raw.decode("utf-8", "replace")[:500], t0)
                     return ("error", (r.status_code, detail))
 
                 async for line in r.aiter_lines():
@@ -399,8 +484,6 @@ async def _collect_stream(
                             if fn.get("arguments"):
                                 slot["arguments"] += fn["arguments"]
     except httpx.HTTPError as e:
-        _log_request(api_key_info, account, model_name, False,
-                     0, 0, 0, 0, "network_error", 502, str(e)[:500], t0)
         return ("error", (502, {"error": {"message": f"upstream error: {e}", "type": "upstream_error"}}))
 
     tcs = None

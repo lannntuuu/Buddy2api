@@ -16,17 +16,52 @@ from typing import AsyncGenerator, Optional
 import proxy
 
 
+_DEBUG_SECRET_KEYS = {
+    "access_token", "accesstoken", "refresh_token", "refreshtoken",
+    "api_key", "authorization", "session_state", "sessionstate",
+}
+_DEBUG_CONTENT_KEYS = {"content", "input", "instructions", "output"}
+
+
+def _redact_debug_value(value, *, include_content: bool = False):
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            normalized = str(key).replace("-", "").replace("_", "").lower()
+            if normalized in {name.replace("_", "") for name in _DEBUG_SECRET_KEYS}:
+                result[key] = "<redacted>"
+            elif key in _DEBUG_CONTENT_KEYS and not include_content:
+                result[key] = "<content redacted>"
+            else:
+                result[key] = _redact_debug_value(item, include_content=include_content)
+        return result
+    if isinstance(value, list):
+        return [_redact_debug_value(item, include_content=include_content) for item in value]
+    return value
+
+
 def _maybe_dump(label: str, obj) -> None:
-    """受环境变量 CB_DEBUG_DUMP=1 控制的调试 dump，把请求落盘便于分析审核问题。"""
-    if not os.environ.get("CB_DEBUG_DUMP"):
+    """Write an opt-in, redacted debug dump for protocol troubleshooting."""
+    if os.environ.get("CB_DEBUG_DUMP", "").strip().lower() not in {"1", "true", "yes", "on"}:
         return
     try:
         d = Path(__file__).parent / ".debug"
         d.mkdir(exist_ok=True)
+        if os.name != "nt":
+            os.chmod(d, 0o700)
         ts = int(time.time() * 1000)
-        (d / f"{label}_{ts}.json").write_text(
-            json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8"
+        include_content = os.environ.get("CB_DEBUG_DUMP_INCLUDE_CONTENT", "") == "1"
+        target = d / f"{label}_{ts}.json"
+        target.write_text(
+            json.dumps(
+                _redact_debug_value(obj, include_content=include_content),
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
         )
+        if os.name != "nt":
+            os.chmod(target, 0o600)
     except Exception:
         pass
 
@@ -38,15 +73,20 @@ def apply_codex_sanitize(chat_payload: dict) -> dict:
     """
     # 清洗 system messages
     for msg in chat_payload.get("messages", []):
+        if not isinstance(msg, dict):
+            continue
         if msg.get("role") in ("system", "developer"):
             msg["role"] = "system"
-            msg["content"] = _sanitize_system_content(msg.get("content", ""))
+            content = msg.get("content", "")
+            msg["content"] = _sanitize_system_content(
+                content if isinstance(content, str) else _flatten_content(content)
+            )
 
     # 清洗 tool descriptions
     for tool in chat_payload.get("tools", []):
         if isinstance(tool, dict) and tool.get("type") == "function":
             fn = tool.get("function") or {}
-            if fn.get("description"):
+            if isinstance(fn.get("description"), str) and fn.get("description"):
                 fn["description"] = _sanitize_tool_description(fn["description"])
 
     # 过滤非 function 类型工具
@@ -89,7 +129,10 @@ def responses_to_chat(resp_payload: dict) -> dict:
                 # 清洗 system/developer 消息
                 if chat_msg.get("role") in ("system", "developer"):
                     chat_msg["role"] = "system"
-                    chat_msg["content"] = _sanitize_system_content(chat_msg.get("content", ""))
+                    content = chat_msg.get("content", "")
+                    chat_msg["content"] = _sanitize_system_content(
+                        content if isinstance(content, str) else _flatten_content(content)
+                    )
                 messages.append(chat_msg)
     elif isinstance(inp, str) and inp.strip():
         messages.append({"role": "user", "content": inp})
@@ -209,9 +252,9 @@ def _flatten_content(content) -> str:
             elif isinstance(p, dict):
                 pt = p.get("type", "")
                 if pt in ("input_text", "output_text", "text"):
-                    parts.append(p.get("text", ""))
+                    parts.append(str(p.get("text", "")))
                 elif pt == "image_url" or pt == "input_image":
-                    url = p.get("image_url", {}) if isinstance(p.get("image_url"), dict) else {}
+                    url = p.get("image_url", "")
                     url_str = url.get("url", "") if isinstance(url, dict) else str(url)
                     parts.append(f"[image: {url_str}]")
                 elif pt == "file":
@@ -220,7 +263,7 @@ def _flatten_content(content) -> str:
                     parts.append(str(p.get("text", p)))
         return "\n".join(parts)
     if isinstance(content, dict):
-        return content.get("text", str(content))
+        return str(content.get("text", str(content)))
     return str(content)
 
 # 触发腾讯内容审核的关键词及替换映射
@@ -333,7 +376,7 @@ def _sanitize_system_content(content: str) -> str:
 
 def _sanitize_tool_description(desc: str) -> str:
     """清洗 tool description，避免触发腾讯内容审核。"""
-    if not desc:
+    if not isinstance(desc, str) or not desc:
         return desc
 
     result = desc

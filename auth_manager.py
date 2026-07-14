@@ -9,6 +9,7 @@ auth_manager.py — 多账号凭据管理
   - 凭据缓存与线程安全
 """
 
+import asyncio
 import json
 import os
 import sys
@@ -21,21 +22,65 @@ from typing import Optional
 import httpx
 
 import database as db
+from version import VERSION
 
 BACKEND = "https://copilot.tencent.com"
 DEFAULT_DOMAIN = "www.codebuddy.cn"
-USER_AGENT = "codebuddy-gateway/1.0"
+USER_AGENT = f"buddy2api/{VERSION}"
 
 _lock = threading.Lock()
-_token_locks: dict[int, threading.Lock] = {}
+_token_locks: dict[int, asyncio.Lock] = {}
+_token_locks_guard = threading.Lock()
 _route_lock = threading.Lock()
 _sticky_account_id: Optional[int] = None
+_failure_lock = threading.Lock()
+_account_failures: dict[int, tuple[int, float]] = {}
 
 
-def _get_token_lock(aid: int) -> threading.Lock:
-    if aid not in _token_locks:
-        _token_locks[aid] = threading.Lock()
-    return _token_locks[aid]
+def _get_token_lock(aid: int) -> asyncio.Lock:
+    with _token_locks_guard:
+        if aid not in _token_locks:
+            _token_locks[aid] = asyncio.Lock()
+        return _token_locks[aid]
+
+
+def backend_url() -> str:
+    value = str(db.get_setting("backend_url", BACKEND) or BACKEND).strip().rstrip("/")
+    return value if value.startswith("https://") else BACKEND
+
+
+def request_timeout(default: int) -> int:
+    try:
+        return max(5, min(600, int(db.get_setting("timeout", default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def mark_account_success(aid: int):
+    with _failure_lock:
+        _account_failures.pop(aid, None)
+
+
+def mark_account_failure(aid: int, status_code: int = 0):
+    with _failure_lock:
+        count, _ = _account_failures.get(aid, (0, 0.0))
+        count += 1
+        base = 30 if status_code in {401, 403, 429} else 5
+        cooldown = min(300, base * (2 ** min(count - 1, 4)))
+        _account_failures[aid] = (count, time.monotonic() + cooldown)
+    if status_code in {401, 403}:
+        db.update_account(aid, {"status": "expired"})
+
+
+def account_is_cooling_down(aid: int) -> bool:
+    with _failure_lock:
+        failure = _account_failures.get(aid)
+        if not failure:
+            return False
+        if failure[1] <= time.monotonic():
+            _account_failures.pop(aid, None)
+            return False
+        return True
 
 
 # ============================================================
@@ -267,21 +312,24 @@ def import_auth_file(path: Path) -> Optional[int]:
 def auto_scan_and_import(auth_dir: Optional[str] = None) -> dict:
     """自动扫描本机 auth 文件并导入。返回 {imported, updated, skipped}。"""
     result = {"imported": 0, "updated": 0, "skipped": 0, "errors": []}
+    existing_by_uid = {
+        account.get("uid"): account
+        for account in db.list_accounts()
+        if account.get("uid")
+    }
     for f in find_auth_files(auth_dir):
         parsed = parse_auth_file(f)
         if not parsed:
             result["skipped"] += 1
             continue
-        existing = db.list_accounts()
-        found = False
-        for acc in existing:
-            if acc.get("uid") == parsed["uid"]:
-                db.update_account(acc["id"], parsed)
-                result["updated"] += 1
-                found = True
-                break
-        if not found:
-            db.add_account(parsed)
+        existing = existing_by_uid.get(parsed.get("uid"))
+        if existing:
+            db.update_account(existing["id"], parsed)
+            result["updated"] += 1
+        else:
+            aid = db.add_account(parsed)
+            if parsed.get("uid"):
+                existing_by_uid[parsed["uid"]] = {**parsed, "id": aid}
             result["imported"] += 1
     return result
 
@@ -290,26 +338,27 @@ def auto_scan_and_import(auth_dir: Optional[str] = None) -> dict:
 # Token 刷新
 # ============================================================
 
-def refresh_token(account: dict) -> bool:
+async def refresh_token(account: dict) -> bool:
     """调后端刷新 token，写回数据库。返回是否成功。"""
     aid = account["id"]
     lock = _get_token_lock(aid)
-    with lock:
+    async with lock:
         headers = build_headers(account)
         headers["X-Refresh-Token"] = account.get("refresh_token", "")
         headers["X-Auth-Refresh-Source"] = "plugin"
-        url = f"{BACKEND}/v2/plugin/auth/token/refresh"
+        url = f"{backend_url()}/v2/plugin/auth/token/refresh"
 
         try:
-            with httpx.Client(timeout=15) as c:
-                r = c.post(url, headers=headers, json={})
+            async with httpx.AsyncClient(timeout=request_timeout(15)) as c:
+                r = await c.post(url, headers=headers, json={})
             data = r.json()
-        except Exception as e:
+        except (httpx.HTTPError, ValueError) as e:
             print(f"[auth_manager] 刷新 token 网络失败 (account={aid}): {e}", file=sys.stderr)
             return False
 
-        if data.get("code") != 0 or not data.get("data"):
-            print(f"[auth_manager] 刷新 token 失败 (account={aid}): {data.get('msg', data)}", file=sys.stderr)
+        if not isinstance(data, dict) or data.get("code") != 0 or not data.get("data"):
+            message = data.get("msg", "upstream rejected refresh") if isinstance(data, dict) else "invalid response"
+            print(f"[auth_manager] 刷新 token 失败 (account={aid}): {str(message)[:240]}", file=sys.stderr)
             # 标记账号为过期
             db.update_account(aid, {"status": "expired"})
             return False
@@ -340,11 +389,11 @@ def is_token_expired(account: dict) -> bool:
     return time.time() * 1000 >= (expires_at - 60_000)
 
 
-def ensure_token_valid(account: dict) -> bool:
+async def ensure_token_valid(account: dict) -> bool:
     """如果 token 快过期则刷新。返回是否有效。"""
     if not is_token_expired(account):
         return True
-    return refresh_token(account)
+    return await refresh_token(account)
 
 
 # ============================================================
@@ -352,6 +401,7 @@ def ensure_token_valid(account: dict) -> bool:
 # ============================================================
 
 def build_headers(account: dict) -> dict:
+    domain = account.get("domain") or str(db.get_setting("default_domain", DEFAULT_DOMAIN) or DEFAULT_DOMAIN)
     return {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -359,14 +409,14 @@ def build_headers(account: dict) -> dict:
         "X-User-Id": account.get("uid", ""),
         "X-Enterprise-Id": account.get("enterprise_id", ""),
         "X-Tenant-Id": account.get("enterprise_id", ""),
-        "X-Domain": account.get("domain", DEFAULT_DOMAIN),
+        "X-Domain": domain,
         "User-Agent": USER_AGENT,
     }
 
 
-def get_valid_headers(account: dict) -> Optional[dict]:
+async def get_valid_headers(account: dict) -> Optional[dict]:
     """确保 token 有效后返回 header。失败返回 None。"""
-    if not ensure_token_valid(account):
+    if not await ensure_token_valid(account):
         return None
     # 重新从数据库读取最新凭据
     fresh = db.get_account(account["id"])
@@ -568,7 +618,7 @@ def _resource_failure(
     }
 
 
-def fetch_account_resources(
+async def fetch_account_resources(
     account: dict,
     *,
     force: bool = False,
@@ -582,7 +632,7 @@ def fetch_account_resources(
             cached["stale"] = False
             return cached
 
-    headers = get_valid_headers(account)
+    headers = await get_valid_headers(account)
     if not headers:
         return _resource_failure(
             account,
@@ -591,10 +641,10 @@ def fetch_account_resources(
         )
 
     try:
-        with httpx.Client(timeout=25) as c:
-            r = c.post(f"{BACKEND}/v2/billing/meter/get-user-resource", headers=headers, json={})
+        async with httpx.AsyncClient(timeout=request_timeout(25)) as c:
+            r = await c.post(f"{backend_url()}/v2/billing/meter/get-user-resource", headers=headers, json={})
             data = r.json()
-    except Exception as e:
+    except (httpx.HTTPError, ValueError) as e:
         return _resource_failure(
             account,
             message=str(e)[:240],
@@ -690,7 +740,7 @@ def _checkin_failure(
     return _checkin_result(account, ok=False, status_code=status_code, message=message)
 
 
-def fetch_checkin_status(
+async def fetch_checkin_status(
     account: dict,
     *,
     force: bool = False,
@@ -704,7 +754,7 @@ def fetch_checkin_status(
             cached["stale"] = False
             return cached
 
-    headers = get_valid_headers(account)
+    headers = await get_valid_headers(account)
     if not headers:
         return _checkin_failure(
             account,
@@ -713,10 +763,10 @@ def fetch_checkin_status(
         )
 
     try:
-        with httpx.Client(timeout=20) as c:
-            r = c.post(f"{BACKEND}/v2/billing/meter/checkin-activity-status", headers=headers, json={})
+        async with httpx.AsyncClient(timeout=request_timeout(20)) as c:
+            r = await c.post(f"{backend_url()}/v2/billing/meter/checkin-activity-status", headers=headers, json={})
             data = r.json()
-    except Exception as e:
+    except (httpx.HTTPError, ValueError) as e:
         return _checkin_failure(account, status_code=0, message=str(e)[:240], allow_stale=allow_stale)
 
     ok, msg, payload = _unwrap_response(data)
@@ -741,9 +791,9 @@ def fetch_checkin_status(
     return result
 
 
-def claim_daily_checkin(account: dict) -> dict:
+async def claim_daily_checkin(account: dict) -> dict:
     """手动领取单个账号的每日积分。不会绕过验证或做自动定时。"""
-    status = fetch_checkin_status(account, force=True, allow_stale=False)
+    status = await fetch_checkin_status(account, force=True, allow_stale=False)
     if not status.get("ok"):
         return status
     if status.get("active") is False:
@@ -758,7 +808,7 @@ def claim_daily_checkin(account: dict) -> dict:
     fresh = db.get_account(account["id"])
     if not fresh:
         return _checkin_result(account, ok=False, message="account not found")
-    headers = get_valid_headers(fresh)
+    headers = await get_valid_headers(fresh)
     if not headers:
         return _checkin_result(
             account,
@@ -767,10 +817,10 @@ def claim_daily_checkin(account: dict) -> dict:
         )
 
     try:
-        with httpx.Client(timeout=30) as c:
-            r = c.post(f"{BACKEND}/v2/billing/meter/daily-checkin", headers=headers, json={})
+        async with httpx.AsyncClient(timeout=request_timeout(30)) as c:
+            r = await c.post(f"{backend_url()}/v2/billing/meter/daily-checkin", headers=headers, json={})
             data = r.json()
-    except Exception as e:
+    except (httpx.HTTPError, ValueError) as e:
         return _checkin_result(account, ok=False, status_code=0, message=str(e)[:240])
 
     ok, msg, payload = _unwrap_response(data)
@@ -847,7 +897,10 @@ def pick_account(exclude_ids: set[int] = None) -> Optional[dict]:
     global _sticky_account_id
     exclude_ids = exclude_ids or set()
     accounts = db.get_active_accounts()
-    candidates = [a for a in accounts if a["id"] not in exclude_ids]
+    candidates = [
+        a for a in accounts
+        if a["id"] not in exclude_ids and not account_is_cooling_down(a["id"])
+    ]
     if not candidates:
         return None
 
@@ -864,30 +917,21 @@ def pick_account(exclude_ids: set[int] = None) -> Optional[dict]:
         return chosen
 
 
-def pick_account_with_fallback(exclude_ids: set[int] = None) -> Optional[dict]:
+async def pick_account_with_fallback(exclude_ids: set[int] = None) -> Optional[dict]:
     """选账号，如果全部过期则尝试刷新过期账号。"""
     account = pick_account(exclude_ids)
     if account:
         return account
 
     # 尝试过期账号，但不碰 inactive/disabled 账号。
-    conn = db.get_conn()
-    rows = conn.execute(
-        """
-        SELECT * FROM accounts
-        WHERE status='expired'
-        ORDER BY priority DESC,
-                 (CAST(total_requests AS REAL) / CASE WHEN weight > 0 THEN weight ELSE 1 END) ASC,
-                 total_requests ASC,
-                 id ASC
-        """
-    ).fetchall()
-    conn.close()
-    for r in rows:
-        a = dict(r)
+    expired_accounts = sorted(
+        (account for account in db.list_accounts() if account.get("status") == "expired"),
+        key=_route_sort_key,
+    )
+    for a in expired_accounts:
         if a["id"] in (exclude_ids or set()):
             continue
-        if refresh_token(a):
+        if await refresh_token(a):
             fresh = db.get_account(a["id"])
             if fresh:
                 _set_sticky_account(fresh["id"])

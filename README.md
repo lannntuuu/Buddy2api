@@ -14,7 +14,7 @@ Work Buddy 2 API 是一个本地网关。它会扫描本机 Work Buddy / CodeBud
 
 ## 功能
 
-- **OpenAI 兼容接口**：支持 `/v1/chat/completions` 和 `/v1/models`
+- **OpenAI 兼容接口**：支持 `/v1/chat/completions`、`/v1/responses` 和 `/v1/models`
 - **流式输出**：支持 SSE 流式响应，也支持非流式聚合响应
 - **自动导入账号**：启动时扫描本机 Work Buddy / CodeBuddy 的 auth 文件
 - **多账号路由**：支持多个账号，优先级高的账号先用；同优先级会尽量固定当前账号，失败后自动切换
@@ -38,7 +38,8 @@ Work Buddy 2 API 是一个本地网关。它会扫描本机 Work Buddy / CodeBud
 
 1. 本机已经安装并登录腾讯 Work Buddy / CodeBuddy。
 2. 登录账号还有可用模型额度。
-3. 本项目和调用客户端最好都运行在同一台机器上。
+3. 本机安装 Python 3.10 或更高版本，或使用 Docker。
+4. 本项目和调用客户端最好都运行在同一台机器上。
 
 Windows 默认扫描路径类似：
 
@@ -61,7 +62,7 @@ start.bat
 或手动启动：
 
 ```powershell
-pip install fastapi "uvicorn[standard]" httpx
+pip install -r requirements.txt
 python server.py
 ```
 
@@ -70,7 +71,7 @@ python server.py
 如果你要远程访问或遇到 Cookie 异常，可以固定一个管理 token 作为备用：
 
 ```powershell
-$env:CB_GATEWAY_ADMIN_TOKEN="change-this-token"
+$env:CB_GATEWAY_ADMIN_TOKEN="cb-admin-请替换为足够长的随机值"
 python server.py
 ```
 
@@ -110,10 +111,11 @@ C:\Users\<你的用户名>\AppData\Local\CodeBuddyExtension\Data\Public\auth
 
 所以 Web UI 的“重新检测 / 一键导入本机登录”可以直接发现账号，不需要手动粘贴 `.info`。
 
-如果只是启动服务，不自动挂载 Windows 登录目录，也可以用：
+如果只是启动服务，不自动挂载 Windows 登录目录，需要先提供随机管理 Token：
 
 ```bash
-docker-compose up -d
+export CB_GATEWAY_ADMIN_TOKEN="cb-admin-replace-with-a-long-random-value"
+docker compose up -d
 ```
 
 启动后访问：
@@ -149,14 +151,15 @@ Dashboard 会汇总所有已启用账号的官方余额、30 天内即将到期�
 | Model | `auto` / `glm-5.2` / `glm-5.1` / `kimi-k2.7` / `deepseek-v4-pro` / `deepseek-v4-flash` |
 | Stream | 建议开启 |
 
-当前只实现 Chat Completions 兼容接口：
+当前实现以下 OpenAI 兼容接口：
 
 ```text
 /v1/chat/completions
+/v1/responses
 /v1/models
 ```
 
-如果客户端有接口类型选项，请选择 **OpenAI Compatible / Chat Completions**。暂不支持固定调用 `/v1/responses` 的 Responses API 模式。
+普通客户端可选择 **OpenAI Compatible / Chat Completions**；Codex 等固定使用 Responses API 的客户端可直接调用 `/v1/responses`。
 
 如果调用方跑在 Docker 容器里，容器内的 `127.0.0.1` 指向容器自身，不是 Windows 主机。此时 Base URL 通常要填：
 
@@ -231,13 +234,22 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 |---|---|
 | `CB_GATEWAY_ADMIN_TOKEN` | 固定管理后台 Token |
 | `CB_GATEWAY_DB_PATH` | SQLite 数据库路径 |
+| `CB_GATEWAY_MASTER_KEY` | 跨平台凭据加密主密钥；Docker/迁移场景建议固定配置 |
+| `CB_GATEWAY_CREDENTIAL_KEY_FILE` | 未配置主密钥时使用的本地加密密钥文件路径 |
+| `CB_GATEWAY_LOG_RETENTION_DAYS` | 请求日志保留天数，默认 `90` |
+| `CB_GATEWAY_MAX_BODY_BYTES` | 单个 JSON 请求体上限，默认 `10485760` |
+| `CB_GATEWAY_CORS_ORIGINS` | 允许的浏览器来源，逗号分隔，默认仅本机来源 |
+| `CB_GATEWAY_ALLOW_UNAUTHENTICATED_API` | 设为 `1` 时允许未创建 API Key 的业务请求，默认关闭 |
+| `CB_GATEWAY_SECURE_COOKIE` | 设为 `1` 时强制管理 Cookie 使用 Secure 标记 |
 | `CB_AUTH_DIR` | 指定 Work Buddy / CodeBuddy auth 文件目录 |
 | `CB_HOST_AUTH_DIR` | Docker 启动脚本使用的宿主机 auth 目录 |
 | `CB_CONTAINER_AUTH_DIR` | Docker 容器内 auth 挂载目录，默认 `/auth` |
 
 ## 数据和安全
 
-- `codebuddy_gateway.db` 会保存导入的账号凭据和请求日志。
+- 账号 Token 会在写入 SQLite 前加密；Windows 默认使用 DPAPI，其他平台使用主密钥或权限为 `0600` 的本地密钥文件。
+- 旧数据库中的明文 Token 会在升级后的首次启动时自动迁移为加密格式；迁移或容器部署时应固定 `CB_GATEWAY_MASTER_KEY`。
+- 请求日志默认保留 90 天，可通过 `CB_GATEWAY_LOG_RETENTION_DAYS` 调整。
 - API Key 只保存哈希，创建后完整 key 不会再次显示。
 - 不要把数据库、auth 文件、`.lab-agent`、日志或截图发给别人。
 - 不建议把服务监听到公网地址。

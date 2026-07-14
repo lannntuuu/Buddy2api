@@ -3,16 +3,24 @@ services:
     build: .
     container_name: buddy2api
     ports:
-      - "8787:8787"
+      - "127.0.0.1:8787:8787"
     volumes:
       # 持久化数据库
       - ./data:/app/data
       # Windows 推荐直接运行 .\start-docker-win.ps1 自动挂载登录目录
       # WSL 推荐运行 ./start-docker-wsl.sh 自动挂载 /mnt/c 下的登录目录
     environment:
-      - CB_GATEWAY_ADMIN_TOKEN=${CB_GATEWAY_ADMIN_TOKEN:-change-this-token}
+      - CB_GATEWAY_ADMIN_TOKEN=${CB_GATEWAY_ADMIN_TOKEN:?Set a strong CB_GATEWAY_ADMIN_TOKEN}
+      - CB_GATEWAY_MASTER_KEY=${CB_GATEWAY_MASTER_KEY:-}
+      - CB_GATEWAY_ALLOW_UNAUTHENTICATED_API=${CB_GATEWAY_ALLOW_UNAUTHENTICATED_API:-0}
       - CB_GATEWAY_DB_PATH=/app/data/buddy2api.db
       - CB_AUTH_DIR=/auth
       - CB_CONTAINER_AUTH_DIR=/auth
       - CB_DOCKER=1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
