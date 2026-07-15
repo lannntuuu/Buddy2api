@@ -269,8 +269,6 @@ badge,.badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;bord
   --green:#128665;--green-bg:#e9f6f1;--red:#cf3f32;--red-bg:#fff0ed;
   display:block;min-height:100vh;background:var(--bg);color:var(--fg)
 }
-.layout.theme-classic{--accent:#4b4d4d;--accent-strong:#252625;--accent-soft:#ededeb;--accent-border:#c9c9c4}
-.layout.theme-forest{--accent:#167a5d;--accent-strong:#0f5943;--accent-soft:#e8f4ef;--accent-border:#a9d3c3}
 body{background:#e9e9e6;letter-spacing:0;overflow-x:hidden}
 .topbar{position:sticky;top:0;z-index:500;min-height:72px;background:#1d1c1a;color:#fff;display:grid;grid-template-columns:minmax(220px,auto) minmax(480px,1fr) auto;align-items:center;gap:24px;padding:0 22px;border-bottom:1px solid #35332f}
 .brand-block{min-width:0;display:flex;align-items:center;gap:12px}
@@ -284,13 +282,6 @@ body{background:#e9e9e6;letter-spacing:0;overflow-x:hidden}
 .top-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0}
 .refresh-cta{height:40px;border:1px solid #ef6a25;background:var(--accent);color:#fff;border-radius:7px;padding:0 14px;font:inherit;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:7px;cursor:pointer;white-space:nowrap}
 .refresh-cta:hover{background:var(--accent-strong)}.refresh-cta svg{width:15px;height:15px}
-.theme-switch{height:40px;display:flex;align-items:center;padding:3px;border:1px solid #45413b;border-radius:7px;background:#171614}
-.theme-switch button{height:32px;border:0;border-radius:5px;background:transparent;color:#8f8c85;padding:0 9px;font:inherit;font-size:11px;font-weight:700;cursor:pointer}
-.theme-switch button.on{background:var(--accent);color:#fff}.theme-switch button:hover:not(.on){color:#fff}
-.node-pill{height:40px;border:1px solid #2d5b4d;border-radius:7px;padding:0 11px;display:flex;align-items:center;gap:8px;color:#d9e9e3;font-size:11px;font-weight:700;white-space:nowrap;background:#202522}
-.node-dot{width:8px;height:8px;border-radius:50%;background:#18aa7f;box-shadow:0 0 0 5px rgba(24,170,127,.12)}
-.token-tool{width:40px;height:40px;border:1px solid #45413b;background:#242220;color:#aaa79f;border-radius:7px;display:grid;place-items:center;cursor:pointer}
-.token-tool:hover{color:#fff;border-color:#625d55}.token-tool svg{width:16px;height:16px}
 .main{margin-left:0;min-width:0}.content{padding:18px;max-width:1600px;margin:0 auto}
 .phead{margin:0 0 12px;display:flex;align-items:baseline;gap:12px}.phead h1{font-size:21px;font-weight:800}.phead p{font-size:12px;color:var(--fg3);margin:0}
 .tbar{min-height:42px;margin-bottom:12px;padding:6px 8px;background:#f5f5f2;border:1px solid var(--border);border-radius:7px}
@@ -329,12 +320,12 @@ table{font-size:12px}.table-scroll{background:#fff}th{padding:9px 12px;backgroun
 .empty .em{font-size:22px}.pager{padding:0 12px 12px}
 
 @media (max-width:1180px){
-  .topbar{grid-template-columns:auto 1fr;padding:10px 16px;gap:10px}.topnav{grid-column:1/-1;grid-row:2;justify-content:flex-start;overflow-x:auto;padding-bottom:1px}.top-actions{grid-column:2;grid-row:1}.node-pill{display:none}
+  .topbar{grid-template-columns:auto 1fr;padding:10px 16px;gap:10px}.topnav{grid-column:1/-1;grid-row:2;justify-content:flex-start;overflow-x:auto;padding-bottom:1px}.top-actions{grid-column:2;grid-row:1}
   .dash-grid.wide{grid-template-columns:1fr 1fr}.stats{grid-template-columns:repeat(2,1fr)}.health-kpis,.metric-row{grid-template-columns:repeat(3,1fr)}.content{padding:14px}
 }
 @media (max-width:760px){
   .topbar{position:sticky;grid-template-columns:1fr auto;padding:9px 10px}.brand-symbol{width:30px;height:30px}.brand-title{font-size:15px}.brand-meta{display:none}
-  .top-actions{gap:5px}.refresh-cta{width:36px;height:36px;padding:0;justify-content:center}.refresh-cta span:last-child{display:none}.theme-switch{height:36px}.theme-switch button{height:28px;padding:0 7px;font-size:10px}.token-tool{width:36px;height:36px}
+  .top-actions{gap:5px}.refresh-cta{width:36px;height:36px;padding:0;justify-content:center}.refresh-cta span:last-child{display:none}
   .topnav{margin:0 -10px -9px;padding:6px 10px;background:#171614}.topnav .nav-item{padding:7px 9px}.topnav .nav-item span{display:none}
   .content{padding:10px}.phead{display:block;margin-bottom:9px}.phead h1{font-size:18px}.phead p{margin-top:2px}.tbar{align-items:stretch;overflow-x:auto;flex-wrap:nowrap}
   .stats{grid-template-columns:1fr 1fr}.stat{min-height:108px}.stat .sv{font-size:22px}
@@ -367,32 +358,26 @@ const api={
   async put(p,b,t){const h={'Content-Type':'application/json'};if(t)h.Authorization='Bearer '+t;const r=await fetch(p,{method:'PUT',headers:h,body:JSON.stringify(b),credentials:'same-origin'});if(!r.ok)throw new Error(r.status);return r.json()},
   async del(p,t){const h={};if(t)h.Authorization='Bearer '+t;const r=await fetch(p,{method:'DELETE',headers:h,credentials:'same-origin'});if(!r.ok)throw new Error(r.status);return r.json()},
 };
-function apiErr(e,fallback='加载失败'){return e.message==='401'?'本机管理凭证无效，请刷新页面；远程访问时再使用左下角备用 Token。':fallback}
+function apiErr(e,fallback='加载失败'){return e.message==='401'?'本机管理凭证无效，请刷新页面；远程访问时可在设置页填写备用 Token。':fallback}
 createApp({
   setup(){
     const validPages=['dashboard','accounts','keys','models','logs','settings'];
     const savedPage=localStorage.getItem('cb_gw_page');
-    const page=ref(validPages.includes(savedPage)?savedPage:'dashboard'),token=ref(localStorage.getItem('cb_gw_token')||''),ti=ref(''),st=ref(false),toasts=ref([]);
-    const validTones=['classic','warm','forest'],savedTone=localStorage.getItem('cb_gw_tone');
-    const tone=ref(validTones.includes(savedTone)?savedTone:'warm');
+    const page=ref(validPages.includes(savedPage)?savedPage:'dashboard'),token=ref(localStorage.getItem('cb_gw_token')||''),toasts=ref([]);
     function tf(m,t='ok'){const id=Date.now()+Math.random();toasts.value=[...toasts.value,{id,m,t}].slice(-4);setTimeout(()=>toasts.value=toasts.value.filter(x=>x.id!==id),2500)}
-    function sv(){token.value=ti.value;localStorage.setItem('cb_gw_token',ti.value);st.value=false;ti.value='';tf('已保存')}
     function go(k){page.value=k;localStorage.setItem('cb_gw_page',k)}
-    function setTone(k){tone.value=k;localStorage.setItem('cb_gw_tone',k)}
+    function saveToken(value){token.value=value.trim();if(token.value)localStorage.setItem('cb_gw_token',token.value);else localStorage.removeItem('cb_gw_token');tf(token.value?'备用 Admin Token 已保存':'备用 Admin Token 已清除')}
     function hardRefresh(){window.location.reload()}
     const nav=[{k:'dashboard',l:'Dashboard',i:I.dash},{k:'accounts',l:'账号管理',i:I.users},{k:'keys',l:'API Keys',i:I.key},{k:'models',l:'模型配置',i:I.cpu},{k:'logs',l:'请求日志',i:I.log},{k:'settings',l:'设置',i:I.gear}];
-    return{page,token,ti,st,toasts,tone,tf,sv,go,setTone,hardRefresh,nav,I}
+    return{page,token,toasts,tf,go,saveToken,hardRefresh,nav,I}
   },
   template:`
-  <div class="layout" :class="'theme-'+tone">
+  <div class="layout">
     <header class="topbar">
       <div class="brand-block"><div class="brand-symbol">B2</div><div class="brand-copy"><div class="brand-title">Buddy 2 API</div><div class="brand-meta">Local model gateway · v1.4.0</div></div></div>
       <nav class="topnav"><div v-for="n in nav" :key="n.k" class="nav-item" :class="{on:page===n.k}" @click="go(n.k)" v-html="n.i+'<span>'+n.l+'</span>'"></div></nav>
       <div class="top-actions">
         <button class="refresh-cta" @click="hardRefresh"><span v-html="I.refresh"></span><span>刷新</span></button>
-        <div class="theme-switch" aria-label="界面色调"><button :class="{on:tone==='classic'}" @click="setTone('classic')">经典</button><button :class="{on:tone==='warm'}" @click="setTone('warm')">橙色</button><button :class="{on:tone==='forest'}" @click="setTone('forest')">森林</button></div>
-        <div class="node-pill"><span class="node-dot"></span><span>节点 · 本机 02A</span></div>
-        <button class="token-tool" title="备用 Admin Token" @click="st=true;ti=token"><span v-html="I.gear"></span></button>
       </div>
     </header>
     <div class="main">
@@ -401,9 +386,8 @@ createApp({
       <div class="content" v-if="page==='keys'"><keys :token="token" :toast="tf"/></div>
       <div class="content" v-if="page==='models'"><mdls :token="token" :toast="tf"/></div>
       <div class="content" v-if="page==='logs'"><lgs :token="token"/></div>
-      <div class="content" v-if="page==='settings'"><stgs :token="token" :toast="tf"/></div>
+      <div class="content" v-if="page==='settings'"><stgs :token="token" :toast="tf" :save-token="saveToken"/></div>
     </div>
-    <div class="ov" v-if="st" @click.self="st=false"><div class="modal"><div class="modal-h"><h3>备用 Admin Token</h3><button class="x" @click="st=false">&times;</button></div><div class="modal-b"><div class="field"><label>Token</label><input v-model="ti" type="password" placeholder="远程访问或 Cookie 失效时才需要"/><div class="hint">本机打开 127.0.0.1:8787 会自动验证，通常不用填写。</div></div></div><div class="modal-f"><button class="btn" @click="st=false">取消</button><button class="btn pri" @click="sv">保存</button></div></div></div>
     <div class="toasts"><div class="toast" :class="x.t" v-for="x in toasts" :key="x.id">{{x.m}}</div></div>
   </div>`
 }).component('dash',{props:['token','toast'],setup(p){
@@ -859,9 +843,9 @@ createApp({
   </tbody></table><div class="pager"><button class="btn s" @click="prev" :disabled="f.offset<=0||ld">上一页</button><span class="tag">{{pageText}}</span><button class="btn s" @click="next" :disabled="Number(f.offset)+Number(f.limit)>=Number(meta.total)||ld">下一页</button></div></div>
   <div class="card card-p empty" v-else><div class="em">📋</div><p>暂无记录</p></div>
 </div>`
-}).component('stgs',{props:['token','toast'],setup(p){
+}).component('stgs',{props:['token','toast','saveToken'],setup(p){
   const defaults={backend_url:'https://copilot.tencent.com',default_domain:'www.codebuddy.cn',timeout:300,base_url:'http://127.0.0.1:8787/v1',admin_auth:'本机 Cookie 自动验证',data_file:'codebuddy_gateway.db'};
-  const s=ref({...defaults}),stats=ref(null),ld=ref(true),saving=ref(false),copied=ref(''),setupTab=ref('codex');
+  const s=ref({...defaults}),stats=ref(null),ld=ref(true),saving=ref(false),copied=ref(''),setupTab=ref('codex'),adminToken=ref(p.token||'');
   const keysList=ref([]),codexKeyInput=ref(''),codexStatus=ref(null),codexBusy=ref(false),codexResult=ref(null);
   const presets={
     codex:{name:'Codex (OpenAI)',base:'http://127.0.0.1:8787/v1',model:'auto',note:'Codex 强制使用 Responses API (wire_api="responses")。本网关已内置协议转换层，自动将 /v1/responses 映射到后端 Chat Completions。模型别名、内容清洗均自动启用。'},
@@ -875,6 +859,8 @@ createApp({
   async function load(){ld.value=true;try{const cfg=await api.get('/admin/settings',p.token);s.value={...defaults,...cfg};stats.value=await api.get('/admin/stats',p.token);keysList.value=await api.get('/admin/api-keys',p.token);if(keysList.value.length&&!codexKey.value)codexKey.value=keysList.value[0].name||'';try{codexStatus.value=await api.get('/admin/codex/status',p.token)}catch(e){}}catch(e){p.toast(apiErr(e,'加载失败'),'err')}ld.value=false}
   async function save(){if(saving.value)return;saving.value=true;try{await api.put('/admin/settings',{backend_url:s.value.backend_url,default_domain:s.value.default_domain,timeout:Number(s.value.timeout)||300},p.token);p.toast('已保存')}catch(e){p.toast(apiErr(e,'保存失败'),'err')}saving.value=false}
   function resetDefaults(){s.value={...s.value,backend_url:defaults.backend_url,default_domain:defaults.default_domain,timeout:defaults.timeout};p.toast('已恢复默认','info')}
+  function saveAdminToken(){p.saveToken(adminToken.value)}
+  function clearAdminToken(){adminToken.value='';p.saveToken('')}
   async function codexSetup(){
     if(codexBusy.value)return;
     if(!codexKeyInput.value||!codexKeyInput.value.startsWith('sk-cb-')){p.toast('请输入有效的 sk-cb- 开头的 API Key','err');return}
@@ -902,7 +888,7 @@ createApp({
     }
     const x=currentPreset.value;return `curl ${x.base}/chat/completions \\\n  -H "Authorization: Bearer YOUR_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"${x.model}","messages":[{"role":"user","content":"hi"}]}'`
   }
-  onMounted(load);return{s,stats,ld,saving,copied,setupTab,presets,currentPreset,envBlock,curlBlock,load,save,resetDefaults,copy,n,I,keysList,codexKeyInput,codexStatus,codexBusy,codexResult,codexSetup}
+  onMounted(load);return{s,stats,ld,saving,copied,setupTab,adminToken,presets,currentPreset,envBlock,curlBlock,load,save,resetDefaults,saveAdminToken,clearAdminToken,copy,n,I,keysList,codexKeyInput,codexStatus,codexBusy,codexResult,codexSetup}
 },template:`
 <div>
   <div class="phead"><h1>设置</h1><p>运行配置、接入信息和本机维护</p></div>
@@ -929,6 +915,18 @@ createApp({
           </div>
           <div class="status-line" style="margin-top:12px"><span class="badge" :class="stats?.active_accounts?'ok':'err'">Accounts</span><span class="badge" :class="stats?.active_keys?'ok':'err'">Keys</span><span class="tag">Timeout {{s.timeout}}s</span></div>
         </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">备用管理凭证<span class="sub">仅远程访问或 Cookie 失效时需要</span></div>
+      <div class="card-p">
+        <div class="field">
+          <label>Admin Token</label>
+          <input v-model="adminToken" type="password" placeholder="本机访问通常无需填写"/>
+          <div class="hint">凭证只保存在当前浏览器中，用于管理 API 鉴权。</div>
+        </div>
+        <div class="status-line" style="margin-top:10px"><button class="btn s pri" @click="saveAdminToken">保存凭证</button><button class="btn s" @click="clearAdminToken" :disabled="!adminToken&&!token">清除</button></div>
       </div>
     </div>
 
