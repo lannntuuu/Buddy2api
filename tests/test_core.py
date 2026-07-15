@@ -92,6 +92,11 @@ def test_record_request_updates_log_and_counters_once(isolated_db):
     assert account["total_tokens"] == 7
     assert key["total_requests"] == 1
     assert len(db.list_logs()) == 1
+    hourly = db.get_stats()["today"]["hourly"]
+    assert len(hourly) == 24
+    assert sum(bucket["requests"] for bucket in hourly) == 1
+    assert sum(bucket["tokens"] for bucket in hourly) == 7
+    assert sum(bucket["credit"] for bucket in hourly) == 0.25
 
 
 def test_api_auth_fails_closed_without_keys(isolated_db, monkeypatch):

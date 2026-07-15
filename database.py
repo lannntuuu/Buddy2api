@@ -897,6 +897,26 @@ def get_stats() -> dict:
         (today_start,),
     ).fetchone()["c"]
 
+    hourly_rows = conn.execute("""
+        SELECT CAST(strftime('%H', created_at, 'unixepoch', 'localtime') AS INTEGER) as hour,
+               COUNT(*) as requests,
+               COALESCE(SUM(total_tokens), 0) as tokens,
+               COALESCE(SUM(credit), 0) as credit
+        FROM logs WHERE created_at >= ?
+        GROUP BY hour ORDER BY hour
+    """, (today_start,)).fetchall()
+    hourly_by_hour = {int(r["hour"]): dict(r) for r in hourly_rows}
+    hourly = []
+    for hour in range(24):
+        row = hourly_by_hour.get(hour, {})
+        hourly.append({
+            "hour": hour,
+            "label": f"{hour:02d}:00",
+            "requests": int(row.get("requests") or 0),
+            "tokens": int(row.get("tokens") or 0),
+            "credit": round(float(row.get("credit") or 0), 4),
+        })
+
     # 最近 7 个自然日每日统计，补齐 0 值日期，避免图表只显示一根柱子。
     seven_days_ago = _today_start_ts() - 6 * 86400
     daily_rows = conn.execute("""
@@ -968,6 +988,7 @@ def get_stats() -> dict:
             "filtered": int(today_filtered or 0),
             "success_rate": round((today_success / today["requests"] * 100) if today["requests"] else 0, 2),
             "avg_duration_ms": int(today["avg_duration_ms"] or 0),
+            "hourly": hourly,
         },
         "active_accounts": active_accounts,
         "total_accounts": total_accounts,
