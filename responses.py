@@ -123,17 +123,42 @@ def responses_to_chat(resp_payload: dict) -> dict:
     # input[] → messages[]
     inp = resp_payload.get("input")
     if isinstance(inp, list):
+        pending_tool_calls = []
         for item in inp:
             chat_msg = _input_item_to_chat_message(item)
-            if chat_msg:
-                # 清洗 system/developer 消息
-                if chat_msg.get("role") in ("system", "developer"):
-                    chat_msg["role"] = "system"
-                    content = chat_msg.get("content", "")
-                    chat_msg["content"] = _sanitize_system_content(
-                        content if isinstance(content, str) else _flatten_content(content)
-                    )
-                messages.append(chat_msg)
+            if not chat_msg:
+                continue
+
+            # Responses represents parallel calls as adjacent function_call items.
+            # Chat Completions requires those calls on one assistant message so the
+            # following tool results all belong to the same turn.
+            if chat_msg.get("role") == "assistant" and chat_msg.get("tool_calls"):
+                pending_tool_calls.extend(chat_msg["tool_calls"])
+                continue
+
+            if pending_tool_calls:
+                messages.append({
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": pending_tool_calls,
+                })
+                pending_tool_calls = []
+
+            # 清洗 system/developer 消息
+            if chat_msg.get("role") in ("system", "developer"):
+                chat_msg["role"] = "system"
+                content = chat_msg.get("content", "")
+                chat_msg["content"] = _sanitize_system_content(
+                    content if isinstance(content, str) else _flatten_content(content)
+                )
+            messages.append(chat_msg)
+
+        if pending_tool_calls:
+            messages.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": pending_tool_calls,
+            })
     elif isinstance(inp, str) and inp.strip():
         messages.append({"role": "user", "content": inp})
 
