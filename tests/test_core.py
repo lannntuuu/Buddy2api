@@ -49,6 +49,167 @@ def _events_of_type(events: list[tuple[str, dict]], event_name: str) -> list[dic
     return [payload for name, payload in events if name == event_name]
 
 
+def _collect_chat_proxy_stream(
+    chunks: list[bytes],
+    monkeypatch,
+    body: dict | None = None,
+    stream_error: Exception | None = None,
+) -> bytes:
+    class FakeResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def aiter_bytes(self):
+            for chunk in chunks:
+                yield chunk
+            if stream_error is not None:
+                raise stream_error
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        def stream(self, *args, **kwargs):
+            return FakeResponse()
+
+    account = {"id": 1, "name": "test-account"}
+
+    async def pick_account(_excluded):
+        return account
+
+    async def valid_headers(_account):
+        return {"Authorization": "Bearer test"}
+
+    monkeypatch.setattr(auth_manager, "pick_account_with_fallback", pick_account)
+    monkeypatch.setattr(auth_manager, "get_valid_headers", valid_headers)
+    monkeypatch.setattr(auth_manager, "mark_account_success", lambda _account_id: None)
+    monkeypatch.setattr(auth_manager, "mark_account_failure", lambda *_args: None)
+    monkeypatch.setattr(auth_manager, "backend_url", lambda: "https://upstream.test")
+    monkeypatch.setattr(auth_manager, "request_timeout", lambda _default: 30)
+    monkeypatch.setattr(proxy, "_log_request", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(proxy.httpx, "AsyncClient", FakeAsyncClient)
+
+    async def collect():
+        return b"".join([
+            chunk
+            async for chunk in proxy._stream_upstream(
+                body or {"model": "test-model", "stream": True},
+                None,
+                "test-model",
+            )
+        ])
+
+    return asyncio.run(collect())
+
+
+def _parse_chat_proxy_sse(raw: bytes) -> tuple[list[dict], int]:
+    payloads = []
+    done_count = 0
+    for line in raw.decode("utf-8").splitlines():
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            done_count += 1
+        elif data:
+            payloads.append(json.loads(data))
+    return payloads, done_count
+
+
+def _assert_chat_proxy_error_only(raw: bytes) -> None:
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+    assert len(payloads) == 1
+    assert payloads[0].get("error")
+    assert done_count == 1
+
+
+def _install_chat_account_stream_fakes(
+    monkeypatch,
+    accounts: list[dict],
+    streams: dict[int, list[bytes]],
+) -> dict:
+    calls = {
+        "picks": [],
+        "failures": [],
+        "successes": [],
+        "logs": [],
+        "delays": [],
+    }
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, chunks):
+            self.chunks = chunks
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def aiter_bytes(self):
+            for chunk in self.chunks:
+                yield chunk
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        def stream(self, *args, headers, **kwargs):
+            account_id = int(headers["X-Test-Account"])
+            return FakeResponse(streams[account_id])
+
+    async def pick_account(excluded):
+        calls["picks"].append(set(excluded))
+        return next((account for account in accounts if account["id"] not in excluded), None)
+
+    async def valid_headers(account):
+        return {"X-Test-Account": str(account["id"])}
+
+    async def retry_delay(attempt):
+        calls["delays"].append(attempt)
+
+    def record_log(*args, **kwargs):
+        calls["logs"].append((args, kwargs))
+
+    monkeypatch.setattr(auth_manager, "pick_account_with_fallback", pick_account)
+    monkeypatch.setattr(auth_manager, "get_valid_headers", valid_headers)
+    monkeypatch.setattr(
+        auth_manager,
+        "mark_account_failure",
+        lambda account_id, status=0: calls["failures"].append((account_id, status)),
+    )
+    monkeypatch.setattr(
+        auth_manager,
+        "mark_account_success",
+        lambda account_id: calls["successes"].append(account_id),
+    )
+    monkeypatch.setattr(auth_manager, "backend_url", lambda: "https://upstream.test")
+    monkeypatch.setattr(auth_manager, "request_timeout", lambda _default: 30)
+    monkeypatch.setattr(proxy, "_retry_delay", retry_delay)
+    monkeypatch.setattr(proxy, "_log_request", record_log)
+    monkeypatch.setattr(proxy.httpx, "AsyncClient", FakeAsyncClient)
+    return calls
+
+
 @pytest.fixture()
 def isolated_db(tmp_path, monkeypatch):
     path = tmp_path / "gateway.db"
@@ -147,6 +308,82 @@ def test_responses_input_image_string_is_preserved():
         [{"type": "input_image", "image_url": "data:image/png;base64,abc"}]
     )
     assert "data:image/png;base64,abc" in flattened
+
+
+def test_responses_to_chat_groups_parallel_function_calls_across_reasoning_items():
+    payload = {
+        "model": "test-model",
+        "input": [
+            {"type": "message", "role": "user", "content": "Run both tools"},
+            {
+                "type": "function_call",
+                "call_id": "call_first",
+                "name": "first_tool",
+                "arguments": '{"value":1}',
+            },
+            {"type": "reasoning", "summary": []},
+            {
+                "type": "function_call",
+                "call_id": "call_second",
+                "name": "second_tool",
+                "arguments": {"value": 2},
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_first",
+                "output": {"ok": True},
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_second",
+                "output": "done",
+            },
+        ],
+    }
+
+    messages = responses.responses_to_chat(payload)["messages"]
+
+    assert [message["role"] for message in messages] == ["user", "assistant", "tool", "tool"]
+    assert [call["id"] for call in messages[1]["tool_calls"]] == ["call_first", "call_second"]
+    assert messages[1]["tool_calls"][1]["function"]["arguments"] == '{"value": 2}'
+    assert [message["tool_call_id"] for message in messages[2:]] == ["call_first", "call_second"]
+
+
+def test_responses_to_chat_keeps_sequential_function_call_turns_separate():
+    payload = {
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "call_first",
+                "name": "first_tool",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_first",
+                "output": "first result",
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_second",
+                "name": "second_tool",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_second",
+                "output": "second result",
+            },
+        ],
+    }
+
+    messages = responses.responses_to_chat(payload)["messages"]
+
+    assert [message["role"] for message in messages] == ["assistant", "tool", "assistant", "tool"]
+    assert [messages[0]["tool_calls"][0]["id"], messages[2]["tool_calls"][0]["id"]] == [
+        "call_first",
+        "call_second",
+    ]
 
 
 def test_responses_stream_reassembles_byte_split_tool_arguments():
@@ -430,6 +667,1026 @@ def test_responses_stream_supports_multiline_data_and_cr_line_endings():
     assert len(completed) == 1
     assert completed[0]["response"]["output"][0]["content"][0]["text"] == "hello"
     assert not _events_of_type(events, "response.failed")
+
+
+def test_chat_proxy_stream_does_not_duplicate_terminal_events(monkeypatch):
+    chunks = [
+        _chat_sse({
+            "id": "chatcmpl-complete",
+            "object": "chat.completion.chunk",
+            "created": 123,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "complete"},
+                "finish_reason": None,
+            }],
+        }),
+        _chat_sse({
+            "id": "chatcmpl-complete",
+            "object": "chat.completion.chunk",
+            "created": 123,
+            "model": "test-model",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }),
+        b"data: [DONE]\n\n",
+    ]
+
+    raw = _collect_chat_proxy_stream(chunks, monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+    finish_reasons = [
+        choice["finish_reason"]
+        for payload in payloads
+        for choice in payload.get("choices") or []
+        if choice.get("finish_reason") is not None
+    ]
+
+    assert finish_reasons == ["stop"]
+    assert done_count == 1
+
+
+def test_chat_proxy_stream_normalizes_empty_finish_reason(monkeypatch):
+    chunks = [
+        _chat_sse({
+            "id": "chatcmpl-empty-finish",
+            "object": "chat.completion.chunk",
+            "created": 124,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "complete"},
+                "finish_reason": "",
+            }],
+        }),
+        _chat_sse({
+            "id": "chatcmpl-empty-finish",
+            "object": "chat.completion.chunk",
+            "created": 124,
+            "model": "test-model",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }),
+        b"data: [DONE]\n\n",
+    ]
+
+    raw = _collect_chat_proxy_stream(chunks, monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+
+    assert payloads[0]["choices"][0]["finish_reason"] is None
+    assert payloads[1]["choices"][0]["finish_reason"] == "stop"
+    assert not any(payload.get("error") for payload in payloads)
+    assert done_count == 1
+
+
+def test_chat_proxy_stream_adds_done_after_explicit_terminal_at_eof(monkeypatch):
+    raw = _collect_chat_proxy_stream([
+        _chat_sse({
+            "id": "chatcmpl-terminal-eof",
+            "object": "chat.completion.chunk",
+            "created": 321,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "complete"},
+                "finish_reason": "stop",
+            }],
+        }),
+    ], monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+
+    assert [
+        choice["finish_reason"]
+        for payload in payloads
+        for choice in payload.get("choices") or []
+        if choice.get("finish_reason") is not None
+    ] == ["stop"]
+    assert done_count == 1
+
+
+def test_chat_proxy_stream_synthesizes_terminal_for_complete_tool_at_clean_eof(
+    monkeypatch,
+):
+    raw = _collect_chat_proxy_stream([
+        _chat_sse({
+            "id": "chatcmpl-eof",
+            "object": "chat.completion.chunk",
+            "created": 456,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_complete",
+                        "type": "function",
+                        "function": {"name": "shell", "arguments": '{"command":"pwd"}'},
+                    }],
+                },
+                "finish_reason": None,
+            }],
+        }),
+    ], monkeypatch)
+
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+    terminal_choices = [
+        choice
+        for payload in payloads
+        for choice in payload.get("choices") or []
+        if choice.get("finish_reason") is not None
+    ]
+
+    assert len(terminal_choices) == 1
+    assert terminal_choices[0]["index"] == 0
+    assert terminal_choices[0]["delta"] == {}
+    assert terminal_choices[0]["finish_reason"] == "tool_calls"
+    assert done_count == 1
+
+
+def test_chat_proxy_stream_rejects_plain_text_without_terminal_at_eof(monkeypatch):
+    raw = _collect_chat_proxy_stream([
+        _chat_sse({
+            "id": "chatcmpl-text-eof",
+            "object": "chat.completion.chunk",
+            "created": 457,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "possibly incomplete"},
+                "finish_reason": None,
+            }],
+        }),
+    ], monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+
+    assert len([payload for payload in payloads if payload.get("error")]) == 1
+    assert not any(
+        choice.get("finish_reason")
+        for payload in payloads
+        for choice in payload.get("choices") or []
+    )
+    assert done_count == 1
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        '{"command":"pwd"',
+        '{"command":pwd}',
+        '[]',
+    ],
+)
+def test_chat_proxy_stream_rejects_invalid_tool_arguments_at_eof(
+    monkeypatch,
+    arguments,
+):
+    raw = _collect_chat_proxy_stream([
+        _chat_sse({
+            "id": "chatcmpl-invalid-tool",
+            "object": "chat.completion.chunk",
+            "created": 789,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_invalid",
+                        "type": "function",
+                        "function": {"name": "shell", "arguments": arguments},
+                    }],
+                },
+                "finish_reason": None,
+            }],
+        }),
+    ], monkeypatch)
+
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+    errors = [payload["error"] for payload in payloads if payload.get("error")]
+    terminal_choices = [
+        choice
+        for payload in payloads
+        for choice in payload.get("choices") or []
+        if choice.get("finish_reason") is not None
+    ]
+
+    assert len(errors) == 1
+    assert errors[0]["message"]
+    assert terminal_choices == []
+    assert done_count == 1
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [],
+        [b": keepalive\n\n", b": still-alive\r\n\r\n"],
+    ],
+    ids=["empty", "comments-only"],
+)
+def test_chat_proxy_stream_rejects_empty_or_comment_only_streams(
+    monkeypatch,
+    chunks,
+):
+    raw = _collect_chat_proxy_stream(chunks, monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+
+    assert len([payload for payload in payloads if payload.get("error")]) == 1
+    assert not any(
+        choice.get("finish_reason")
+        for payload in payloads
+        for choice in payload.get("choices") or []
+    )
+    assert done_count == 1
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [b"data: {not-json}\n\n"],
+        [b'data: {"choices":[{"index":0'],
+        [b"data: \xff\n\n"],
+    ],
+    ids=["malformed-json", "partial-frame", "invalid-utf8"],
+)
+def test_chat_proxy_stream_rejects_malformed_sse_at_eof(monkeypatch, chunks):
+    raw = _collect_chat_proxy_stream(chunks, monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+
+    assert len([payload for payload in payloads if payload.get("error")]) == 1
+    assert not any(
+        choice.get("finish_reason")
+        for payload in payloads
+        for choice in payload.get("choices") or []
+    )
+    assert done_count == 1
+
+
+def test_chat_proxy_stream_decoder_reassembles_byte_split_utf8(monkeypatch):
+    wire = b"".join([
+        _chat_sse({
+            "id": "chatcmpl-byte-split",
+            "object": "chat.completion.chunk",
+            "created": 793,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "逐字节中文"},
+                "finish_reason": "stop",
+            }],
+        }),
+        b"data: [DONE]\n\n",
+    ])
+    raw = _collect_chat_proxy_stream([bytes([value]) for value in wire], monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+
+    assert [
+        choice["delta"]["content"]
+        for payload in payloads
+        for choice in payload.get("choices") or []
+        if (choice.get("delta") or {}).get("content")
+    ] == ["逐字节中文"]
+    assert not any(payload.get("error") for payload in payloads)
+    assert done_count == 1
+
+
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n", "\r"], ids=["lf", "crlf", "cr"])
+def test_chat_proxy_stream_decoder_supports_sse_line_endings(
+    monkeypatch,
+    line_ending,
+):
+    payload = json.dumps({
+        "id": "chatcmpl-line-ending",
+        "object": "chat.completion.chunk",
+        "created": 794,
+        "model": "test-model",
+        "choices": [{
+            "index": 0,
+            "delta": {"content": "line ending"},
+            "finish_reason": "stop",
+        }],
+    }, separators=(",", ":"))
+    wire = (
+        f"data: {payload}{line_ending}{line_ending}"
+        f"data: [DONE]{line_ending}{line_ending}"
+    ).encode("utf-8")
+    raw = _collect_chat_proxy_stream([wire], monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+
+    assert [
+        choice["delta"]["content"]
+        for event in payloads
+        for choice in event.get("choices") or []
+        if (choice.get("delta") or {}).get("content")
+    ] == ["line ending"]
+    assert not any(event.get("error") for event in payloads)
+    assert done_count == 1
+
+
+def test_chat_proxy_stream_decoder_supports_multiline_data(monkeypatch):
+    payload = json.dumps({
+        "id": "chatcmpl-multiline",
+        "object": "chat.completion.chunk",
+        "created": 795,
+        "model": "test-model",
+        "choices": [{
+            "index": 0,
+            "delta": {"content": "multiline"},
+            "finish_reason": "stop",
+        }],
+    }, separators=(",", ":"))
+    split_at = payload.index('"choices"')
+    wire = (
+        "event: message\r\n"
+        f"data: {payload[:split_at]}\r\n"
+        f"data: {payload[split_at:]}\r\n"
+        "\r\n"
+        "data: [DONE]\r\n\r\n"
+    ).encode("utf-8")
+    raw = _collect_chat_proxy_stream([bytes([value]) for value in wire], monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+
+    assert [
+        choice["delta"]["content"]
+        for event in payloads
+        for choice in event.get("choices") or []
+        if (choice.get("delta") or {}).get("content")
+    ] == ["multiline"]
+    assert not any(event.get("error") for event in payloads)
+    assert done_count == 1
+
+
+@pytest.mark.parametrize(
+    "wire",
+    [
+        b"data: " + (b"x" * 65) + b"\n\n",
+        b"data: " + (b"x" * 40) + b"\ndata: " + (b"y" * 40) + b"\n\n",
+    ],
+    ids=["line-limit", "event-limit"],
+)
+def test_chat_proxy_stream_decoder_enforces_eight_mib_limits(
+    monkeypatch,
+    wire,
+):
+    assert proxy._MAX_SSE_EVENT_BYTES == 8 * 1024 * 1024
+    monkeypatch.setattr(proxy, "_MAX_SSE_EVENT_BYTES", 64)
+
+    raw = _collect_chat_proxy_stream([wire], monkeypatch)
+
+    _assert_chat_proxy_error_only(raw)
+
+
+def test_chat_proxy_stream_done_ignores_oversized_trailing_line(monkeypatch):
+    monkeypatch.setattr(proxy, "_MAX_SSE_EVENT_BYTES", 512)
+    wire = b"".join([
+        _chat_sse({
+            "id": "chatcmpl-done-before-garbage",
+            "object": "chat.completion.chunk",
+            "created": 796,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop",
+            }],
+        }),
+        b"data: [DONE]\n\n",
+        b"x" * 513,
+        b"\n\n",
+    ])
+
+    raw = _collect_chat_proxy_stream([wire], monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+
+    assert not any(payload.get("error") for payload in payloads)
+    assert [
+        choice["finish_reason"]
+        for payload in payloads
+        for choice in payload.get("choices") or []
+        if choice.get("finish_reason") is not None
+    ] == ["stop"]
+    assert done_count == 1
+
+
+@pytest.mark.parametrize(
+    "choices",
+    [
+        1,
+        ["not-a-choice"],
+        [{"index": "0", "delta": {"content": "invalid"}, "finish_reason": None}],
+        [{"index": 0, "delta": "not-a-delta", "finish_reason": None}],
+    ],
+    ids=["choices-not-list", "choice-not-object", "invalid-index", "delta-not-object"],
+)
+def test_chat_proxy_stream_rejects_invalid_chunk_schema_without_leaking(
+    monkeypatch,
+    choices,
+):
+    raw = _collect_chat_proxy_stream([
+        _chat_sse({
+            "id": "chatcmpl-invalid-schema",
+            "object": "chat.completion.chunk",
+            "created": 790,
+            "model": "test-model",
+            "choices": choices,
+        }),
+    ], monkeypatch)
+
+    _assert_chat_proxy_error_only(raw)
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "trailing_delta"),
+    [
+        ("stop", {"content": "late content"}),
+        ("tool_calls", {
+            "tool_calls": [{
+                "index": 0,
+                "id": "call_late",
+                "type": "function",
+                "function": {"name": "shell", "arguments": '{"command":"pwd"}'},
+            }],
+        }),
+    ],
+    ids=["content-after-stop", "tool-after-tool-terminal"],
+)
+def test_chat_proxy_stream_rejects_same_choice_delta_after_terminal(
+    monkeypatch,
+    finish_reason,
+    trailing_delta,
+):
+    raw = _collect_chat_proxy_stream([
+        _chat_sse({
+            "id": "chatcmpl-early-terminal",
+            "object": "chat.completion.chunk",
+            "created": 791,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": finish_reason,
+            }],
+        }),
+        _chat_sse({
+            "id": "chatcmpl-early-terminal",
+            "object": "chat.completion.chunk",
+            "created": 791,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": trailing_delta,
+                "finish_reason": None,
+            }],
+        }),
+        b"data: [DONE]\n\n",
+    ], monkeypatch)
+
+    _assert_chat_proxy_error_only(raw)
+
+
+def test_chat_proxy_stream_rejects_complete_tool_call_with_stop(monkeypatch):
+    raw = _collect_chat_proxy_stream([
+        _chat_sse({
+            "id": "chatcmpl-tool-stop",
+            "object": "chat.completion.chunk",
+            "created": 792,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_stop",
+                        "type": "function",
+                        "function": {"name": "shell", "arguments": '{"command":"pwd"}'},
+                    }],
+                },
+                "finish_reason": None,
+            }],
+        }),
+        _chat_sse({
+            "id": "chatcmpl-tool-stop",
+            "object": "chat.completion.chunk",
+            "created": 792,
+            "model": "test-model",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }),
+        b"data: [DONE]\n\n",
+    ], monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+
+    assert len([payload for payload in payloads if payload.get("error")]) == 1
+    assert not any(
+        choice.get("finish_reason")
+        for payload in payloads
+        for choice in payload.get("choices") or []
+    )
+    assert done_count == 1
+
+
+def test_chat_proxy_stream_preserves_http_200_error_event(monkeypatch):
+    raw = _collect_chat_proxy_stream([
+        _chat_sse({
+            "error": {
+                "message": "upstream overloaded",
+                "type": "server_error",
+                "code": "overloaded",
+            },
+        }),
+    ], monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+    errors = [payload["error"] for payload in payloads if payload.get("error")]
+
+    assert len(errors) == 1
+    assert errors[0]["message"] == "upstream overloaded"
+    assert not any(payload.get("choices") for payload in payloads)
+    assert done_count == 1
+
+
+def test_chat_proxy_stream_rejects_an_unfinished_choice(monkeypatch):
+    raw = _collect_chat_proxy_stream([
+        _chat_sse({
+            "id": "chatcmpl-multiple",
+            "object": "chat.completion.chunk",
+            "created": 999,
+            "model": "test-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": "first"},
+                    "finish_reason": "stop",
+                },
+                {
+                    "index": 1,
+                    "delta": {"content": "second"},
+                    "finish_reason": None,
+                },
+            ],
+        }),
+    ], monkeypatch, body={"model": "test-model", "stream": True, "n": 2})
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+    errors = [payload["error"] for payload in payloads if payload.get("error")]
+    terminal_choices = [
+        (choice["index"], choice["finish_reason"])
+        for payload in payloads
+        for choice in payload.get("choices") or []
+        if choice.get("finish_reason") is not None
+    ]
+
+    assert len(errors) == 1
+    assert terminal_choices == []
+    assert done_count == 1
+
+
+def test_chat_proxy_stream_rejects_missing_expected_choice(monkeypatch):
+    raw = _collect_chat_proxy_stream([
+        _chat_sse({
+            "id": "chatcmpl-missing-choice",
+            "object": "chat.completion.chunk",
+            "created": 1000,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "only one"},
+                "finish_reason": "stop",
+            }],
+        }),
+    ], monkeypatch, body={"model": "test-model", "stream": True, "n": 2})
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+
+    assert len([payload for payload in payloads if payload.get("error")]) == 1
+    assert [
+        choice["finish_reason"]
+        for payload in payloads
+        for choice in payload.get("choices") or []
+        if choice.get("finish_reason") is not None
+    ] == []
+    assert done_count == 1
+
+
+def test_chat_proxy_stream_rejects_done_with_unfinished_choice(monkeypatch):
+    raw = _collect_chat_proxy_stream([
+        _chat_sse({
+            "id": "chatcmpl-premature-done",
+            "object": "chat.completion.chunk",
+            "created": 1001,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "unfinished"},
+                "finish_reason": None,
+            }],
+        }),
+        b"data: [DONE]\n\n",
+    ], monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+
+    assert len([payload for payload in payloads if payload.get("error")]) == 1
+    assert not any(
+        choice.get("finish_reason")
+        for payload in payloads
+        for choice in payload.get("choices") or []
+    )
+    assert done_count == 1
+
+
+def test_chat_proxy_stream_discards_terminal_before_http_error(monkeypatch):
+    raw = _collect_chat_proxy_stream([
+        _chat_sse({
+            "id": "chatcmpl-network-failure",
+            "object": "chat.completion.chunk",
+            "created": 1002,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop",
+            }],
+        }),
+    ], monkeypatch, stream_error=proxy.httpx.ReadError("connection dropped"))
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+
+    assert len(payloads) == 1
+    assert payloads[0].get("error")
+    assert not any(
+        choice.get("finish_reason")
+        for payload in payloads
+        for choice in payload.get("choices") or []
+    )
+    assert done_count == 1
+
+
+def test_chat_proxy_stream_ignores_data_after_done(monkeypatch):
+    raw = _collect_chat_proxy_stream([
+        _chat_sse({
+            "id": "chatcmpl-before-done",
+            "object": "chat.completion.chunk",
+            "created": 1003,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop",
+            }],
+        }),
+        b"data: [DONE]\n\n",
+        _chat_sse({
+            "id": "chatcmpl-after-done",
+            "object": "chat.completion.chunk",
+            "created": 1004,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "tool_calls",
+            }],
+        }),
+    ], monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+
+    assert not any(payload.get("error") for payload in payloads)
+    assert [
+        choice["finish_reason"]
+        for payload in payloads
+        for choice in payload.get("choices") or []
+        if choice.get("finish_reason") is not None
+    ] == ["stop"]
+    assert done_count == 1
+
+
+def test_chat_proxy_stream_rejects_tool_finish_without_tool_delta(monkeypatch):
+    raw = _collect_chat_proxy_stream([
+        _chat_sse({
+            "id": "chatcmpl-missing-tool",
+            "object": "chat.completion.chunk",
+            "created": 1005,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "tool_calls",
+            }],
+        }),
+        b"data: [DONE]\n\n",
+    ], monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+
+    assert len([payload for payload in payloads if payload.get("error")]) == 1
+    assert not any(
+        choice.get("finish_reason")
+        for payload in payloads
+        for choice in payload.get("choices") or []
+    )
+    assert done_count == 1
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "content_filter"])
+def test_chat_proxy_stream_accepts_truncated_tools_with_explicit_finish(
+    monkeypatch,
+    finish_reason,
+):
+    raw = _collect_chat_proxy_stream([
+        _chat_sse({
+            "id": "chatcmpl-truncated-tool",
+            "object": "chat.completion.chunk",
+            "created": 1006,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_truncated",
+                        "type": "function",
+                        "function": {"name": "shell", "arguments": '{"command":"git'},
+                    }],
+                },
+                "finish_reason": None,
+            }],
+        }),
+        _chat_sse({
+            "id": "chatcmpl-truncated-tool",
+            "object": "chat.completion.chunk",
+            "created": 1006,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": finish_reason,
+            }],
+        }),
+        b"data: [DONE]\n\n",
+    ], monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+
+    assert not any(payload.get("error") for payload in payloads)
+    assert [
+        choice["finish_reason"]
+        for payload in payloads
+        for choice in payload.get("choices") or []
+        if choice.get("finish_reason") is not None
+    ] == [finish_reason]
+    assert done_count == 1
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "content_filter"])
+@pytest.mark.parametrize(
+    "tool_deltas",
+    [
+        [{
+            "index": 0,
+            "id": "call_bad_function",
+            "type": "function",
+            "function": "not-an-object",
+        }],
+        [{
+            "index": 0,
+            "id": "call_bad_arguments",
+            "type": "function",
+            "function": {"name": "shell", "arguments": {"command": "git"}},
+        }],
+        [
+            {
+                "index": 0,
+                "id": "call_first",
+                "type": "function",
+                "function": {"name": "shell", "arguments": '{"command":"'},
+            },
+            {
+                "index": 0,
+                "id": "call_second",
+                "type": "function",
+                "function": {"arguments": "git"},
+            },
+        ],
+        [
+            {
+                "index": 0,
+                "id": "call_name_conflict",
+                "type": "function",
+                "function": {"name": "shell", "arguments": '{"command":"'},
+            },
+            {
+                "index": 0,
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "git"},
+            },
+        ],
+    ],
+    ids=["invalid-function", "invalid-arguments", "conflicting-id", "conflicting-name"],
+)
+def test_chat_proxy_stream_truncation_rejects_invalid_or_conflicting_tool_fields(
+    monkeypatch,
+    tool_deltas,
+    finish_reason,
+):
+    chunks = [
+        _chat_sse({
+            "id": "chatcmpl-invalid-truncated-tool",
+            "object": "chat.completion.chunk",
+            "created": 1007,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [tool_delta]},
+                "finish_reason": None,
+            }],
+        })
+        for tool_delta in tool_deltas
+    ]
+    chunks.extend([
+        _chat_sse({
+            "id": "chatcmpl-invalid-truncated-tool",
+            "object": "chat.completion.chunk",
+            "created": 1007,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": finish_reason,
+            }],
+        }),
+        b"data: [DONE]\n\n",
+    ])
+    raw = _collect_chat_proxy_stream(chunks, monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+
+    assert len([payload for payload in payloads if payload.get("error")]) == 1
+    assert not any(
+        choice.get("finish_reason")
+        for payload in payloads
+        for choice in payload.get("choices") or []
+    )
+    assert done_count == 1
+
+
+def test_chat_proxy_stream_fails_over_after_preoutput_malformed_stream(monkeypatch):
+    accounts = [
+        {"id": 1, "name": "malformed-account"},
+        {"id": 2, "name": "healthy-account"},
+    ]
+    streams = {
+        1: [b"data: {not-json}\n\n"],
+        2: [
+            _chat_sse({
+                "id": "chatcmpl-second-account",
+                "object": "chat.completion.chunk",
+                "created": 1008,
+                "model": "test-model",
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": "second account"},
+                    "finish_reason": "stop",
+                }],
+            }),
+            b"data: [DONE]\n\n",
+        ],
+    }
+    calls = _install_chat_account_stream_fakes(monkeypatch, accounts, streams)
+
+    async def collect():
+        return b"".join([
+            chunk
+            async for chunk in proxy._stream_upstream(
+                {"model": "test-model", "stream": True},
+                None,
+                "test-model",
+            )
+        ])
+
+    raw = asyncio.run(collect())
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+    retry_logs = [entry for entry in calls["logs"] if entry[0][8] == "retry"]
+    success_logs = [entry for entry in calls["logs"] if entry[0][9] == 200]
+
+    assert [payload["id"] for payload in payloads] == ["chatcmpl-second-account"]
+    assert payloads[0]["choices"][0]["delta"]["content"] == "second account"
+    assert done_count == 1
+    assert calls["picks"] == [set(), {1}]
+    assert calls["failures"] == [(1, 502)]
+    assert calls["successes"] == [2]
+    assert calls["delays"] == [0]
+    assert len(retry_logs) == 1
+    assert retry_logs[0][0][1]["id"] == 1
+    assert retry_logs[0][1]["increment_usage"] is False
+    assert len(success_logs) == 1
+    assert success_logs[0][0][1]["id"] == 2
+
+
+def test_chat_proxy_stream_preserves_final_usage_when_no_failover_account(monkeypatch):
+    accounts = [{"id": 1, "name": "only-account"}]
+    streams = {1: [
+        _chat_sse({
+            "id": "chatcmpl-missing-second-choice",
+            "object": "chat.completion.chunk",
+            "created": 1009,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "prompt_tokens": 2,
+                "completion_tokens": 3,
+                "total_tokens": 5,
+                "credit": 1.25,
+            },
+        }),
+    ]}
+    calls = _install_chat_account_stream_fakes(monkeypatch, accounts, streams)
+
+    async def collect():
+        return b"".join([
+            chunk
+            async for chunk in proxy._stream_upstream(
+                {"model": "test-model", "stream": True, "n": 2},
+                None,
+                "test-model",
+            )
+        ])
+
+    raw = asyncio.run(collect())
+    final_error_logs = [entry for entry in calls["logs"] if entry[0][8] == "error"]
+
+    _assert_chat_proxy_error_only(raw)
+    assert calls["picks"] == [set(), {1}]
+    assert calls["failures"] == [(1, 502)]
+    assert calls["successes"] == []
+    assert len(final_error_logs) == 1
+    assert final_error_logs[0][0][1]["id"] == 1
+    assert final_error_logs[0][0][4:8] == (2, 3, 5, 1.25)
+    assert final_error_logs[0][0][9] == 502
+
+
+def test_chat_proxy_stream_records_success_before_terminal_is_consumed(monkeypatch):
+    accounts = [{"id": 1, "name": "healthy-account"}]
+    streams = {
+        1: [
+            _chat_sse({
+                "id": "chatcmpl-early-stop",
+                "object": "chat.completion.chunk",
+                "created": 1009,
+                "model": "test-model",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                }],
+            }),
+            b"data: [DONE]\n\n",
+        ],
+    }
+    calls = _install_chat_account_stream_fakes(monkeypatch, accounts, streams)
+
+    async def consume_first():
+        generator = proxy._stream_upstream(
+            {"model": "test-model", "stream": True},
+            None,
+            "test-model",
+        )
+        first = await anext(generator)
+        assert calls["successes"] == [1]
+        assert len(calls["logs"]) == 1
+        assert calls["logs"][0][0][8] == "stop"
+        await generator.aclose()
+        return first
+
+    first = asyncio.run(consume_first())
+    payloads, done_count = _parse_chat_proxy_sse(first)
+
+    assert payloads[0]["choices"][0]["finish_reason"] == "stop"
+    assert done_count == 0
+    assert calls["failures"] == []
+    assert calls["successes"] == [1]
+    assert len(calls["logs"]) == 1
+    assert calls["logs"][0][0][8] == "stop"
+    assert calls["logs"][0][0][9] == 200
+
+
+def test_chat_proxy_stream_records_failure_before_error_is_consumed(monkeypatch):
+    accounts = [{"id": 1, "name": "only-account"}]
+    streams = {1: [b"data: {not-json}\n\n"]}
+    calls = _install_chat_account_stream_fakes(monkeypatch, accounts, streams)
+
+    async def consume_first():
+        generator = proxy._stream_upstream(
+            {"model": "test-model", "stream": True},
+            None,
+            "test-model",
+        )
+        first = await anext(generator)
+        assert calls["failures"] == [(1, 502)]
+        assert len([entry for entry in calls["logs"] if entry[0][8] == "error"]) == 1
+        await generator.aclose()
+        return first
+
+    first = asyncio.run(consume_first())
+    final_error_logs = [entry for entry in calls["logs"] if entry[0][8] == "error"]
+
+    _assert_chat_proxy_error_only(first)
+    assert calls["failures"] == [(1, 502)]
+    assert calls["successes"] == []
+    assert len(final_error_logs) == 1
+    assert final_error_logs[0][0][9] == 502
 
 
 def test_retryable_statuses_are_explicit():
