@@ -454,134 +454,242 @@ def chat_response_to_responses(chat_resp: dict, model: str) -> dict:
 # 流式 SSE: Chat delta → Responses events
 # ============================================================
 
+
+async def _iter_chat_sse_data(
+    chat_stream: AsyncGenerator[bytes, None],
+) -> AsyncGenerator[str, None]:
+    """Yield complete SSE data events from arbitrary HTTP byte chunks."""
+    buffer = b""
+    data_lines: list[bytes] = []
+    event_bytes = 0
+    max_event_bytes = 8 * 1024 * 1024
+
+    def take_line(*, final: bool = False) -> Optional[bytes]:
+        nonlocal buffer
+        for index, value in enumerate(buffer):
+            if value == 0x0A:
+                line = buffer[:index]
+                buffer = buffer[index + 1:]
+                return line[:-1] if line.endswith(b"\r") else line
+            if value == 0x0D:
+                if index + 1 == len(buffer) and not final:
+                    return None
+                end = index + 2 if buffer[index + 1:index + 2] == b"\n" else index + 1
+                line = buffer[:index]
+                buffer = buffer[end:]
+                return line
+        if final and buffer:
+            line = buffer
+            buffer = b""
+            return line
+        return None
+
+    def consume_line(line: bytes) -> Optional[str]:
+        nonlocal data_lines, event_bytes
+        if len(line) > max_event_bytes:
+            raise ValueError("upstream SSE line exceeds the size limit")
+        if not line:
+            if not data_lines:
+                return None
+            data = b"\n".join(data_lines)
+            data_lines = []
+            event_bytes = 0
+            return data.decode("utf-8")
+        if line.startswith(b"data:"):
+            data = line[5:]
+            if data.startswith(b" "):
+                data = data[1:]
+            event_bytes += len(data) + 1
+            if event_bytes > max_event_bytes:
+                raise ValueError("upstream SSE event exceeds the size limit")
+            data_lines.append(data)
+        return None
+
+    async for chunk in chat_stream:
+        if not chunk:
+            continue
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise TypeError("upstream stream chunks must be bytes")
+        buffer += bytes(chunk)
+        if len(buffer) > max_event_bytes and b"\n" not in buffer and b"\r" not in buffer:
+            raise ValueError("upstream SSE line exceeds the size limit")
+
+        while True:
+            line = take_line()
+            if line is None:
+                break
+            data = consume_line(line)
+            if data is not None:
+                yield data
+
+    while True:
+        line = take_line(final=True)
+        if line is None:
+            break
+        data = consume_line(line)
+        if data is not None:
+            yield data
+    if data_lines:
+        yield b"\n".join(data_lines).decode("utf-8")
+
+
 async def chat_stream_to_responses_stream(
     chat_stream: AsyncGenerator[bytes, None],
     model: str,
 ) -> AsyncGenerator[str, None]:
-    """
-    将 Chat Completions SSE 流转换为 Responses API SSE 流。
-    
-    Chat SSE 格式:
-      data: {choices: [{delta: {content, role, tool_calls}, finish_reason}], usage}
-      data: [DONE]
-    
-    Responses SSE 格式:
-      event: response.created
-      data: {type:"response.created", response:{...}}
-      
-      event: response.output_item.added
-      data: {type:"response.output_item.added", output_index:0, item:{...}}
-      
-      event: response.content_part.added
-      data: {type:"response.content_part.added", output_index:0, content_index:0, part:{...}}
-      
-      event: response.output_text.delta
-      data: {type:"response.output_text.delta", output_index:0, content_index:0, delta:"..."}
-      
-      event: response.output_item.done
-      data: {type:"response.output_item.done", output_index:0, item:{...}}
-      
-      event: response.completed
-      data: {type:"response.completed", response:{...}}
-    """
+    """Convert a Chat Completions SSE stream into Responses API events."""
     resp_id = "resp_" + os.urandom(12).hex()
-    seq = 0
-    output_index = 0
-    output_items = []
-    current_text = ""
-    usage = {}
+    created_at = int(time.time())
+    response_model = model
+    seq = -1
+    output_items: list[dict] = []
+    item_states: list[dict] = []
+    text_states: dict[int, dict] = {}
+    tool_states: dict[tuple[int, int], dict] = {}
+    usage: dict = {}
+    seen_choices: set[int] = set()
+    finished_choices: dict[int, str] = {}
+    saw_done = False
+    stream_error: Optional[dict] = None
 
-    # --- event: response.created ---
-    seq += 1
-    yield _make_sse_event("response.created", {
-        "type": "response.created",
-        "sequence_number": seq,
-        "response": {
+    def event(event_name: str, **data) -> str:
+        nonlocal seq
+        seq += 1
+        return _make_sse_event(event_name, {
+            "type": event_name,
+            "sequence_number": seq,
+            **data,
+        })
+
+    def response_usage() -> dict:
+        input_tokens = usage.get("prompt_tokens", usage.get("input_tokens", 0))
+        output_tokens = usage.get("completion_tokens", usage.get("output_tokens", 0))
+        return {
+            "input_tokens": input_tokens,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": output_tokens,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": usage.get("total_tokens", input_tokens + output_tokens),
+        }
+
+    def response_snapshot(status: str, **extra) -> dict:
+        snapshot = {
             "id": resp_id,
             "object": "response",
-            "created_at": int(time.time()),
-            "status": "in_progress",
-            "model": model,
-            "output": [],
-        },
-    })
+            "created_at": created_at,
+            "status": status,
+            "model": response_model,
+            "output": output_items,
+            "error": None,
+            "incomplete_details": None,
+            "usage": None if status == "in_progress" else response_usage(),
+        }
+        snapshot.update(extra)
+        return snapshot
 
-    # --- event: response.in_progress ---
-    seq += 1
-    yield _make_sse_event("response.in_progress", {
-        "type": "response.in_progress",
-        "sequence_number": seq,
-    })
+    def close_item(state: dict, status: str) -> list[str]:
+        if state.get("closed"):
+            return []
+        item = state["item"]
+        output_index = state["output_index"]
+        item["status"] = status
+        events = []
+        if state["kind"] == "text":
+            events.append(event(
+                "response.output_text.done",
+                item_id=item["id"],
+                output_index=output_index,
+                content_index=0,
+                text=state["text"],
+                logprobs=[],
+            ))
+            events.append(event(
+                "response.content_part.done",
+                item_id=item["id"],
+                output_index=output_index,
+                content_index=0,
+                part={
+                    "type": "output_text",
+                    "text": state["text"],
+                    "annotations": [],
+                    "logprobs": [],
+                },
+            ))
+        elif status == "completed":
+            events.append(event(
+                "response.function_call_arguments.done",
+                item_id=item["id"],
+                output_index=output_index,
+                arguments=state["arguments"],
+            ))
+        events.append(event(
+            "response.output_item.done",
+            output_index=output_index,
+            item=item,
+        ))
+        state["closed"] = True
+        return events
 
-    # 状态机变量
-    current_tool_call_id = ""
-    current_tool_args = ""
-    current_role = "assistant"
-    _text_item_added = False
-    _text_part_added = False
-    _fc_item_added = False
+    yield event("response.created", response=response_snapshot("in_progress"))
+    yield event("response.in_progress", response=response_snapshot("in_progress"))
 
-    async for chunk_bytes in chat_stream:
-        lines = chunk_bytes.decode("utf-8", errors="replace").split("\n")
-        
-        for line in lines:
-            line = line.strip()
-            if not line.startswith("data:"):
+    try:
+        async for data_str in _iter_chat_sse_data(chat_stream):
+            data_str = data_str.strip()
+            if not data_str:
                 continue
-            
-            data_str = line[5:].strip()
             if data_str == "[DONE]":
-                # --- 完成当前的 output items ---
-                
-                # 如果正在收集 tool_call，先发射 done
-                if current_tool_call_id and _fc_item_added:
-                    seq += 1
-                    yield _make_sse_event("response.output_item.done", {
-                        "type": "response.output_item.done",
-                        "sequence_number": seq,
-                        "output_index": output_index - 1,
-                        "item": output_items[-1] if output_items else {},
-                    })
+                saw_done = True
+                break
 
-                # --- event: response.completed ---
-                seq += 1
-                yield _make_sse_event("response.completed", {
-                    "type": "response.completed",
-                    "sequence_number": seq,
-                    "response": {
-                        "id": resp_id,
-                        "object": "response",
-                        "created_at": int(time.time()),
-                        "status": "completed",
-                        "model": model,
-                        "output": output_items,
-                        "usage": {
-                            "input_tokens": usage.get("prompt_tokens", 0),
-                            "output_tokens": usage.get("completion_tokens", 0),
-                            "total_tokens": usage.get("total_tokens", 0),
-                        },
-                    },
-                })
-                continue
-            
             try:
                 chunk = json.loads(data_str)
             except json.JSONDecodeError:
-                continue
+                stream_error = {
+                    "code": "invalid_upstream_event",
+                    "message": "The upstream returned a malformed SSE JSON event.",
+                }
+                break
+            if not isinstance(chunk, dict):
+                stream_error = {
+                    "code": "invalid_upstream_event",
+                    "message": "The upstream returned a non-object SSE event.",
+                }
+                break
+            if chunk.get("error"):
+                upstream_error = chunk["error"]
+                if isinstance(upstream_error, dict):
+                    message = upstream_error.get("message") or "The upstream stream failed."
+                    code = upstream_error.get("code") or upstream_error.get("type") or "upstream_error"
+                else:
+                    message = str(upstream_error)
+                    code = "upstream_error"
+                stream_error = {"code": str(code), "message": str(message)[:500]}
+                break
 
-            # 提取 usage
+            response_model = chunk.get("model") or response_model
             if chunk.get("usage"):
                 usage.update(chunk["usage"])
 
             for choice in chunk.get("choices") or []:
+                if not isinstance(choice, dict):
+                    continue
+                try:
+                    choice_index = int(choice.get("index", 0))
+                except (TypeError, ValueError):
+                    choice_index = 0
+                seen_choices.add(choice_index)
                 delta = choice.get("delta") or {}
                 finish_reason = choice.get("finish_reason")
+                if finish_reason:
+                    finished_choices[choice_index] = str(finish_reason)
 
-                # --- 文本内容 ---
                 text = delta.get("content", "")
                 if text:
-                    if not _text_item_added:
-                        # item.added
+                    if not isinstance(text, str):
+                        text = str(text)
+                    state = text_states.get(choice_index)
+                    if state is None:
                         item = {
                             "type": "message",
                             "id": _gen_item_id("msg"),
@@ -589,128 +697,191 @@ async def chat_stream_to_responses_stream(
                             "status": "in_progress",
                             "content": [],
                         }
+                        output_index = len(output_items)
                         output_items.append(item)
-                        seq += 1
-                        yield _make_sse_event("response.output_item.added", {
-                            "type": "response.output_item.added",
-                            "sequence_number": seq,
-                            "output_index": output_index,
+                        state = {
+                            "kind": "text",
                             "item": item,
-                        })
-                        _text_item_added = True
-
-                    if not _text_part_added:
-                        seq += 1
-                        yield _make_sse_event("response.content_part.added", {
-                            "type": "response.content_part.added",
-                            "sequence_number": seq,
                             "output_index": output_index,
-                            "content_index": 0,
-                            "part": {"type": "output_text", "text": ""},
-                        })
-                        _text_part_added = True
+                            "text": "",
+                            "closed": False,
+                        }
+                        text_states[choice_index] = state
+                        item_states.append(state)
+                        yield event(
+                            "response.output_item.added",
+                            output_index=output_index,
+                            item=item,
+                        )
+                        yield event(
+                            "response.content_part.added",
+                            item_id=item["id"],
+                            output_index=output_index,
+                            content_index=0,
+                            part={
+                                "type": "output_text",
+                                "text": "",
+                                "annotations": [],
+                                "logprobs": [],
+                            },
+                        )
+                    state["text"] += text
+                    state["item"]["content"] = [{
+                        "type": "output_text",
+                        "text": state["text"],
+                        "annotations": [],
+                        "logprobs": [],
+                    }]
+                    yield event(
+                        "response.output_text.delta",
+                        item_id=state["item"]["id"],
+                        output_index=state["output_index"],
+                        content_index=0,
+                        delta=text,
+                        logprobs=[],
+                    )
 
-                    seq += 1
-                    yield _make_sse_event("response.output_text.delta", {
-                        "type": "response.output_text.delta",
-                        "sequence_number": seq,
-                        "output_index": output_index,
-                        "content_index": 0,
-                        "delta": text,
-                    })
-                    current_text += text
-                    # 更新 item 内容
-                    if _text_item_added:
-                        output_items[output_index]["content"] = [{"type": "output_text", "text": current_text}]
-
-                # --- tool_calls ---
                 for tc in delta.get("tool_calls") or []:
-                    idx = tc.get("index", 0)
+                    if not isinstance(tc, dict):
+                        continue
+                    try:
+                        tool_index = int(tc.get("index", 0))
+                    except (TypeError, ValueError):
+                        tool_index = 0
+                    key = (choice_index, tool_index)
+                    state = tool_states.get(key)
+                    fn = tc.get("function") or {}
 
-                    if tc.get("id"):
-                        current_tool_call_id = tc["id"]
-                    
-                    if not _fc_item_added and tc.get("id"):
-                        # 新的 tool_call item
+                    if state is None:
+                        text_state = text_states.pop(choice_index, None)
+                        if text_state:
+                            for pending_event in close_item(text_state, "completed"):
+                                yield pending_event
+                        call_id = tc.get("id") or _gen_item_id("call")
                         item = {
                             "type": "function_call",
-                            "id": tc["id"],
-                            "call_id": tc["id"],
-                            "name": "",
+                            "id": _gen_item_id("fc"),
+                            "call_id": call_id,
+                            "name": str(fn.get("name") or ""),
                             "arguments": "",
                             "status": "in_progress",
                         }
-                        if _text_item_added:
-                            # 结束文本 item
-                            output_items[output_index]["status"] = "completed"
-                            seq += 1
-                            yield _make_sse_event("response.output_item.done", {
-                                "type": "response.output_item.done",
-                                "sequence_number": seq,
-                                "output_index": output_index,
-                                "item": output_items[output_index],
-                            })
-                            _text_item_added = False
-                            _text_part_added = False
-                            output_index += 1
-
+                        output_index = len(output_items)
                         output_items.append(item)
-                        seq += 1
-                        yield _make_sse_event("response.output_item.added", {
-                            "type": "response.output_item.added",
-                            "sequence_number": seq,
-                            "output_index": output_index,
+                        state = {
+                            "kind": "tool",
                             "item": item,
-                        })
-                        _fc_item_added = True
-                        current_tool_args = ""
+                            "output_index": output_index,
+                            "arguments": "",
+                            "closed": False,
+                        }
+                        tool_states[key] = state
+                        item_states.append(state)
+                        yield event(
+                            "response.output_item.added",
+                            output_index=output_index,
+                            item=item,
+                        )
 
-                    fn = tc.get("function") or {}
-                    if fn.get("name") and output_items:
-                        output_items[-1]["name"] = fn["name"]
-                    if fn.get("arguments") and output_items:
+                    name = fn.get("name")
+                    if name:
+                        name = str(name)
+                        current_name = state["item"]["name"]
+                        if not current_name or name.startswith(current_name):
+                            state["item"]["name"] = name
+                        elif not current_name.endswith(name):
+                            state["item"]["name"] += name
+
+                    if fn.get("arguments") is not None and fn.get("arguments") != "":
                         args = fn["arguments"]
-                        current_tool_args += args
-                        output_items[-1]["arguments"] = current_tool_args
-                        seq += 1
-                        yield _make_sse_event("response.output_text.delta", {
-                            "type": "response.output_text.delta",
-                            "sequence_number": seq,
-                            "output_index": output_index,
-                            "content_index": 0,
-                            "delta": args,
-                        })
+                        if not isinstance(args, str):
+                            args = json.dumps(args, ensure_ascii=False)
+                        state["arguments"] += args
+                        state["item"]["arguments"] = state["arguments"]
+                        yield event(
+                            "response.function_call_arguments.delta",
+                            item_id=state["item"]["id"],
+                            output_index=state["output_index"],
+                            delta=args,
+                        )
+    except (UnicodeDecodeError, TypeError, ValueError) as exc:
+        stream_error = {
+            "code": "upstream_stream_error",
+            "message": f"Unable to decode the upstream SSE stream: {exc}",
+        }
+    except Exception as exc:
+        stream_error = {
+            "code": "upstream_stream_error",
+            "message": f"The upstream SSE stream failed: {exc}",
+        }
 
-                # --- delta role (标记消息开始) ---
-                if delta.get("role") and not _text_item_added:
-                    current_role = delta["role"]
+    terminal_status = "completed"
+    incomplete_reason = None
+    finish_reasons = set(finished_choices.values())
+    unfinished_choices = seen_choices.difference(finished_choices)
+    if stream_error:
+        terminal_status = "failed"
+    elif "length" in finish_reasons:
+        terminal_status = "incomplete"
+        incomplete_reason = "max_output_tokens"
+    elif "content_filter" in finish_reasons:
+        terminal_status = "incomplete"
+        incomplete_reason = "content_filter"
+    elif (
+        (not saw_done and (not seen_choices or unfinished_choices))
+        or (saw_done and finished_choices and unfinished_choices)
+    ):
+        terminal_status = "failed"
+        stream_error = {
+            "code": "upstream_stream_ended",
+            "message": "The upstream stream ended before a terminal event.",
+        }
 
-                # --- finish_reason ---
-                if finish_reason:
-                    if _text_item_added:
-                        output_items[output_index]["status"] = "completed"
-                        seq += 1
-                        yield _make_sse_event("response.output_item.done", {
-                            "type": "response.output_item.done",
-                            "sequence_number": seq,
-                            "output_index": output_index,
-                            "item": output_items[output_index],
-                        })
-                        _text_item_added = False
-                        _text_part_added = False
-                        output_index += 1
+    if terminal_status == "completed":
+        for state in tool_states.values():
+            if state.get("closed"):
+                continue
+            try:
+                parsed_arguments = json.loads(state["arguments"])
+            except (json.JSONDecodeError, TypeError):
+                parsed_arguments = None
+            if not state["item"]["name"] or not isinstance(parsed_arguments, dict):
+                terminal_status = "failed"
+                stream_error = {
+                    "code": "invalid_tool_arguments",
+                    "message": "The upstream returned incomplete or invalid JSON tool arguments.",
+                }
+                break
 
-                    if _fc_item_added and current_tool_call_id:
-                        output_items[-1]["status"] = "completed"
-                        seq += 1
-                        yield _make_sse_event("response.output_item.done", {
-                            "type": "response.output_item.done",
-                            "sequence_number": seq,
-                            "output_index": output_index,
-                            "item": output_items[-1],
-                        })
-                        _fc_item_added = False
-                        output_index += 1
+    item_status = "completed" if terminal_status == "completed" else "incomplete"
+    for state in sorted(item_states, key=lambda value: value["output_index"]):
+        for pending_event in close_item(state, item_status):
+            yield pending_event
+
+    if terminal_status == "completed":
+        yield event(
+            "response.completed",
+            response=response_snapshot("completed"),
+        )
+    elif terminal_status == "incomplete":
+        yield event(
+            "response.incomplete",
+            response=response_snapshot(
+                "incomplete",
+                incomplete_details={"reason": incomplete_reason},
+            ),
+        )
+    else:
+        yield event(
+            "response.failed",
+            response=response_snapshot(
+                "failed",
+                error=stream_error or {
+                    "code": "upstream_stream_error",
+                    "message": "The upstream stream failed.",
+                },
+            ),
+        )
 
 
 def _make_sse_event(event_name: str, data: dict) -> str:
