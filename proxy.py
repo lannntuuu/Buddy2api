@@ -304,7 +304,10 @@ class _ChatStreamObserver:
                         return None
                     if isinstance(function, dict):
                         name = function.get("name")
-                        if name is not None and (not isinstance(name, str) or not name):
+                        if name == "":
+                            function.pop("name", None)
+                            name = None
+                        elif name is not None and not isinstance(name, str):
                             self.parser_error = "The upstream tool call stream had an invalid function name."
                             return None
                         arguments = function.get("arguments")

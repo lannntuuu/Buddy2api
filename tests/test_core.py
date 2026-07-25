@@ -737,6 +737,88 @@ def test_chat_proxy_stream_normalizes_empty_finish_reason(monkeypatch):
     assert done_count == 1
 
 
+def test_chat_proxy_stream_ignores_empty_repeated_tool_name(monkeypatch):
+    chunks = [
+        _chat_sse({
+            "id": "chatcmpl-empty-tool-name",
+            "object": "chat.completion.chunk",
+            "created": 125,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": "call_echo",
+                    "type": "function",
+                    "function": {"name": "echo_value", "arguments": ""},
+                }]},
+                "finish_reason": "",
+            }],
+        }),
+        _chat_sse({
+            "id": "chatcmpl-empty-tool-name",
+            "object": "chat.completion.chunk",
+            "created": 125,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [{
+                    "index": 0,
+                    "function": {"name": "", "arguments": '{"value":'},
+                }]},
+                "finish_reason": "",
+            }],
+        }),
+        _chat_sse({
+            "id": "chatcmpl-empty-tool-name",
+            "object": "chat.completion.chunk",
+            "created": 125,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [{
+                    "index": 0,
+                    "function": {"name": "", "arguments": '"test"}'},
+                }]},
+                "finish_reason": "",
+            }],
+        }),
+        _chat_sse({
+            "id": "chatcmpl-empty-tool-name",
+            "object": "chat.completion.chunk",
+            "created": 125,
+            "model": "test-model",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+        }),
+        b"data: [DONE]\n\n",
+    ]
+
+    raw = _collect_chat_proxy_stream(chunks, monkeypatch)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+    tool_deltas = [
+        tool_call
+        for payload in payloads
+        for choice in payload.get("choices") or []
+        for tool_call in (choice.get("delta") or {}).get("tool_calls") or []
+    ]
+
+    assert not any(payload.get("error") for payload in payloads)
+    assert [
+        tool_call["function"]["name"]
+        for tool_call in tool_deltas
+        if "name" in tool_call["function"]
+    ] == ["echo_value"]
+    arguments = "".join(tool_call["function"].get("arguments", "") for tool_call in tool_deltas)
+    assert json.loads(arguments) == {"value": "test"}
+    assert [
+        choice["finish_reason"]
+        for payload in payloads
+        for choice in payload.get("choices") or []
+        if choice.get("finish_reason") is not None
+    ] == ["tool_calls"]
+    assert done_count == 1
+
+
 def test_chat_proxy_stream_adds_done_after_explicit_terminal_at_eof(monkeypatch):
     raw = _collect_chat_proxy_stream([
         _chat_sse({
