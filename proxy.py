@@ -404,8 +404,12 @@ class _ChatStreamObserver:
                 if not isinstance(arguments, dict):
                     return "The upstream tool call arguments were not a JSON object."
         for choice_index, reason in self.finish_reasons.items():
-            if not reason and choice_index not in self.content_choices and choice_index not in self.tool_call_choices:
-                return "The upstream stream ended before the choice produced complete content."
+            if (
+                reason not in {"length", "content_filter"}
+                and choice_index not in self.content_choices
+                and choice_index not in self.tool_call_choices
+            ):
+                return "The upstream choice ended without content or a tool call."
         return None
 
     def terminal_event(self, choice_indices: list[int]) -> bytes:
@@ -991,6 +995,21 @@ async def _collect_stream(
             for _, v in sorted(tool_calls.items())
         ]
         finish_reason = finish_reason or "tool_calls"
+
+    if (
+        not content_parts
+        and not tool_calls
+        and finish_reason not in {"length", "content_filter"}
+    ):
+        return (
+            "error",
+            (502, {
+                "error": {
+                    "message": "The upstream choice ended without content or a tool call.",
+                    "type": "upstream_error",
+                },
+            }),
+        )
 
     message = {"role": "assistant", "content": "".join(content_parts) or None}
     if reasoning_parts:
