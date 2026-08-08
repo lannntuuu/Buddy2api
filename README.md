@@ -38,7 +38,7 @@ Work Buddy 2 API 是一个本地网关。它会扫描本机 Work Buddy / CodeBud
 
 1. 本机已经安装并登录腾讯 Work Buddy / CodeBuddy。
 2. 登录账号还有可用模型额度。
-3. 本机安装 Python 3.10 或更高版本，或使用 Docker。
+3. 本机安装 Python 3.10 或更高版本，或使用 Docker。新手推荐安装 Miniconda，并创建独立环境。
 4. 本项目和调用客户端最好都运行在同一台机器上。
 
 Windows 默认扫描路径类似：
@@ -49,40 +49,101 @@ Windows 默认扫描路径类似：
 
 如果你的 auth 文件在别的目录，可以用 `CB_AUTH_DIR` 指定。
 
-## 快速开始
+## 安装与启动
 
-### Windows
+下面的命令适合第一次接触 Git、Conda 和 Python 项目的用户。已经熟悉这些工具的用户可以直接选择自己常用的虚拟环境。
 
-双击：
+### 第一步：安装基础工具
 
-```bat
-start.bat
-```
+使用 Python 方式运行需要安装：
 
-或手动启动：
+1. [Git](https://git-scm.com/downloads)：用于下载和更新源码。Windows 安装时保持默认选项即可。
+2. [Miniconda](https://docs.conda.io/projects/miniconda/en/latest/)：用于安装 Python 并为本项目创建独立环境。安装 Python 3.10、3.11 或 3.12 均可，推荐 3.12。
+3. 腾讯 Work Buddy / CodeBuddy：安装后至少登录一次，并确认账号有可用额度。
+
+安装完成后，重新打开 PowerShell、Windows Terminal 或 Anaconda Prompt，检查命令是否可用：
 
 ```powershell
-pip install -r requirements.txt
+git --version
+conda --version
+```
+
+如果 PowerShell 提示找不到 `conda`，请先使用开始菜单里的 **Anaconda Prompt / Miniconda Prompt**。也可以在该终端执行 `conda init powershell`，关闭并重新打开 PowerShell。
+
+### 第二步：克隆源码
+
+打开终端，进入你准备存放项目的目录，然后执行：
+
+```powershell
+git clone https://github.com/wicm84266964/Buddy2api.git
+cd Buddy2api
+```
+
+后续命令都要在 `Buddy2api` 项目目录中执行。可以用下面的命令确认当前目录正确：
+
+```powershell
+Get-ChildItem README.md, requirements.txt, server.py
+```
+
+### 方式 A：使用 Conda（新手推荐）
+
+创建一个名为 `buddy2api` 的独立 Python 3.12 环境：
+
+```powershell
+conda create -n buddy2api python=3.12 -y
+conda activate buddy2api
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 python server.py
 ```
 
-打开 Web UI 后，本机浏览器会自动使用同源 HttpOnly Cookie 完成管理认证，通常不需要手动粘贴 Admin Token。
+看到 `[启动]` 或 Uvicorn 监听信息后，在浏览器打开：
 
-如果你要远程访问或遇到 Cookie 异常，可以固定一个管理 token 作为备用：
+```text
+http://127.0.0.1:8787
+```
+
+停止服务请回到终端按 `Ctrl+C`。以后再次启动时，不需要重新创建环境和安装依赖，只需执行：
 
 ```powershell
-$env:CB_GATEWAY_ADMIN_TOKEN="cb-admin-请替换为足够长的随机值"
+cd <你的项目路径>\Buddy2api
+conda activate buddy2api
 python server.py
 ```
 
-### Linux / macOS
+可以用 `conda env list` 查看已有环境。除非准备彻底重装，不要重复执行 `conda create`。
+
+### 方式 B：使用自带启动脚本
+
+不想安装 Conda 时，也可以先从 [Python 官网](https://www.python.org/downloads/) 安装 Python 3.10 或更高版本。Windows 安装界面需要勾选 **Add Python to PATH**。
+
+克隆源码并进入项目目录后，Windows 可以双击 `start.bat`，也可以在 PowerShell 执行：
+
+```powershell
+.\start.bat
+```
+
+脚本会自动在项目目录创建 `.venv`、安装依赖并启动服务。`.venv` 和 Conda 是两种不同的环境管理方式，同一次安装选择一种即可，不需要混用。
+
+Linux / macOS 使用：
 
 ```bash
+git clone https://github.com/wicm84266964/Buddy2api.git
+cd Buddy2api
 chmod +x start.sh
 ./start.sh
 ```
 
-### Docker
+`start.sh` 同样会自动创建 `.venv` 并安装依赖。
+
+### 方式 C：Docker
+
+Docker 用户也需要先安装 Git 并克隆项目：
+
+```powershell
+git clone https://github.com/wicm84266964/Buddy2api.git
+cd Buddy2api
+```
 
 Windows Docker Desktop 推荐用脚本启动，它会自动找到当前 Windows 用户的 Work Buddy 登录目录，并只读挂载到容器内的 `/auth`：
 
@@ -125,6 +186,62 @@ http://127.0.0.1:8787
 ```
 
 注意：Docker 容器不能凭空扫描 Windows 的 C 盘，必须通过 volume 挂载。脚本做的就是自动找路径并挂载，挂载方式是只读的。
+
+### 首次启动后
+
+打开 Web UI 后，本机浏览器会自动使用同源 HttpOnly Cookie 完成管理认证，通常不需要手动粘贴 Admin Token。然后按照以下顺序操作：
+
+1. 在「账号」页面点击重新检测，确认已发现并导入 Work Buddy / CodeBuddy 账号。
+2. 使用单账号测试确认账号可以正常请求模型。
+3. 在「API Keys」页面创建客户端密钥；完整密钥只显示一次，请立即保存。
+4. 在客户端中填写 `http://127.0.0.1:8787/v1`、刚创建的 API Key 和模型 `auto`。
+
+如果你要远程访问或遇到 Cookie 异常，可以在启动前固定一个管理 token 作为备用：
+
+```powershell
+$env:CB_GATEWAY_ADMIN_TOKEN="cb-admin-请替换为足够长的随机值"
+python server.py
+```
+
+### 更新到最新版
+
+先按 `Ctrl+C` 停止正在运行的服务，再进入项目目录更新源码。
+
+Conda 安装方式：
+
+```powershell
+cd <你的项目路径>\Buddy2api
+git pull --ff-only
+conda activate buddy2api
+python -m pip install -r requirements.txt
+python server.py
+```
+
+Windows `.venv` / `start.bat` 安装方式：
+
+```powershell
+cd <你的项目路径>\Buddy2api
+git pull --ff-only
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\start.bat
+```
+
+Docker 安装方式：
+
+```powershell
+cd <你的项目路径>\Buddy2api
+git pull --ff-only
+powershell -ExecutionPolicy Bypass -File .\start-docker-win.ps1
+```
+
+### 常见安装问题
+
+- `git` 或 `conda` 提示“不是内部或外部命令”：关闭当前终端并重新打开；Conda 用户可改用 Miniconda Prompt。
+- `pip` 安装到了错误的 Python：始终使用 `python -m pip`，并先确认命令行前面显示 `(buddy2api)`。
+- `No module named ...`：重新激活环境并执行 `python -m pip install -r requirements.txt`。
+- 端口 `8787` 被占用：关闭旧的 Buddy2api 进程，或使用 `python server.py --port 8788` 启动到其他端口。
+- Web UI 没有发现账号：先确认 Work Buddy / CodeBuddy 已登录；再检查默认 auth 路径，必要时通过 `CB_AUTH_DIR` 指定目录。
+- 下载依赖很慢或失败：先确认网络可以访问 PyPI，再重新执行安装命令；不要混用多个 Python 或 Conda 环境。
 
 ## 使用流程
 
