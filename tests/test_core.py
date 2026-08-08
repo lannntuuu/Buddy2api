@@ -628,6 +628,28 @@ def test_responses_stream_emits_complete_text_lifecycle():
     assert completed["output"][0]["content"][0]["text"] == "hello"
 
 
+@pytest.mark.parametrize(
+    ("delta", "finish_reason"),
+    [
+        ({}, "stop"),
+        ({"reasoning_content": "internal only"}, "stop"),
+        ({}, None),
+    ],
+)
+def test_responses_stream_rejects_completed_choice_without_output(delta, finish_reason):
+    events = _collect_response_events([
+        _chat_sse({
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        }),
+        b"data: [DONE]\n\n",
+    ])
+
+    failed = _events_of_type(events, "response.failed")
+    assert len(failed) == 1
+    assert failed[0]["response"]["error"]["code"] == "empty_upstream_response"
+    assert not _events_of_type(events, "response.completed")
+
+
 def test_responses_stream_fails_when_only_one_choice_finishes_before_eof():
     events = _collect_response_events([
         _chat_sse({
@@ -703,6 +725,91 @@ def test_chat_proxy_stream_does_not_duplicate_terminal_events(monkeypatch):
 
     assert finish_reasons == ["stop"]
     assert done_count == 1
+
+
+def test_chat_proxy_stream_rejects_terminal_without_content(monkeypatch):
+    raw = _collect_chat_proxy_stream([
+        _chat_sse({
+            "id": "chatcmpl-empty",
+            "object": "chat.completion.chunk",
+            "created": 123,
+            "model": "test-model",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }),
+        b"data: [DONE]\n\n",
+    ], monkeypatch)
+
+    _assert_chat_proxy_error_only(raw)
+
+
+def test_non_stream_chat_conversion_rejects_empty_completed_response():
+    converted = responses.chat_response_to_responses({
+        "id": "chatcmpl-empty",
+        "model": "test-model",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": None},
+            "finish_reason": "stop",
+        }],
+        "usage": {},
+    }, "test-model")
+
+    assert converted["status"] == "failed"
+    assert converted["output"] == []
+    assert converted["error"]["code"] == "empty_upstream_response"
+
+
+@pytest.mark.parametrize("delta", [{}, {"reasoning_content": "internal only"}])
+def test_non_stream_aggregator_rejects_terminal_without_output(monkeypatch, delta):
+    payload = {
+        "id": "chatcmpl-empty",
+        "object": "chat.completion.chunk",
+        "model": "test-model",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": "stop"}],
+    }
+
+    class FakeResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def aiter_lines(self):
+            yield "data: " + json.dumps(payload)
+            yield "data: [DONE]"
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        def stream(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(proxy.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(auth_manager, "request_timeout", lambda _default: 30)
+
+    result = asyncio.run(proxy._collect_stream(
+        "https://upstream.test/v2/chat/completions",
+        {"Authorization": "Bearer test"},
+        {"model": "test-model", "stream": True},
+        {"id": 1, "name": "test-account"},
+        None,
+        "test-model",
+        0,
+    ))
+
+    assert result[0] == "error"
+    assert result[1][0] == 502
+    assert "without content" in result[1][1]["error"]["message"]
 
 
 def test_chat_proxy_stream_normalizes_empty_finish_reason(monkeypatch):
@@ -1126,7 +1233,7 @@ def test_chat_proxy_stream_done_ignores_oversized_trailing_line(monkeypatch):
             "model": "test-model",
             "choices": [{
                 "index": 0,
-                "delta": {},
+                "delta": {"content": "done"},
                 "finish_reason": "stop",
             }],
         }),
@@ -1405,7 +1512,7 @@ def test_chat_proxy_stream_ignores_data_after_done(monkeypatch):
             "model": "test-model",
             "choices": [{
                 "index": 0,
-                "delta": {},
+                "delta": {"content": "done"},
                 "finish_reason": "stop",
             }],
         }),
@@ -1710,7 +1817,7 @@ def test_chat_proxy_stream_records_success_before_terminal_is_consumed(monkeypat
                 "model": "test-model",
                 "choices": [{
                     "index": 0,
-                    "delta": {},
+                    "delta": {"content": "done"},
                     "finish_reason": "stop",
                 }],
             }),

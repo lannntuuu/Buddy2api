@@ -459,14 +459,37 @@ def chat_response_to_responses(chat_resp: dict, model: str) -> dict:
                 "status": "completed",
             })
 
+    finish_reasons = {
+        choice.get("finish_reason")
+        for choice in chat_resp.get("choices") or []
+        if choice.get("finish_reason")
+    }
+    status = "completed"
+    incomplete_details = None
+    error = None
+    if "length" in finish_reasons:
+        status = "incomplete"
+        incomplete_details = {"reason": "max_output_tokens"}
+    elif "content_filter" in finish_reasons:
+        status = "incomplete"
+        incomplete_details = {"reason": "content_filter"}
+    elif not output:
+        status = "failed"
+        error = {
+            "code": "empty_upstream_response",
+            "message": "The upstream response contained no displayable content or tool call.",
+        }
+
     usage = chat_resp.get("usage") or {}
     return {
         "id": resp_id,
         "object": "response",
         "created_at": int(time.time()),
-        "status": "completed",
+        "status": status,
         "model": chat_resp.get("model") or model,
         "output": output,
+        "error": error,
+        "incomplete_details": incomplete_details,
         "usage": {
             "input_tokens": usage.get("prompt_tokens", 0),
             "output_tokens": usage.get("completion_tokens", 0),
@@ -574,6 +597,7 @@ async def chat_stream_to_responses_stream(
     usage: dict = {}
     seen_choices: set[int] = set()
     finished_choices: dict[int, str] = {}
+    productive_choices: set[int] = set()
     saw_done = False
     stream_error: Optional[dict] = None
 
@@ -713,6 +737,7 @@ async def chat_stream_to_responses_stream(
                 if text:
                     if not isinstance(text, str):
                         text = str(text)
+                    productive_choices.add(choice_index)
                     state = text_states.get(choice_index)
                     if state is None:
                         item = {
@@ -769,6 +794,7 @@ async def chat_stream_to_responses_stream(
                 for tc in delta.get("tool_calls") or []:
                     if not isinstance(tc, dict):
                         continue
+                    productive_choices.add(choice_index)
                     try:
                         tool_index = int(tc.get("index", 0))
                     except (TypeError, ValueError):
@@ -860,6 +886,16 @@ async def chat_stream_to_responses_stream(
         stream_error = {
             "code": "upstream_stream_ended",
             "message": "The upstream stream ended before a terminal event.",
+        }
+    elif not seen_choices or not output_items or any(
+        reason not in {"length", "content_filter"}
+        and choice_index not in productive_choices
+        for choice_index, reason in finished_choices.items()
+    ):
+        terminal_status = "failed"
+        stream_error = {
+            "code": "empty_upstream_response",
+            "message": "The upstream response contained no displayable content or tool call.",
         }
 
     if terminal_status == "completed":
