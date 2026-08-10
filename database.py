@@ -122,6 +122,7 @@ def init_db():
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             key_prefix      TEXT,
             key_hash        TEXT UNIQUE,
+            key_secret      TEXT,
             name            TEXT,
             status          TEXT DEFAULT 'active',
             allowed_models  TEXT,
@@ -232,10 +233,12 @@ def _migrate_api_keys(conn: sqlite3.Connection):
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             key_prefix      TEXT,
             key_hash        TEXT UNIQUE,
+            key_secret      TEXT,
             name            TEXT,
             status          TEXT DEFAULT 'active',
             allowed_models  TEXT,
             daily_limit     INTEGER DEFAULT 0,
+            client_type     TEXT DEFAULT 'custom',
             total_requests  INTEGER DEFAULT 0,
             total_tokens    INTEGER DEFAULT 0,
             created_at      INTEGER,
@@ -247,17 +250,22 @@ def _migrate_api_keys(conn: sqlite3.Connection):
             raw_key = d.get("key") or ""
             conn.execute("""
                 INSERT INTO api_keys
-                    (id, key_prefix, key_hash, name, status, allowed_models, daily_limit,
-                     total_requests, total_tokens, created_at, last_used_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    (id, key_prefix, key_hash, key_secret, name, status, allowed_models,
+                     daily_limit, client_type, total_requests, total_tokens, created_at,
+                     last_used_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 d.get("id"),
                 d.get("key_prefix") or _key_prefix(raw_key),
                 d.get("key_hash") or (_hash_api_key(raw_key) if raw_key else None),
+                d.get("key_secret") or (
+                    credential_crypto.encrypt_secret(raw_key, DB_PATH) if raw_key else None
+                ),
                 d.get("name", ""),
                 d.get("status", "active"),
                 d.get("allowed_models"),
                 d.get("daily_limit") or 0,
+                d.get("client_type") or "custom",
                 d.get("total_requests") or 0,
                 d.get("total_tokens") or 0,
                 d.get("created_at"),
@@ -270,6 +278,8 @@ def _migrate_api_keys(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE api_keys ADD COLUMN key_prefix TEXT")
     if "key_hash" not in cols:
         conn.execute("ALTER TABLE api_keys ADD COLUMN key_hash TEXT")
+    if "key_secret" not in cols:
+        conn.execute("ALTER TABLE api_keys ADD COLUMN key_secret TEXT")
     if "daily_limit" not in cols:
         conn.execute("ALTER TABLE api_keys ADD COLUMN daily_limit INTEGER DEFAULT 0")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(api_keys)").fetchall()}
@@ -556,9 +566,21 @@ def add_api_key(key: str, name: str, allowed_models: Optional[list] = None,
     with _lock:
         conn = get_conn()
         cur = conn.execute("""
-            INSERT INTO api_keys (key_prefix, key_hash, name, status, allowed_models, daily_limit, client_type, created_at)
-            VALUES (?,?,?,?,?,?,?,?)
-        """, (_key_prefix(key), _hash_api_key(key), name, "active", models_json, limit, client_type, now))
+            INSERT INTO api_keys
+                (key_prefix, key_hash, key_secret, name, status, allowed_models,
+                 daily_limit, client_type, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, (
+            _key_prefix(key),
+            _hash_api_key(key),
+            credential_crypto.encrypt_secret(key, DB_PATH),
+            name,
+            "active",
+            models_json,
+            limit,
+            client_type,
+            now,
+        ))
         kid = cur.lastrowid
         conn.commit()
         conn.close()
@@ -601,12 +623,13 @@ def get_api_key_by_key(key: str) -> Optional[dict]:
         return None
     d = dict(row)
     d.pop("key_hash", None)
+    d.pop("key_secret", None)
     d.pop("key", None)
     d["allowed_models"] = _load_allowed_models(d.get("allowed_models"))
     return d
 
 
-def list_api_keys() -> list[dict]:
+def list_api_keys(*, include_secret: bool = False) -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
         """
@@ -623,7 +646,13 @@ def list_api_keys() -> list[dict]:
     for r in rows:
         d = dict(r)
         d.pop("key_hash", None)
+        encrypted_key = d.pop("key_secret", None)
         d.pop("key", None)
+        if include_secret:
+            d["key"] = (
+                credential_crypto.decrypt_secret(encrypted_key, DB_PATH)
+                if encrypted_key else None
+            )
         d["allowed_models"] = _load_allowed_models(d.get("allowed_models"))
         result.append(d)
     return result
