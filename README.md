@@ -24,7 +24,7 @@ Work Buddy 2 API 是一个本地网关。它会扫描本机 Work Buddy / CodeBud
 - **手动领取每日积分**：账号页支持单账号领取，也支持一键领取所有已启用账号的今日积分
 - **Token 自动刷新**：登录 token 快过期时自动刷新并写回数据库
 - **API Key 管理**：给 OpenCode、Cherry Studio 等客户端单独创建 key
-- **Key 安全存储**：只保存 SHA-256 哈希，完整 key 只在创建时显示一次
+- **Key 可恢复管理**：使用 SHA-256 哈希鉴权，并加密保存完整 Key，可在受保护的管理页再次查看和复制
 - **模型权限控制**：可以限制某个 key 只能使用指定模型
 - **每日请求限额**：可以给 key 设置每日请求次数上限
 - **Dashboard**：查看健康状态、官方额度汇总、到期提醒、请求趋势、模型排行、账号状态、Key 使用和最近日志
@@ -123,7 +123,7 @@ python server.py
 .\start.bat
 ```
 
-脚本会自动在项目目录创建 `.venv`、安装依赖并启动服务。`.venv` 和 Conda 是两种不同的环境管理方式，同一次安装选择一种即可，不需要混用。
+脚本会优先查找 Conda，并自动使用或创建名为 `buddy2api` 的 Python 3.12 环境；即使 PowerShell 尚未执行 `conda init`，脚本也会检查常见的 Miniconda/Anaconda 安装目录。只有找不到 Conda 时才会在项目目录创建 `.venv`。随后脚本会安装缺少的依赖并启动服务。
 
 Linux / macOS 使用：
 
@@ -134,7 +134,7 @@ chmod +x start.sh
 ./start.sh
 ```
 
-`start.sh` 同样会自动创建 `.venv` 并安装依赖。
+`start.sh` 同样优先使用或创建 `buddy2api` Conda 环境，找不到 Conda 时才回退到 `.venv`。
 
 ### 方式 C：Docker
 
@@ -193,7 +193,7 @@ http://127.0.0.1:8787
 
 1. 在「账号」页面点击重新检测，确认已发现并导入 Work Buddy / CodeBuddy 账号。
 2. 使用单账号测试确认账号可以正常请求模型。
-3. 在「API Keys」页面创建客户端密钥；完整密钥只显示一次，请立即保存。
+3. 在「API Keys」页面创建客户端密钥；之后仍可在受 Admin 鉴权保护的列表中查看和复制完整密钥。
 4. 在客户端中填写 `http://127.0.0.1:8787/v1`、刚创建的 API Key 和模型 `auto`。
 
 如果你要远程访问或遇到 Cookie 异常，可以在启动前固定一个管理 token 作为备用：
@@ -217,7 +217,7 @@ python -m pip install -r requirements.txt
 python server.py
 ```
 
-Windows `.venv` / `start.bat` 安装方式：
+Windows `.venv` 回退方式（设备未安装 Conda 时）：
 
 ```powershell
 cd <你的项目路径>\Buddy2api
@@ -367,7 +367,8 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 - 账号 Token 会在写入 SQLite 前加密；Windows 默认使用 DPAPI，其他平台使用主密钥或权限为 `0600` 的本地密钥文件。
 - 旧数据库中的明文 Token 会在升级后的首次启动时自动迁移为加密格式；迁移或容器部署时应固定 `CB_GATEWAY_MASTER_KEY`。
 - 请求日志默认保留 90 天，可通过 `CB_GATEWAY_LOG_RETENTION_DAYS` 调整。
-- API Key 只保存哈希，创建后完整 key 不会再次显示。
+- API Key 使用 SHA-256 哈希执行鉴权，完整 Key 另行加密保存，仅通过受 Admin 鉴权保护的管理接口返回。
+- 从旧版本升级前已经创建的 Key 只有哈希，无法逆向恢复；这类 Key 仍可继续调用，但如需在管理页复制，应重新创建。
 - 不要把数据库、auth 文件、`.lab-agent`、日志或截图发给别人。
 - 不建议把服务监听到公网地址。
 - 如果只是本机使用，保持默认 `127.0.0.1` 最安全。

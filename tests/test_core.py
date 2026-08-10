@@ -2,6 +2,7 @@ import asyncio
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -265,6 +266,90 @@ def test_daily_limit_reservation_is_atomic(isolated_db):
 
     assert sum(results) == 5
     assert db.get_api_key_daily_requests(key_id) == 5
+
+
+def test_api_keys_are_encrypted_and_recoverable_for_admin(isolated_db):
+    raw_key = "sk-cb-recoverable-test-key"
+    db.add_api_key(raw_key, "test")
+
+    with sqlite3.connect(isolated_db) as conn:
+        stored_hash, stored_secret = conn.execute(
+            "SELECT key_hash, key_secret FROM api_keys"
+        ).fetchone()
+
+    assert raw_key not in stored_hash
+    assert stored_secret.startswith("enc:v1:")
+    assert raw_key not in stored_secret
+    assert "key" not in db.list_api_keys()[0]
+    assert db.list_api_keys(include_secret=True)[0]["key"] == raw_key
+    assert "key" not in db.get_api_key_by_key(raw_key)
+
+
+def test_hash_only_legacy_api_key_is_reported_as_unrecoverable(isolated_db):
+    db.add_api_key("sk-cb-legacy-test-key", "legacy")
+    with sqlite3.connect(isolated_db) as conn:
+        conn.execute("UPDATE api_keys SET key_secret=NULL")
+        conn.commit()
+
+    assert db.list_api_keys(include_secret=True)[0]["key"] is None
+
+
+def test_plaintext_legacy_api_key_is_migrated_to_encrypted_storage(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "legacy-keys.db"
+    monkeypatch.setattr(db, "DB_PATH", path)
+    monkeypatch.setenv("CB_GATEWAY_MASTER_KEY", "pytest-master-key")
+    credential_crypto.reset_cache()
+    with sqlite3.connect(path) as conn:
+        conn.execute("""
+            CREATE TABLE api_keys (
+                id INTEGER PRIMARY KEY,
+                key TEXT,
+                name TEXT,
+                status TEXT,
+                allowed_models TEXT,
+                daily_limit INTEGER,
+                total_requests INTEGER,
+                total_tokens INTEGER,
+                created_at INTEGER,
+                last_used_at INTEGER
+            )
+        """)
+        conn.execute(
+            "INSERT INTO api_keys VALUES (1,?,?,?,?,?,?,?,?,?)",
+            (
+                "sk-cb-plaintext-legacy",
+                "legacy",
+                "active",
+                None,
+                0,
+                0,
+                0,
+                1,
+                None,
+            ),
+        )
+
+    db.init_db()
+
+    with sqlite3.connect(path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(api_keys)")}
+        stored = conn.execute("SELECT key_hash, key_secret FROM api_keys").fetchone()
+    assert "key" not in columns
+    assert stored[1].startswith("enc:v1:")
+    assert db.list_api_keys(include_secret=True)[0]["key"] == "sk-cb-plaintext-legacy"
+    credential_crypto.reset_cache()
+
+
+def test_windows_start_script_bootstraps_portable_buddy2api_environment():
+    script = (Path(__file__).parents[1] / "start.bat").read_bytes().decode("ascii")
+
+    assert "create -n buddy2api python=3.12 -y" in script
+    assert "run -n buddy2api python -m pip install -r requirements.txt" in script
+    assert "run --no-capture-output -n buddy2api python server.py" in script
+    assert "-m venv .venv" in script
 
 
 def test_record_request_updates_log_and_counters_once(isolated_db):

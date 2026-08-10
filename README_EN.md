@@ -24,7 +24,7 @@ This project is mainly for personal use and testing. Do not deploy publicly, do 
 - **Manual Daily Credit Claim** - Claim today's credits per account or for all enabled accounts from the Accounts page
 - **Token Auto-Refresh** - Automatically refreshes tokens before expiry
 - **API Key Management** - Create separate keys for OpenCode, Cherry Studio, etc.
-- **Secure Key Storage** - Only SHA-256 hashes stored; full key shown once at creation
+- **Recoverable Key Management** - Uses SHA-256 hashes for authentication and stores an encrypted recoverable copy for the protected admin UI
 - **Model Permission Control** - Restrict keys to specific models
 - **Daily Request Limits** - Set per-key daily request caps
 - **Dashboard** - Health, official credit summary, expiry reminders, request trend, model ranking, account status, key usage, and recent logs
@@ -123,7 +123,7 @@ After cloning the repository and entering its directory, double-click `start.bat
 .\start.bat
 ```
 
-The script creates a project-local `.venv`, installs dependencies, and starts the server. `.venv` and Conda are separate environment approaches; choose one for a given installation instead of mixing them.
+The script first looks for Conda and uses or creates a Python 3.12 environment named `buddy2api`. It also checks common Miniconda and Anaconda install locations when PowerShell has not been initialized for Conda. Only when Conda is unavailable does it create a project-local `.venv`. It then installs missing dependencies and starts the server.
 
 On Linux or macOS:
 
@@ -134,7 +134,7 @@ chmod +x start.sh
 ./start.sh
 ```
 
-`start.sh` also creates `.venv` and installs the dependencies automatically.
+`start.sh` also prefers the `buddy2api` Conda environment and falls back to `.venv` only when Conda is unavailable.
 
 ### Option C: Docker
 
@@ -193,7 +193,7 @@ For local browser access, the Web UI uses a same-origin HttpOnly admin cookie au
 
 1. Open Accounts, rescan, and confirm that the Work Buddy / CodeBuddy account was imported.
 2. Run the single-account test to confirm that model requests work.
-3. Create a client key on API Keys. The complete key is shown only once, so save it immediately.
+3. Create a client key on API Keys. You can view and copy it again later from the Admin-protected list.
 4. Configure the client with `http://127.0.0.1:8787/v1`, the new API key, and model `auto`.
 
 For remote access or cookie fallback cases, set a fixed admin token before startup:
@@ -217,7 +217,7 @@ python -m pip install -r requirements.txt
 python server.py
 ```
 
-Windows `.venv` / `start.bat` installation:
+Windows `.venv` fallback installation (when Conda is unavailable):
 
 ```powershell
 cd <your-project-path>\Buddy2api
@@ -367,7 +367,8 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 - Account tokens are encrypted before SQLite writes. Windows uses DPAPI; other platforms use the configured master key or a local `0600` key file.
 - Plaintext credentials in older databases are encrypted automatically on first startup. Set a stable `CB_GATEWAY_MASTER_KEY` before moving databases or containers.
 - Request logs are retained for 90 days by default; adjust `CB_GATEWAY_LOG_RETENTION_DAYS` when needed.
-- API keys are stored as hashes only; full key is never shown again after creation.
+- API keys use SHA-256 hashes for authentication. A separate encrypted copy is available only through the Admin-protected management API.
+- Keys created before this upgrade only have hashes and cannot be reconstructed. They continue to authenticate normally, but create a replacement if you need to copy one from the management UI.
 - Do not share your database, auth files, `.lab-agent`, logs, or screenshots.
 - Do not expose the service to public network addresses.
 - Keep the default `127.0.0.1` for safest local-only usage.

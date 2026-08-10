@@ -639,7 +639,7 @@ async def admin_claim_all_checkin(authorization: str | None = Header(default=Non
 @app.get("/admin/api-keys")
 async def admin_list_keys(authorization: str | None = Header(default=None)):
     _check_admin(authorization)
-    return db.list_api_keys()
+    return db.list_api_keys(include_secret=True)
 
 
 @app.post("/admin/api-keys")
