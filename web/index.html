@@ -732,7 +732,7 @@ createApp({
 }).component('keys',{props:['token','toast'],setup(p){
   const l=ref([]),ld=ref(true),sa=ref(false),f=reactive({name:'',models:'',limit:null,preset:'custom'}),res=ref(''),saving=ref(false),copied=ref(false),busy=ref({}),shown=ref({}),codexResult=ref(null),codexBusy=ref(false);
   const clientTypes=[
-    {k:'custom',name:'自定义',icon:'⚙'},
+    {k:'custom',name:'默认',icon:'⚙'},
     {k:'codex',name:'Codex',icon:'◉'},
     {k:'opencode',name:'OpenCode',icon:'⬡'},
     {k:'openclaw',name:'OpenClaw',icon:'⬢'},
@@ -745,12 +745,12 @@ createApp({
     openclaw:{name:'OpenClaw',autoName:'OpenClaw',configTpl:(key)=>`# 环境变量\nexport OPENAI_BASE_URL=http://127.0.0.1:8787/v1\nexport OPENAI_API_KEY=${key}\nexport OPENAI_MODEL=auto`,note:'OpenClaw 通过环境变量配置，写入 shell profile 后 source 即可。',canAutoWrite:false},
     cherry:{name:'Cherry Studio',autoName:'Cherry Studio',configTpl:(key)=>`Base URL: http://127.0.0.1:8787/v1\nAPI Key: ${key}\nModel: auto\n供应商类型: OpenAI Compatible`,note:'Cherry Studio 设置 → 模型服务 → 添加自定义供应商。',canAutoWrite:false},
     nextchat:{name:'NextChat',autoName:'NextChat',configTpl:(key)=>`接口地址: http://127.0.0.1:8787\nAPI Key: ${key}\n模型: auto`,note:'NextChat 自定义接口地址填到 /v1 上一级。',canAutoWrite:false},
-    custom:{name:'自定义',autoName:'',configTpl:(key)=>`Base URL: http://127.0.0.1:8787/v1\nAPI Key: ${key}\nModel: auto\nEndpoint: /v1/chat/completions`,note:'',canAutoWrite:false},
+    custom:{name:'默认',autoName:'',configTpl:(key)=>`Base URL: http://127.0.0.1:8787/v1\nAPI Key: ${key}\nModel: auto\nEndpoint: /v1/chat/completions`,note:'',canAutoWrite:false},
   };
   function busyKey(id,k){return busy.value[id+'-'+k]}
   async function withBusy(k,id,fn){busy.value={...busy.value,[id+'-'+k]:true};try{return await fn()}finally{const o={...busy.value};delete o[id+'-'+k];busy.value=o}}
   async function load(){ld.value=true;try{l.value=await api.get('/admin/api-keys',p.token)}catch(e){p.toast(apiErr(e,'加载失败'),'err')}ld.value=false}
-  async function create(){if(saving.value)return;saving.value=true;try{const b={name:f.name||presets[f.preset].autoName||'Key',client_type:f.preset};if(f.models)b.allowed_models=f.models.split(',').map(s=>s.trim()).filter(Boolean);if(f.limit)b.daily_limit=parseInt(f.limit);const r=await api.post('/admin/api-keys',b,p.token);res.value=r.key;p.toast('创建成功');await load()}catch(e){p.toast(apiErr(e,'创建失败'),'err')}saving.value=false}
+  async function create(){if(saving.value)return;saving.value=true;try{const b={name:f.name||presets[f.preset].autoName||'Key',client_type:f.preset==='codex'?'codex':'custom'};if(f.models)b.allowed_models=f.models.split(',').map(s=>s.trim()).filter(Boolean);if(f.limit)b.daily_limit=parseInt(f.limit);const r=await api.post('/admin/api-keys',b,p.token);res.value=r.key;p.toast('创建成功');await load()}catch(e){p.toast(apiErr(e,'创建失败'),'err')}saving.value=false}
   async function toggle(k){await withBusy('toggle',k.id,async()=>{try{await api.put('/admin/api-keys/'+k.id,{status:k.status==='active'?'inactive':'active'},p.token);p.toast(k.status==='active'?'已禁用':'已启用');await load()}catch(e){p.toast(apiErr(e,'操作失败'),'err')}})}
   async function del(k){if(!confirm('删除 API Key '+(k.name||k.key_prefix||k.id)+' ?'))return;await withBusy('del',k.id,async()=>{try{await api.del('/admin/api-keys/'+k.id,p.token);p.toast('已删除');await load()}catch(e){p.toast(apiErr(e,'删除失败'),'err')}})}
   function cp(v){navigator.clipboard.writeText(v);copied.value=true;p.toast('已复制','info');setTimeout(()=>copied.value=false,1500)}
@@ -798,9 +798,9 @@ createApp({
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           <button v-for="t in clientTypes" :key="t.k" :class="['btn','s',{on:f.preset===t.k}]" @click="f.preset=t.k" style="border:1px solid var(--border);border-radius:var(--r);padding:6px 12px;font-size:12px;cursor:pointer" :style="{background:f.preset===t.k?'var(--blue-bg)':'var(--bg)',color:f.preset===t.k?'var(--blue)':'var(--fg)',borderColor:f.preset===t.k?'var(--blue-border)':'var(--border)',fontWeight:f.preset===t.k?'600':'400'}">{{t.icon}} {{t.name}}</button>
         </div>
-        <div class="hint" style="margin-top:4px">选择目标客户端，创建后自动展示对应配置。选"自定义"仅创建 Key。</div>
+        <div class="hint" style="margin-top:4px">选择目标客户端，创建后自动展示对应配置。选"默认"仅创建 Key（无任何改写，原样透传）。Codex 类型会对请求做敏感词清洗；其余类型仅展示对应客户端的接入配置模板，行为与"默认"完全一致。</div>
       </div>
-      <div class="field"><label>名称</label><input v-model="f.name" :placeholder="presets[f.preset].autoName||'自定义名称'"/></div>
+      <div class="field"><label>名称</label><input v-model="f.name" :placeholder="presets[f.preset].autoName||'Key 名称'"/></div>
       <div class="field"><label>允许模型</label><input v-model="f.models" placeholder="auto,glm-5.2（留空=全部）"/></div>
       <div class="field"><label>每日请求限额</label><input v-model="f.limit" type="number" placeholder="不限"/></div>
     </template>
