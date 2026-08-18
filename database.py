@@ -285,6 +285,12 @@ def _migrate_api_keys(conn: sqlite3.Connection):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(api_keys)").fetchall()}
     if "client_type" not in cols:
         conn.execute("ALTER TABLE api_keys ADD COLUMN client_type TEXT DEFAULT 'custom'")
+    # 归一化历史数据：v1.4.0 之前 UI 允许落库 opencode/openclaw/cherry/nextchat，
+    # 后端仅有 codex/custom 两种行为，其余一律归为 custom。
+    conn.execute(
+        "UPDATE api_keys SET client_type='custom' "
+        "WHERE client_type IS NULL OR client_type NOT IN ('custom','codex')"
+    )
 
 
 def _migrate_account_credentials(conn: sqlite3.Connection):
