@@ -26,13 +26,8 @@ import database as db
 BACKEND = "https://copilot.tencent.com"
 DEFAULT_DOMAIN = "www.codebuddy.cn"
 
-# 默认使用通用浏览器 UA，避免在请求头中自曝网关身份（原 UA 为 buddy2api/x.y.z，
-# 调用方一眼可辨）。如需自定义，设置环境变量 CB_GATEWAY_USER_AGENT。
-_DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
+# 协议逆向文档记录的历史 UA。可按需用 CB_GATEWAY_USER_AGENT 覆盖。
+_DEFAULT_USER_AGENT = "codebuddy2openai/2.0"
 USER_AGENT = os.environ.get("CB_GATEWAY_USER_AGENT") or _DEFAULT_USER_AGENT
 
 _lock = threading.Lock()
