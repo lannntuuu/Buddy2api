@@ -2076,3 +2076,219 @@ def test_codex_sanitize_passthrough_without_system_prompt():
     payload = {"model": "auto", "messages": [{"role": "user", "content": "hello"}]}
     out = responses.apply_codex_sanitize(dict(payload))
     assert out == payload
+
+
+# ============================================================
+# 工具停转（tool stall）检测与修复 — issue #31
+# ============================================================
+
+def _tool_loop_body():
+    return {
+        "model": "auto",
+        "stream": False,
+        "tools": [{"type": "function", "function": {"name": "list_files", "parameters": {"type": "object"}}}],
+        "messages": [
+            {"role": "user", "content": "列出文件"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "list_files", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "a.txt"},
+            {"role": "user", "content": "继续跑流程。"},
+        ],
+    }
+
+
+def test_stall_detection_ack_text():
+    body = _tool_loop_body()
+    assert proxy._request_has_tool_loop(body)
+    assert proxy._looks_like_stall_text("好的，马上继续跑流程。")
+    assert proxy._is_tool_stall(body, "stop", False, "好的，马上继续跑流程。")
+
+
+def test_stall_detection_rejects_summary():
+    body = _tool_loop_body()
+    assert not proxy._looks_like_stall_text("任务完成，总结如下：共处理 3 个文件。")
+    assert not proxy._is_tool_stall(body, "stop", False, "任务完成，总结如下：共处理 3 个文件。")
+
+
+def test_stall_detection_requires_tool_loop_and_tools():
+    no_tool_history = {
+        "model": "auto",
+        "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+        "messages": [{"role": "user", "content": "继续。"}],
+    }
+    assert not proxy._request_has_tool_loop(no_tool_history)
+    assert not proxy._is_tool_stall(no_tool_history, "stop", False, "好的，马上继续。")
+    no_tools = {
+        "model": "auto",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": None, "tool_calls": []},
+            {"role": "tool", "tool_call_id": "x", "content": "y"},
+            {"role": "user", "content": "继续。"},
+        ],
+    }
+    assert not proxy._is_tool_stall(no_tools, "stop", False, "好的，马上继续。")
+    assert not proxy._is_tool_stall(_tool_loop_body(), "stop", True, "好的，马上继续。")
+    assert not proxy._is_tool_stall(_tool_loop_body(), "length", False, "好的，马上继续。")
+
+
+def test_stall_retry_nonstream_uses_tool_call_result(monkeypatch, isolated_db):
+    """停转时自动以 tool_choice=required 重试，并优先采用重试出的工具调用结果。"""
+    stall_json = {
+        "id": "c1", "object": "chat.completion", "created": 1,
+        "model": "auto",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "好的，马上继续跑流程。"},
+                     "finish_reason": "stop"}],
+        "usage": {},
+    }
+    fixed_json = {
+        "id": "c2", "object": "chat.completion", "created": 2,
+        "model": "auto",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "t1", "type": "function", "function": {"name": "list_files", "arguments": "{}"}}]},
+                     "finish_reason": "tool_calls"}],
+        "usage": {},
+    }
+
+    calls = []
+
+    account = {"id": 1, "name": "test-account"}
+
+    async def pick_account(_excluded):
+        return account
+
+    async def valid_headers(_account):
+        return {"Authorization": "Bearer test"}
+
+    async def fake_collect(url, headers, body, account, api_key_info, model_name, t0):
+        calls.append(body.get("tool_choice"))
+        if len(calls) == 1:
+            return ("json", stall_json)
+        return ("json", fixed_json)
+
+    monkeypatch.setattr(proxy, "_collect_stream", fake_collect)
+    monkeypatch.setattr(auth_manager, "pick_account_with_fallback", pick_account)
+    monkeypatch.setattr(auth_manager, "get_valid_headers", valid_headers)
+    monkeypatch.setattr(auth_manager, "mark_account_success", lambda _id: None)
+    monkeypatch.setattr(auth_manager, "mark_account_failure", lambda *_a: None)
+    monkeypatch.setattr(auth_manager, "backend_url", lambda: "https://upstream.test")
+    monkeypatch.setattr(auth_manager, "request_timeout", lambda _default: 30)
+
+    async def run():
+        return await proxy.proxy_chat_completions(_tool_loop_body(), None)
+
+    result = asyncio.run(run())
+    assert result[0] == "json"
+    assert result[1]["choices"][0]["message"].get("tool_calls")
+    assert calls == [None, "required"]
+
+
+def test_stall_retry_nonstream_keeps_first_answer_when_retry_has_no_tools(monkeypatch, isolated_db):
+    """重试仍无工具调用时，保留首次的文字回复（例如总结类回答）。"""
+    stall_json = {
+        "id": "c1", "object": "chat.completion", "created": 1,
+        "model": "auto",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "好的，马上继续。"},
+                     "finish_reason": "stop"}],
+        "usage": {},
+    }
+    again_json = {
+        "id": "c2", "object": "chat.completion", "created": 2,
+        "model": "auto",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "好的，马上继续。"},
+                     "finish_reason": "stop"}],
+        "usage": {},
+    }
+
+    calls = []
+
+    account = {"id": 1, "name": "test-account"}
+
+    async def pick_account(_excluded):
+        return account
+
+    async def valid_headers(_account):
+        return {"Authorization": "Bearer test"}
+
+    async def fake_collect(url, headers, body, account, api_key_info, model_name, t0):
+        calls.append(body.get("tool_choice"))
+        if len(calls) == 1:
+            return ("json", stall_json)
+        return ("json", again_json)
+
+    monkeypatch.setattr(proxy, "_collect_stream", fake_collect)
+    monkeypatch.setattr(auth_manager, "pick_account_with_fallback", pick_account)
+    monkeypatch.setattr(auth_manager, "get_valid_headers", valid_headers)
+    monkeypatch.setattr(auth_manager, "mark_account_success", lambda _id: None)
+    monkeypatch.setattr(auth_manager, "mark_account_failure", lambda *_a: None)
+    monkeypatch.setattr(auth_manager, "backend_url", lambda: "https://upstream.test")
+    monkeypatch.setattr(auth_manager, "request_timeout", lambda _default: 30)
+
+    async def run():
+        return await proxy.proxy_chat_completions(_tool_loop_body(), None)
+
+    result = asyncio.run(run())
+    assert result[0] == "json"
+    assert result[1]["choices"][0]["message"].get("content") == "好的，马上继续。"
+    assert calls == [None, "required"]
+
+
+def _stall_stream_chunks() -> list[bytes]:
+    """上游流：纯文本增量 + finish_reason=stop（无任何工具调用）。"""
+    return [
+        _chat_sse({
+            "id": "c1", "object": "chat.completion.chunk", "created": 1,
+            "choices": [{"index": 0, "delta": {"content": "好的，马上继续跑流程。"}, "finish_reason": None}],
+        }),
+        _chat_sse({
+            "id": "c1", "object": "chat.completion.chunk", "created": 1,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }),
+        b"data: [DONE]\n\n",
+    ]
+
+
+def test_stream_tool_stall_fails_when_flag_on(monkeypatch, isolated_db):
+    """流式停转 + CB_GATEWAY_TOOL_STALL_FAIL_STREAM=1 → 回合标记为失败。"""
+    monkeypatch.setattr(proxy, "TOOL_STALL_FAIL_STREAM", True)
+    body = _tool_loop_body()
+    body["stream"] = True
+    raw = _collect_chat_proxy_stream(_stall_stream_chunks(), monkeypatch, body)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+    assert done_count == 1
+    errors = [p for p in payloads if p.get("error")]
+    assert len(errors) == 1
+    assert errors[0]["error"]["code"] == "upstream_tool_stall"
+
+
+def test_stream_tool_stall_passthrough_when_flag_off(monkeypatch, isolated_db):
+    """默认（flag off）流式停转原样透传，仅日志标记 tool_stall。"""
+    body = _tool_loop_body()
+    body["stream"] = True
+    raw = _collect_chat_proxy_stream(_stall_stream_chunks(), monkeypatch, body)
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+    assert done_count == 1
+    assert not any(p.get("error") for p in payloads)
+    assert any(p.get("choices") and p["choices"][0].get("finish_reason") == "stop" for p in payloads)
+
+
+def test_stream_tool_stall_is_logged(monkeypatch, isolated_db):
+    """流式停转（flag off）时日志 finish_reason 记为 tool_stall。"""
+    calls = _install_chat_account_stream_fakes(
+        monkeypatch,
+        [{"id": 1, "name": "test-account"}],
+        {1: _stall_stream_chunks()},
+    )
+    body = _tool_loop_body()
+    body["stream"] = True
+
+    async def collect():
+        return b"".join([
+            chunk
+            async for chunk in proxy._stream_upstream(body, None, "test-model")
+        ])
+
+    raw = asyncio.run(collect())
+    assert b"tool stall" not in raw
+    logged_finishes = [entry[0][8] for entry in calls["logs"]]
+    assert "tool_stall" in logged_finishes

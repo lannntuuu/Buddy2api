@@ -42,6 +42,62 @@ def _looks_like_audit_block(text: str) -> bool:
     return any(p in text for p in _AUDIT_PHRASES)
 
 
+# 工具停转（tool stall）检测与修复开关。
+# 场景：agent 工具循环回合（请求带 tools 且历史含 role=tool），上游模型却以
+# finish_reason=stop + 纯文本（"好的，马上继续跑流程"式确认话术）结束且未调用
+# 任何工具 —— 工作流卡死成纯聊天（issue #31）。
+TOOL_STALL_RETRY = (
+    os.environ.get("CB_GATEWAY_TOOL_STALL_RETRY", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+TOOL_STALL_FAIL_STREAM = (
+    os.environ.get("CB_GATEWAY_TOOL_STALL_FAIL_STREAM", "0").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+_STALL_POSITIVE_MARKERS = (
+    "马上继续", "继续跑", "接下来需要", "请问您接下来",
+    "这就去", "马上开始", "我现在就", "这就开始", "稍等",
+)
+_STALL_NEGATIVE_MARKERS = (
+    "总结", "已完成", "结果如下", "以下是", "以上就是", "完成情况",
+)
+
+
+def _request_has_tool_loop(body: dict) -> bool:
+    """是否为 agent 工具循环回合：声明了 tools 且历史里存在工具结果。"""
+    if not isinstance(body.get("tools"), list) or not body["tools"]:
+        return False
+    return any(
+        isinstance(msg, dict) and msg.get("role") == "tool"
+        for msg in (body.get("messages") or [])
+    )
+
+
+def _looks_like_stall_text(text: str) -> bool:
+    """空内容视为 stall；否则要求短文本且像'知道了，马上继续'式话术，
+    排除总结性回答。"""
+    text = (text or "").strip()
+    if not text:
+        return True
+    if len(text) > 160:
+        return False
+    if any(marker in text for marker in _STALL_NEGATIVE_MARKERS):
+        return False
+    return any(marker in text for marker in _STALL_POSITIVE_MARKERS)
+
+
+def _is_tool_stall(body: dict, finish_reason, tool_calls: bool, text: str) -> bool:
+    """判定一次上游完成是否属于工具停转（stall）。"""
+    if not _request_has_tool_loop(body):
+        return False
+    if tool_calls:
+        return False
+    if (finish_reason or "stop") not in {"stop", None}:
+        return False
+    return _looks_like_stall_text(text)
+
+
 def _is_retryable_status(status: int) -> bool:
     return status in RETRYABLE_STATUS_CODES or status in {401, 403}
 
@@ -597,6 +653,28 @@ async def proxy_chat_completions(
         t0 = time.time()
         result = await _collect_stream(url, headers, body, account, api_key_info, model_name, t0)
         if result[0] == "json":
+            # 工具停转修复：agent 回合被上游以 stop+纯文本结束且未调用工具时，
+            # 用 tool_choice=required 重试一次；重试产出工具调用则采用重试结果。
+            if TOOL_STALL_RETRY:
+                choice = (result[1].get("choices") or [{}])[0]
+                message = choice.get("message") or {}
+                if _is_tool_stall(
+                    body,
+                    choice.get("finish_reason"),
+                    bool(message.get("tool_calls")),
+                    message.get("content") or "",
+                ):
+                    retry_body = {**body, "tool_choice": "required"}
+                    retry_t0 = time.time()
+                    retry_result = await _collect_stream(
+                        url, headers, retry_body, account, api_key_info, model_name, retry_t0
+                    )
+                    if retry_result[0] == "json":
+                        retry_choice = (retry_result[1].get("choices") or [{}])[0]
+                        retry_message = retry_choice.get("message") or {}
+                        if retry_message.get("tool_calls"):
+                            auth_manager.mark_account_success(account["id"])
+                            return retry_result
             auth_manager.mark_account_success(account["id"])
             return result
 
@@ -888,8 +966,13 @@ async def _stream_upstream(
         full_text = "".join(observer.content_parts)
         audit_blocked = _looks_like_audit_block(full_text)
         finish_reason = next((reason for reason in observer.finish_reasons.values() if reason), None)
-        log_finish = "content_filter" if audit_blocked else (finish_reason or "stop")
-        log_error = ("[audit blocked] " + full_text[:300]) if audit_blocked else ""
+        tool_stall = _is_tool_stall(body, finish_reason, bool(observer.tool_call_choices), full_text)
+        log_finish = "content_filter" if audit_blocked else ("tool_stall" if tool_stall else (finish_reason or "stop"))
+        log_error = (
+            ("[audit blocked] " + full_text[:300]) if audit_blocked
+            else ("[tool stall] " + full_text[:300]) if tool_stall
+            else ""
+        )
         _log_request(
             api_key_info, account, model_name, True,
             observer.usage.get("prompt_tokens", 0),
@@ -898,6 +981,18 @@ async def _stream_upstream(
             observer.usage.get("credit", 0),
             log_finish, 200, log_error, t0,
         )
+        if tool_stall and TOOL_STALL_FAIL_STREAM:
+            # 流式已发出文本增量，无法回退重试；把本回合标记为失败，
+            # 让有重试机制的客户端（DSH / OpenCode 等）自动重试。
+            yield _json_sse_event({
+                "error": {
+                    "message": "The model finished a tool turn without calling a tool.",
+                    "type": "upstream_error",
+                    "code": "upstream_tool_stall",
+                },
+            })
+            yield b"data: [DONE]\n\n"
+            return
         for event in pending_terminal_events:
             yield event
         if synthetic_terminal is not None:
