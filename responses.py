@@ -9,6 +9,7 @@ Codex 从 2026.2 起强制要求 wire_api="responses"，不再支持 chat/comple
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from typing import AsyncGenerator, Optional
@@ -196,7 +197,15 @@ def responses_to_chat(resp_payload: dict) -> dict:
                     "strict": t.get("strict"),
                 },
             })
-        # web_search, file_search, code_interpreter 等跳过（后端不支持）
+        else:
+            # web_search, file_search, code_interpreter 等后端不支持：跳过，
+            # 但记录日志，便于诊断"模型因缺少工具而用文字代替"的退化（issue #31）。
+            print(
+                "[responses] dropping unsupported tool type "
+                f"{t.get('type')!r}"
+                + (f" name={t.get('name')!r}" if t.get('name') else ""),
+                file=sys.stderr,
+            )
 
     # tool_choice
     tool_choice = resp_payload.get("tool_choice")

@@ -363,6 +363,8 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `CB_GATEWAY_STAINLESS_OS` | 官方指纹上报的操作系统，默认按当前平台推断 |
 | `CB_GATEWAY_STAINLESS_PACKAGE_VERSION` | 官方 SDK 指纹版本号，默认 `5.10.1` |
 | `CB_GATEWAY_NODE_VERSION` | 官方 SDK 指纹 Node 运行时版本，默认 `v22.13.1` |
+| `CB_GATEWAY_TOOL_STALL_RETRY` | 非流式请求遇到"工具停转"时自动用 `tool_choice=required` 重试一次，默认开启，设 `0` 关闭 |
+| `CB_GATEWAY_TOOL_STALL_FAIL_STREAM` | 流式请求遇到"工具停转"时把该回合标记为失败（让 DSH / OpenCode 等客户端自动重试），默认关闭 |
 | `CB_AUTH_DIR` | 指定 Work Buddy / CodeBuddy auth 文件目录 |
 | `CB_HOST_AUTH_DIR` | Docker 启动脚本使用的宿主机 auth 目录 |
 | `CB_CONTAINER_AUTH_DIR` | Docker 容器内 auth 挂载目录，默认 `/auth` |
@@ -377,6 +379,15 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 - **Refresh 头**：`X-Refresh-Token` 只出现在 token 刷新接口，chat 请求绝不携带。
 
 字段缺失时按官方 CLI 约定发送 `X-No-*` 标记（如 `X-No-User-Id: 1`），而不是空值。以上均可用 `CB_GATEWAY_USER_AGENT` 等环境变量覆盖（见上表）。指纹只作用于请求头；如上游进一步校验 TLS 指纹（JA3），需要额外部署支持 TLS 指纹模拟的转发层。
+
+## 工具停转防护（issue #31）
+
+上游模型在 agent 工具循环回合（请求带 tools 且历史含工具结果）偶尔会以 `stop` + 纯文本结束而不调用任何工具（例如回复"好的，马上继续跑流程"），导致 agent 工作流卡成纯聊天。网关现在会检测这种"工具停转"：
+
+- **非流式**：自动用 `tool_choice=required` 重试一次；重试产出工具调用则采用重试结果，否则保留首次文字回复。默认开启，可用 `CB_GATEWAY_TOOL_STALL_RETRY=0` 关闭。
+- **流式**：默认原样透传但后台日志标记为 `tool_stall`；设置 `CB_GATEWAY_TOOL_STALL_FAIL_STREAM=1` 时把该回合标记为失败，让有重试机制的客户端（DSH / OpenCode）自动重试。
+
+判定条件限定为工具循环回合且回复是"确认式话术"（如"好的，马上继续…"），总结类回答不受影响。转换层丢弃后端不支持的请求工具类型（如 `web_search`）时会记录日志，便于诊断模型"因缺少工具而用文字代替"的退化。
 
 ## 数据和安全
 

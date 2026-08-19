@@ -363,6 +363,8 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `CB_GATEWAY_STAINLESS_OS` | OS reported by the official fingerprint; inferred from the current platform by default |
 | `CB_GATEWAY_STAINLESS_PACKAGE_VERSION` | Official SDK fingerprint package version, default `5.10.1` |
 | `CB_GATEWAY_NODE_VERSION` | Official SDK fingerprint Node runtime version, default `v22.13.1` |
+| `CB_GATEWAY_TOOL_STALL_RETRY` | Auto-retry non-streaming "tool stall" turns once with `tool_choice=required`; enabled by default, set `0` to disable |
+| `CB_GATEWAY_TOOL_STALL_FAIL_STREAM` | Mark streaming "tool stall" turns as failed so retrying clients (DSH / OpenCode) retry automatically; disabled by default |
 | `CB_AUTH_DIR` | Work Buddy / CodeBuddy auth file directory |
 | `CB_HOST_AUTH_DIR` | Host auth directory used by Docker helper scripts |
 | `CB_CONTAINER_AUTH_DIR` | Auth mount directory inside Docker, default `/auth` |
@@ -377,6 +379,15 @@ Upstream requests carry the full request-header fingerprint of the official Work
 - **Refresh**: `X-Refresh-Token` only ever appears on the token-refresh endpoint, never on chat requests.
 
 Missing fields follow the official CLI convention of `X-No-*` markers (e.g. `X-No-User-Id: 1`) instead of empty values. Everything can be overridden with `CB_GATEWAY_USER_AGENT` and the other variables listed above. The fingerprint covers request headers only; if the upstream also validates TLS fingerprints (JA3), an additional TLS-impersonation forwarding layer would be required.
+
+## Tool-stall protection (issue #31)
+
+On agent tool-loop turns (request has `tools` and tool results in history), the upstream model occasionally ends with `stop` plus plain text instead of calling a tool (e.g. "OK, I'll continue right away"), which stalls agent workflows. The gateway now detects this "tool stall":
+
+- **Non-streaming**: retries once automatically with `tool_choice=required`; the retry result is used when it contains tool calls, otherwise the first text reply is kept. Enabled by default; set `CB_GATEWAY_TOOL_STALL_RETRY=0` to disable.
+- **Streaming**: passed through by default, with the turn logged as `tool_stall`; set `CB_GATEWAY_TOOL_STALL_FAIL_STREAM=1` to mark the turn as failed so clients with retry logic (DSH / OpenCode) retry automatically.
+
+Detection is limited to tool-loop turns with acknowledgment-style replies (e.g. "OK, I'll continue..."); summary answers are unaffected. Dropped unsupported request tool types (e.g. `web_search`) are logged to help diagnose text-instead-of-tool degradation.
 
 ## Data and Security
 
