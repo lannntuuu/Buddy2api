@@ -357,6 +357,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `CB_GATEWAY_MAX_BODY_BYTES` | 单个 JSON 请求体上限，默认 `10485760` |
 | `CB_GATEWAY_CORS_ORIGINS` | 允许的浏览器来源，逗号分隔，默认仅本机来源 |
 | `CB_GATEWAY_ALLOW_UNAUTHENTICATED_API` | 设为 `1` 时允许未创建 API Key 的业务请求，默认关闭 |
+| `CB_GATEWAY_DEFAULT_REASONING_EFFORT` | DeepSeek V4 未指定思考强度时的默认值，Docker 默认 `high`；可设为 `low` / `high` / `max`，留空关闭 |
 | `CB_GATEWAY_SECURE_COOKIE` | 设为 `1` 时强制管理 Cookie 使用 Secure 标记 |
 | `CB_GATEWAY_USER_AGENT` | 出站请求完整 User-Agent；默认官方 CLI 指纹 `CLI/2.109.2 CodeBuddy/2.109.2`，可设回 `codebuddy2openai/2.0` 回退历史 UA |
 | `CB_GATEWAY_IDE_VERSION` | 官方指纹中的 CLI 版本号，默认 `2.109.2` |

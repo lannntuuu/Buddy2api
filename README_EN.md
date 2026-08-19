@@ -357,6 +357,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `CB_GATEWAY_MAX_BODY_BYTES` | Maximum JSON request size, default `10485760` |
 | `CB_GATEWAY_CORS_ORIGINS` | Comma-separated browser origin allowlist; local origins by default |
 | `CB_GATEWAY_ALLOW_UNAUTHENTICATED_API` | Set to `1` to allow API calls before creating a key; disabled by default |
+| `CB_GATEWAY_DEFAULT_REASONING_EFFORT` | Default reasoning level for DeepSeek V4 when the client omits it; Docker defaults to `high`; set `low` / `high` / `max`, or leave empty to disable |
 | `CB_GATEWAY_SECURE_COOKIE` | Set to `1` to force the Secure flag on the admin cookie |
 | `CB_GATEWAY_USER_AGENT` | Full outgoing User-Agent; defaults to the official CLI fingerprint `CLI/2.109.2 CodeBuddy/2.109.2`; set `codebuddy2openai/2.0` to revert to the historical UA |
 | `CB_GATEWAY_IDE_VERSION` | CLI version used in the official fingerprint, default `2.109.2` |
