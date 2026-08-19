@@ -50,6 +50,84 @@ def _events_of_type(events: list[tuple[str, dict]], event_name: str) -> list[dic
     return [payload for name, payload in events if name == event_name]
 
 
+def test_build_backend_body_adds_configured_reasoning_default_for_deepseek(monkeypatch):
+    monkeypatch.setenv("CB_GATEWAY_DEFAULT_REASONING_EFFORT", "high")
+    monkeypatch.setattr(proxy, "resolve_model_alias", lambda model: model)
+
+    body = proxy.build_backend_body({
+        "model": "deepseek-v4-pro",
+        "messages": [{"role": "user", "content": "hello"}],
+    })
+
+    assert body["reasoning_effort"] == "high"
+
+
+def test_build_backend_body_maps_developer_messages_to_system(monkeypatch):
+    monkeypatch.setattr(proxy, "resolve_model_alias", lambda model: model)
+    messages = [
+        {"role": "developer", "content": "developer instructions"},
+        {"role": "user", "content": "hello"},
+    ]
+
+    body = proxy.build_backend_body({
+        "model": "deepseek-v4-pro",
+        "messages": messages,
+    })
+
+    assert [message["role"] for message in body["messages"]] == ["system", "user"]
+    assert messages[0]["role"] == "developer"
+
+
+def test_audit_detector_requires_a_short_refusal_response():
+    refusal = "系统检测到您当前输入的信息存在敏感内容，无法响应您的请求，请检查后重新输入。"
+    quoted_in_normal_answer = (
+        "这是对 issue 的分析。上游曾返回“系统检测到您当前输入的信息存在敏感内容，"
+        "无法响应您的请求，请检查后重新输入”，但当前请求本身返回了正常结果。"
+    )
+
+    assert proxy._looks_like_audit_block(refusal)
+    assert not proxy._looks_like_audit_block(quoted_in_normal_answer)
+
+
+@pytest.mark.parametrize("model", ["glm-5.2", "auto", "unknown-model"])
+def test_build_backend_body_does_not_add_reasoning_default_to_other_models(monkeypatch, model):
+    monkeypatch.setenv("CB_GATEWAY_DEFAULT_REASONING_EFFORT", "high")
+    monkeypatch.setattr(proxy, "resolve_model_alias", lambda value: value)
+
+    body = proxy.build_backend_body({"model": model, "messages": []})
+
+    assert "reasoning_effort" not in body
+
+
+@pytest.mark.parametrize("explicit", ["none", "off", "low", "max"])
+def test_build_backend_body_preserves_explicit_reasoning_effort(monkeypatch, explicit):
+    monkeypatch.setenv("CB_GATEWAY_DEFAULT_REASONING_EFFORT", "high")
+    monkeypatch.setattr(proxy, "resolve_model_alias", lambda model: model)
+
+    body = proxy.build_backend_body({
+        "model": "deepseek-v4-flash",
+        "messages": [],
+        "reasoning_effort": explicit,
+    })
+
+    assert body["reasoning_effort"] == explicit
+
+
+def test_build_backend_body_ignores_unsupported_thinking_without_injecting_default(monkeypatch):
+    monkeypatch.setenv("CB_GATEWAY_DEFAULT_REASONING_EFFORT", "high")
+    monkeypatch.setattr(proxy, "resolve_model_alias", lambda model: model)
+    thinking = {"type": "disabled"}
+
+    body = proxy.build_backend_body({
+        "model": "deepseek-v4-pro",
+        "messages": [],
+        "thinking": thinking,
+    })
+
+    assert "thinking" not in body
+    assert "reasoning_effort" not in body
+
+
 def _collect_chat_proxy_stream(
     chunks: list[bytes],
     monkeypatch,

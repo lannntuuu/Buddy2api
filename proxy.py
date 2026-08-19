@@ -24,22 +24,31 @@ import auth_manager
 BACKEND = "https://copilot.tencent.com"
 RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 
-# 腾讯内容审核拦截时返回的固定话术特征（HTTP 200 + 正文是这段话）
-_AUDIT_PHRASES = (
+# 腾讯内容审核拦截时返回的固定话术特征（HTTP 200 + 正文是这段话）。
+# 仅匹配短拒答，避免正常回答引用审查文案时被误标。
+_AUDIT_PHRASE_GROUPS = (
+    ("系统检测到", "敏感内容", "无法响应"),
+    ("无法响应您的请求", "请检查后重新输入"),
+    ("内容违规", "请检查后重新输入"),
+    ("违规内容", "不能提供相关"),
+)
+_AUDIT_PREFIXES = (
     "系统检测到",
-    "敏感内容",
     "无法响应您的请求",
-    "请检查后重新输入",
     "内容违规",
     "违规内容",
-    "不能提供相关",
+    "抱歉，系统检测到",
+    "抱歉，无法响应",
 )
 
 
 def _looks_like_audit_block(text: str) -> bool:
-    if not text:
+    text = " ".join((text or "").split())
+    if not text or len(text) > 240:
         return False
-    return any(p in text for p in _AUDIT_PHRASES)
+    if not text.startswith(_AUDIT_PREFIXES):
+        return False
+    return any(all(phrase in text for phrase in group) for group in _AUDIT_PHRASE_GROUPS)
 
 
 # 工具停转（tool stall）检测与修复开关。
@@ -113,6 +122,15 @@ PASSTHROUGH_BODY_KEYS = {
     "verbosity", "reasoning_summary",
 }
 
+_REASONING_DEFAULT_MODEL_IDS = frozenset({
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+})
+_VALID_REASONING_DEFAULTS = frozenset({"low", "high", "max"})
+_BACKEND_ROLE_ALIASES = {
+    "developer": "system",
+}
+
 DEFAULT_MODELS = [
     {"id": "glm-5.2", "name": "GLM-5.2"},
     {"id": "glm-5.1", "name": "GLM-5.1"},
@@ -176,11 +194,35 @@ def resolve_model_alias(model: str) -> str:
     return merged.get(model, model)
 
 
+def _configured_reasoning_default(model: str) -> str | None:
+    """Return the opt-in reasoning default for supported DeepSeek V4 models."""
+    if model not in _REASONING_DEFAULT_MODEL_IDS:
+        return None
+    value = os.environ.get("CB_GATEWAY_DEFAULT_REASONING_EFFORT", "").strip().lower()
+    return value if value in _VALID_REASONING_DEFAULTS else None
+
+
 def build_backend_body(payload: dict) -> dict:
     body = {k: payload[k] for k in PASSTHROUGH_BODY_KEYS if k in payload}
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        body["messages"] = [
+            {
+                **message,
+                "role": _BACKEND_ROLE_ALIASES.get(message.get("role"), message.get("role")),
+            }
+            if isinstance(message, dict) and message.get("role") in _BACKEND_ROLE_ALIASES
+            else message
+            for message in messages
+        ]
+    has_explicit_thinking = "thinking" in payload
     # Resolve model alias before forwarding
     raw_model = body.get("model", "auto")
     body["model"] = resolve_model_alias(raw_model)
+    if "reasoning_effort" not in body and not has_explicit_thinking:
+        default_reasoning = _configured_reasoning_default(body["model"])
+        if default_reasoning:
+            body["reasoning_effort"] = default_reasoning
     body["stream"] = True
     if "stream_options" not in body:
         body["stream_options"] = {"include_usage": True}
