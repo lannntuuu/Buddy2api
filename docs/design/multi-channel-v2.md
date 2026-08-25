@@ -5,8 +5,8 @@
 | 文档标题 | Buddy2api 2.0：控制面可跨通道、数据面严格隔离 |
 | 作者 | Buddy2api maintainers |
 | 日期 | 2026-08-25 |
-| 修订 | 2026-08-25 r3（KD-4 步骤 2 仅前缀；payload 剥 inner；dry-pick 可 refresh；/v1/models 是方案 A 目录） |
-| 状态 | Draft |
+| 修订 | 2026-08-25 r4（用户拍板：QClaw Wave 1；不做 Lingma/Qoder CN；Key 必绑通道 + 下拉切换；版本 2.0.0；QwenWork flag 默认关） |
+| 状态 | Draft（Open Questions 已决议） |
 | 基线版本 | 1.4.10（`version.py` `VERSION = "1.4.10"`，worktree `design/multi-channel-v2` @ `6da79e1`） |
 | 目标概念版本 | **2.0**（`accounts.provider` + 命名空间模型）。**禁止**以 1.4.11 半成品形式带上 QwenWork |
 | 范围 | 设计文档。本分支除本文档外不落地产品代码 |
@@ -19,7 +19,7 @@ Buddy2api 今天是单一厂商网关：`server.py` 把 `/v1/chat/completions` �
 
 2.0 的产品差异化不是再做一个单厂商 2api clone，而是：**扫描本机已登录的消费级 AI 客户端 → 领取免费额度 → 暴露一个 OpenAI `/v1`**，同时 **绝不把不同厂商的请求指纹、TLS、HTTP 版本、签名算法混在同一条出站链路上**。控制面允许一次操作覆盖多个通道（预览后导入、按通道再按账号顺序领取）；数据面在请求开始时绑定通道，该通道没有可用账号时返回明确的 `channel_unavailable`，**禁止静默 failover 到另一家厂商**。把未加前缀的 `qwork-advanced` 送到腾讯 Copilot 也算静默错厂商，必须 400。
 
-第一波产品意图：腾讯 **WorkBuddy/CodeBuddy**，以及钉钉 **QwenWork（千问办公）** 与阿里 **QoderWork CN**。三者不是同一产品（见 Glossary）。ByteDance Trae、国际 Qoder、chat.qwen.ai、iFlow、悟空 DEAP、通义 Lingma 第一波不做。QoderWork 的 Encode/UMID 字节级事实尚未清洁室化，**不在 2.0.0 必合并火车上**（见 KD-14、Appendix A）。
+第一波产品意图：腾讯 **WorkBuddy/CodeBuddy** 与 **QClaw**（请求面互相隔离，不是同一网关），以及钉钉 **QwenWork（千问办公）**。阿里 **QoderWork CN** 仍因 Encode 事实不足，**不在 2.0.0 必合并火车上**。ByteDance Trae、通义 **Lingma / Qoder CN**、国际 Qoder、chat.qwen.ai、iFlow、悟空 DEAP **不做**。QwenWork adapter 可在 flag 默认关闭时合入；README / 默认 registry 必须等作者机器 `qwork-advanced` 200。发布版本字符串 **2.0.0**。每把 API Key **必须**绑定一个通道，管理页用下拉框切换。
 
 ---
 
@@ -31,11 +31,11 @@ Buddy2api 今天是单一厂商网关：`server.py` 把 `/v1/chat/completions` �
 |---|---|---|---|
 | **WorkBuddy / CodeBuddy** | 腾讯消费级客户端 | `copilot.tencent.com`；`%LOCALAPPDATA%\CodeBuddyExtension\...\*.info` | Wave 1，已生产 |
 | **QwenWork** | 钉钉「千问办公」桌面端，**不是**通义 Lingma | `gateway.qwenwork.cn`；`%APPDATA%\QwenWorkCN\auth-v2.dat`；`Cosy-Business-Product=qoder_work`，clienttype **6** | Wave 1，flag + 0.1.8 冒烟门闩 |
-| **QoderWork CN** | 阿里 Qoder 办公中国站 | `gateway.qoder.com.cn` / `openapi.qoder.com.cn`；`dt-`/`drt-`；clienttype **5**；`Encode=1` | 产品意图 Wave 1，**实现不在 2.0.0 必做火车**（Encode 事实不足） |
-| **Lingma / Qoder CN** | 通义灵码 / Qoder 国内 IDE | `~/.lingma`、`~/.qoder-cn`、`%APPDATA%/QoderCN`；cosy-version `2.11.x`，clienttype **2**；无每日签到 | Open Question，默认 Wave 2 |
+| **QoderWork CN** | 阿里 Qoder 办公中国站 | `gateway.qoder.com.cn` / `openapi.qoder.com.cn`；`dt-`/`drt-`；clienttype **5**；`Encode=1` | **不在 2.0.0 必做火车**（Encode 事实不足）；2.0.x 可选 |
+| **Lingma / Qoder CN** | 通义灵码 / Qoder 国内 IDE | `~/.lingma`、`~/.qoder-cn`、`%APPDATA%/QoderCN` | **Out（2.0 不做）** |
 | **Qoder International** | `qoder.sh` 国际站 | 不同 host / COSY | **Out** |
 | **Trae** | ByteDance | 设备绑定风控、协议碎片 | **Out** |
-| **QClaw** | 微信 OAuth + JPRX/aizone | 腾讯模型池，**不是** `copilot.tencent.com` | Open Question |
+| **QClaw** | 腾讯电脑管家 OpenClaw | `jprx.m.qq.com` 登录/额度；对话 `mmgrcalltoken.3g.qq.com/aizone/v1/chat/completions`；**不是** `copilot.tencent.com` | **Wave 1**，与 WorkBuddy 隔离 |
 | **悟空 DEAP** | 钉钉悟空 | `api-deap.dingtalk.com` | **Out**（不是产品通道） |
 
 ---
@@ -119,14 +119,14 @@ OpenCode 实际线上的 HTTP `model` 是 **models 对象的 key**，不是 `-m 
 - WorkBuddy 成为第一个 provider（逻辑上；物理搬文件见 PR0）。
 - 控制面可跨通道；数据面一次绑定，永不静默切厂商，也永不把外通道裸 id 送给 Copilot。
 - 通道内保留 1.4.10：最高优先级粘性、weight、401/429 cooldown、最多 3 次 **同通道** failover；**第一个 SSE 字节之后不换号**。
-- 命名空间模型 + 锁定的 bind 算法（KD-4），同时覆盖 unbound key 与 `default_channel` key。
+- 命名空间模型 + 锁定的 bind 算法（KD-4）。**每把 API Key 必有 `default_channel`**；管理页下拉切换通道。
 - `accounts.provider` 默认 `workbuddy`；所有数据面账号查询 `WHERE provider=?`。
 - 缺目录不阻启动；QwenWork 在 0.1.8 冒烟前不得默认启用。
 - 清洁室 + `THIRD_PARTY.md`（在任何 `providers/qwenwork/` 文件之前）。
 
 ### Non-Goals
 
-- 新仓库；全局跨厂 `auto`；Trae / Lingma / Qoder 国际 / iFlow / 悟空作为产品通道。
+- 新仓库；全局跨厂 `auto`；Trae / **Lingma / Qoder CN** / Qoder 国际 / iFlow / 悟空作为产品通道。
 - 默认 cron。
 - Vendor 无 LICENSE 的 Go/TS；spawn `qoderclicn`。
 - 1.4.11 半套 QwenWork。
@@ -169,12 +169,13 @@ OpenCode 实际线上的 HTTP `model` 是 **models 对象的 key**，不是 `-m 
 - **预留配额之前** 的 400/403/503（未知通道、错模型、key 不匹配、dry-pick 空仓）**不占用** API Key 日限额。
 - **预留配额之后** `chat_completions` 仍可能 503（通道内重试耗尽，与 1.4.10 空仓扣次相同）——**占用**日限额。不要把两类 503 写成同一配额规则。
 
-### KD-4 通道绑定算法（锁定；同时覆盖 unbound 与 bound key）
+### KD-4 通道绑定算法（锁定；Key 必有 `default_channel`）
 
 这是 2.0 数据面的唯一 bind 规则，取代「裸 id 永远 WorkBuddy」与「bound key 覆盖一切裸 id」之间的矛盾。
 
 **已知 ChannelId 集合（硬编码，与 registry 是否启用来源不同）：**  
-`workbuddy` | `qwenwork` | `qoderwork`  
+`workbuddy` | `qclaw` | `qwenwork` | `qoderwork`  
+`qoderwork` 仅占位：2.0.0 默认不加载模块。`lingma` **不是** ChannelId。  
 用户别名的 key **禁止**以这些段开头。只在第一段 ∈ 该集合时拆前缀；`foo/bar` 当作一个未加前缀 id。单独的 `workbuddy`（无第二段）是 400 `invalid_model`。
 
 **通道内模型资格：** `inner` 合法 ⇔ `inner ∈ list_models()` 的 id 集合 **∪** 该 provider 的别名表 key（WorkBuddy = `_BUILTIN_ALIASES` ∪ 用户 `model_aliases`）。因此 `workbuddy/gpt-5.5` 合法（别名），尽管 `gpt-5.5` 不在 `DEFAULT_MODELS`。禁止用 WorkBuddy 别名去验证 QwenWork inner。
@@ -190,25 +191,22 @@ OpenCode 实际线上的 HTTP `model` 是 **models 对象的 key**，不是 `-m 
    - 进入步骤 2。
 2. **仅当前缀拆分已成功。** 若 API Key 的 `default_channel` 非 NULL 且 **≠ 该前缀** → 403 `key_channel_mismatch`。NULL key 跳过。  
    **未加前缀请求整段跳过步骤 2**，直接步骤 3。不得把「没有前缀」实现成 `parsed_prefix is None` 因而与任何 `default_channel` 不一致。
-3. **未加前缀：**
-   - 若 `key.default_channel` 已设且 **≠ `workbuddy`：**
-     - `auto` **或** 该通道资格集合中的 id → 绑定 **该** 通道（OpenCode 方案 B：`{"model":"auto"}` + qwenwork-only key）。
-     - 熟知 WorkBuddy id（`glm-5.2`、`DEFAULT_MODELS`、WorkBuddy 别名表）→ **400**，提示改用 WorkBuddy key 或 `workbuddy/...`。
-     - 其他 → 400 `unknown_model`。
-   - 否则（未绑定，或 `default_channel=workbuddy`）：绑定 WorkBuddy。若 id 不在 WorkBuddy 资格集合（例如裸 `qwork-advanced`）→ **400**，**永远不要**把它 POST 到 `copilot.tencent.com`。  
-   - **选定 channel 之后**，施加与步骤 1 相同的启用/加载检查：flag 关闭或模块未加载 → 400 `unknown_channel`（例如 `auto` + `default_channel=qwenwork` + `CB_GATEWAY_PROVIDERS=workbuddy` → 400，且零调用 WorkBuddy）。
+3. **未加前缀：** 绑定 `key.default_channel`（必有）。  
+   - 通道未启用 / 未加载 → 400 `unknown_channel`（例如 `auto` + key=`qwenwork` + `CB_GATEWAY_PROVIDERS=workbuddy` → 400，零调用 WorkBuddy）。  
+   - `auto` **或** 该通道资格集合中的 id → 绑定该通道（OpenCode 方案 B：`{"model":"auto"}` + qwenwork-bound key）。  
+   - id 属于 **其他** 通道的资格集合（例如 key=`qwenwork` 却发 `glm-5.2`）→ **400**，提示改用对应通道的 key、先在管理页把该 Key 下拉切过去、或发 `workbuddy/glm-5.2`（仍受步骤 2 约束：前缀必须与当前 `default_channel` 一致，否则 403）。  
+   - 其他裸 id（例如 workbuddy-bound key 收到裸 `qwork-advanced`）→ **400** `unknown_model`，**永远不要** POST 到 `copilot.tencent.com`。
 4. **Bind + dry-pick 必须在 `_reserve_client_quota` 之前。** 本阶段 400/403/预留前 503 不增加日限额。
-5. `default_channel` 创建时是否 **必选** 仍是 Open Question；本算法对 NULL 与非空都成立。PR2 实现 bind，PR7 才加列；PR2 用请求上下文里的 `None` 模拟未绑定。
+5. **2.0 每把 Key 必有非空 `default_channel`。** 存量 Key 迁移为 `workbuddy`。NULL 不是生产路径。PR1 即加列（`NOT NULL DEFAULT 'workbuddy'`）；PR7 做管理页下拉与 PATCH。PR2 bind 读该列。
 
 `model` 缺省与今天一样视为 `"auto"`。
 
-### KD-5 第一波厂商；Trae 排除
+### KD-5 第一波厂商；Trae / Lingma 排除
 
-- **In（产品意图）：** WorkBuddy（已生产）；QwenWork（flag + 冒烟）。
-- **In 但实现门闩：** QoderWork CN（Appendix A 事实齐之前不进 2.0.0 必做火车）。
-- **Candidate：** QClaw；Lingma / Qoder CN。
-- **Out：** Trae、Cursor、Claude 上游、Grok、chat.qwen.ai、iFlow、Qoder 国际、悟空 DEAP。
-- QwenWork ≠ 通义 Lingma ≠ QoderWork CN。禁止共享 COSY 单例。
+- **In（2.0.0）：** WorkBuddy（已生产）；**QClaw**（与 WorkBuddy 隔离的腾讯第二通道）；QwenWork（flag 默认关 + 0.1.8 冒烟后才进默认 registry / README「已支持」）。
+- **不在 2.0.0 必做：** QoderWork CN（Appendix A）。
+- **Out：** Trae、**Lingma / Qoder CN**、Cursor、Claude 上游、Grok、chat.qwen.ai、iFlow、Qoder 国际、悟空 DEAP。
+- QwenWork ≠ 通义 Lingma ≠ QoderWork CN ≠ QClaw ≠ WorkBuddy。禁止共享 COSY 单例。禁止把 QClaw 请求发到 `copilot.tencent.com`。
 
 ### KD-6 WorkBuddy 先成为 provider；PR0 不搬实现文件
 
@@ -252,9 +250,13 @@ OpenCode 实际线上的 HTTP `model` 是 **models 对象的 key**，不是 `-m 
 - 只读协议事实，原创 Python。不 vendor Go/TS。`THIRD_PARTY.md` 在任何 qwenwork/qoderwork 源文件之前合入。ds2api AGPL 不用。无 LICENSE 树仅作参考。
 - CI：扫描 `providers/` 是否出现参考树标识符（含 qoderwork2api 的 `QoderEncode`、`QoderDecode`、`CosySession`、`ParseNestedSSE` 等）。RSA PEM 从 **0.1.8 官方客户端**提取，禁止从参考仓库复制。
 
-### KD-13 API Key `default_channel` 可空
+### KD-13 API Key 必绑通道；管理页下拉切换
 
-- schema 允许 NULL = 未绑定。算法见 KD-4。是否创建必填见 Open Questions。**仅前缀路径**上绑定冲突用 403；未加前缀走步骤 3，不用步骤 2。
+- **决定：** `api_keys.default_channel` **NOT NULL**。创建 Key 必须选通道。存量 Key 升级填 `workbuddy`。
+- **切换：** `PATCH /admin/api-keys/{id}` `{default_channel}`；账号页/Keys 页提供 **下拉框**，选项 = 已启用 ChannelId。切换 **不** 搬账号、不改已发出的流；**下一笔** `/v1` 按新通道 bind。
+- 切到未启用通道 → 400。切到 `qwenwork` 而 flag 关 → 400。
+- 前缀与当前 `default_channel` 不一致 → 403（KD-4 步骤 2）。
+- 一把 Key 同一时刻只服务一个通道。要同时打两家，建两把 Key（方案 B）或先切下拉再发请求。
 
 ### KD-14 QoderWork Encode 不在 2.0.0 必做火车
 
@@ -326,7 +328,8 @@ buddy2api/
 │   ├── __init__.py           # PR2：registry + CB_GATEWAY_PROVIDERS
 │   ├── protocol.py           # PR0：类型与错误
 │   ├── workbuddy/__init__.py # 具名 import 现有模块，无 import *
-│   ├── qwenwork/             # PR5，flag 关
+│   ├── qclaw/                # Wave 1；清洁室；flag 可先关后开
+│   ├── qwenwork/             # PR5，flag 默认关
 │   └── qoderwork/            # 仅当 Appendix A 齐（非 2.0.0 必做）
 ├── THIRD_PARTY.md            # 早于 PR5
 └── docs/design/multi-channel-v2.md
@@ -340,7 +343,7 @@ Router / 控制面只依赖下列 **对外** 方法。`build_chat` / `new_client
 from typing import Literal, Protocol, runtime_checkable
 from dataclasses import dataclass, field
 
-ChannelId = Literal["workbuddy", "qwenwork", "qoderwork"]
+ChannelId = Literal["workbuddy", "qclaw", "qwenwork", "qoderwork"]
 
 @dataclass(frozen=True)
 class DiscoveredFile:
@@ -500,25 +503,26 @@ sequenceDiagram
 
 | 客户端 `model` | Key `default_channel` | 结果 |
 |---|---|---|
-| `auto` | NULL 或 `workbuddy` | WorkBuddy / auto |
-| `glm-5.2` / `gpt-5.5` | NULL 或 `workbuddy` | WorkBuddy（别名仅通道内） |
-| `qwork-advanced` | NULL 或 `workbuddy` | **400** `unknown_model`（禁止打腾讯） |
-| `auto` | `qwenwork`（已启用） | **QwenWork** / inner=`auto`（步骤 2 跳过） |
-| `auto` | `qwenwork` 但 flag 关 | **400** `unknown_channel`（步骤 3 末尾启用检查） |
-| `qwork-advanced` | `qwenwork` | QwenWork；步骤 2 跳过 |
-| `glm-5.2` | `qwenwork` | **400** 使用 WorkBuddy key 或 `workbuddy/glm-5.2` |
-| `gpt-5.5` | NULL | WorkBuddy，inner=`gpt-5.5` → `translate_model`=`glm-5.2` |
-| `workbuddy/gpt-5.5` | NULL 或 `workbuddy` | WorkBuddy；资格走别名表；厂商 body **不是** `workbuddy/gpt-5.5` |
-| `workbuddy/auto` | `workbuddy` | 合法（前缀与 key 一致，非 403） |
-| `workbuddy/auto` | `qwenwork` | **403** `key_channel_mismatch`（步骤 2，仅前缀路径） |
-| `qwenwork/qwork-advanced` | NULL | 通道已启用则 QwenWork；flag 关则 **400** `unknown_channel` |
-| `qwenwork/qwork-advanced` | `qwenwork` | QwenWork；厂商 `x-model-key`=`qwork-advanced` |
+| `auto` | `workbuddy` | WorkBuddy / auto |
+| `glm-5.2` / `gpt-5.5` | `workbuddy` | WorkBuddy（别名仅通道内） |
+| `qwork-advanced` | `workbuddy` | **400** `unknown_model`（禁止打腾讯 Copilot） |
+| `auto` | `qwenwork`（已启用） | **QwenWork** / inner=`auto` |
+| `auto` | `qwenwork` 但 flag 关 | **400** `unknown_channel` |
+| `qwork-advanced` | `qwenwork` | QwenWork |
+| `glm-5.2` | `qwenwork` | **400**（先把 Key 下拉切到 workbuddy，或发 `workbuddy/glm-5.2` 且 key 已是 workbuddy） |
+| `auto` | `qclaw`（已启用） | **QClaw** / inner=`auto` |
+| `pool-glm-5.2` | `qclaw` | QClaw（通道内 id）；**不是** WorkBuddy |
+| `workbuddy/gpt-5.5` | `workbuddy` | WorkBuddy；厂商 body **无** `workbuddy/` |
+| `workbuddy/auto` | `workbuddy` | 合法 |
+| `workbuddy/auto` | `qwenwork` 或 `qclaw` | **403** `key_channel_mismatch` |
+| `qwenwork/qwork-advanced` | `qwenwork` | QwenWork；`x-model-key`=`qwork-advanced` |
+| `qwenwork/qwork-advanced` | `workbuddy` | **403** |
 | `qwenwork/glm-5.2` | 任意 | **400** `invalid_model` |
-| `trae/x` | 任意 | **400** 未知通道 |
+| `lingma/x` / `trae/x` | 任意 | **400** 未知通道 |
 
 ### OpenCode / Cherry 推荐配置（复制即不会打错厂商）
 
-**方案 A — 一个 provider，HTTP 模型用命名空间。Key 的 `default_channel` 为 NULL，或等于该请求 `model` 的前缀：**
+**方案 A — 一个 provider，HTTP 模型用命名空间。Key 必须绑定通道，且等于该请求 `model` 的前缀（或先在管理页下拉切到该通道）：**
 
 ```json
 {
@@ -527,11 +531,12 @@ sequenceDiagram
       "npm": "@ai-sdk/openai-compatible",
       "options": {
         "baseURL": "http://127.0.0.1:8787/v1",
-        "apiKey": "sk-cb-unbound"
+        "apiKey": "sk-cb-wb"
       },
       "models": {
         "workbuddy/auto": { "name": "WorkBuddy Auto" },
         "workbuddy/glm-5.2": { "name": "GLM-5.2" },
+        "qclaw/auto": { "name": "QClaw Auto" },
         "qwenwork/qwork-advanced": { "name": "QwenWork Advanced" }
       }
     }
@@ -539,7 +544,7 @@ sequenceDiagram
 }
 ```
 
-Wire 为 `{"model":"workbuddy/auto"}` 等。`default_channel=NULL` **或** 等于该次请求的前缀（例如只打 `workbuddy/...` 时可绑 `workbuddy`）。同一把绑 `workbuddy` 的 key 去打 `qwenwork/qwork-advanced` → 403。  
+Wire 为 `{"model":"workbuddy/auto"}` 等。该 Key 当前必须绑 `workbuddy`；要打 `qwenwork/...` 先在 Keys 页把下拉切到 `qwenwork`（或另建一把 Key）。切完之前发 `qwenwork/qwork-advanced` → 403。  
 厂商侧：Copilot 收到 `model=auto` / `glm-5.2`，**没有** `workbuddy/`。`/v1` SSE/JSON 的 `model` 回显客户端的 `workbuddy/auto`。
 
 **方案 B — 两个 provider、两把 Key，各绑一个通道（贴合 OpenCode 用 models key 当 HTTP model）：**
@@ -561,11 +566,12 @@ Wire 为 `{"model":"workbuddy/auto"}` 等。`default_channel=NULL` **或** 等�
 }
 ```
 
-`sk-cb-wb`：`default_channel=workbuddy`（或 NULL）。`sk-cb-qw`：`default_channel=qwenwork`。  
-**不要**用一把未绑定 Key 去打第二块里的裸 `qwork-advanced`。  
-**不要**用 `GET /v1/models` 拼方案 B：该目录是方案 A 用的（WorkBuddy 裸 id + 各通道 `channel/id`），**不会**列出给 qwenwork-bound key 用的裸 `qwork-advanced`。方案 B 必须复制本节 JSON，不要从 `/v1/models` 生成。
+`sk-cb-wb`：`default_channel=workbuddy`。`sk-cb-qw`：`default_channel=qwenwork`。可再加一把 `sk-cb-qc` 绑 `qclaw`。  
+**不要**用 WorkBuddy Key 去打第二块里的裸 `qwork-advanced`。  
+**不要**用 `GET /v1/models` 拼方案 B：该目录是方案 A 用的（WorkBuddy 裸 id + 各通道 `channel/id`），**不会**列出给 qwenwork-bound key 用的裸 `qwork-advanced`。方案 B 必须复制本节 JSON，不要从 `/v1/models` 生成。  
+管理页下拉切换 Key 通道后，方案 B 的同一把 Key 会改绑；OpenCode 侧若仍指向旧厂商块，会 403 / 400，这是预期。
 
-Cherry / curl / Codex：兼容路径继续 `model: auto` + WorkBuddy；新通道用命名空间或绑定 Key。
+Cherry / curl / Codex：存量 Key 升级后仍绑 `workbuddy`，`model: auto` 行为与 1.4.10 相同。新通道用命名空间（且 Key 已切到该通道）或另建绑定 Key。
 
 ### `GET /v1/models`
 
@@ -575,6 +581,16 @@ Cherry / curl / Codex：兼容路径继续 `model: auto` + WorkBuddy；新通道
 - 其他 **已启用** 通道：只输出 `channel/<id>`，**不**输出裸 `qwork-advanced`（防止被塞进 WorkBuddy 的 OpenCode 块）。
 - 未启用通道不出现。
 - **`/v1/models` = 方案 A 目录。** 方案 B 的 HTTP id（绑定 key 上的裸 `auto` / `qwork-advanced`）有意不出现。OpenCode 方案 B 从本文复制 JSON，不从本接口生成。
+
+### QClaw adapter（Wave 1）
+
+- **不是** WorkBuddy：对话走 `https://mmgrcalltoken.3g.qq.com/aizone/v1/chat/completions`，登录/额度走 `https://jprx.m.qq.com`。禁止把 QClaw token 发到 `copilot.tencent.com`，也禁止 WorkBuddy `.info` 拿去打 aizone。
+- 凭证：微信 OAuth 落盘（参考仓 `login.sh` 形态）；控制面提供「粘贴回调 / 导入 JSON」，**不**把 `CB_AUTH_DIR` 当 QClaw 扫描根。可选 `CB_QCLAW_AUTH_DIR`。
+- 对话：Bearer 为上游下发的 `sk_api_key`，不是 Copilot JWT。指纹头属于 jprx 业务请求（`X-Sign-Timestamp` / `X-Sign-Signature` / `X-OpenClaw-Token` 等），aizone chat 走另一组。清洁室：HMAC-SHA256 + canonical（body 键排序 + `timestamp` 毫秒）；**HMAC key 从官方 QClaw 客户端提取**，禁止从参考仓复制常量。
+- 额度：jprx 查询 Q 点 / 日 token（参考仓 `credit` 的 4110/4075）。**每日 check-in claim 若官方无对应接口则 `checkin_supported=false`**，一键领取跳过该通道并在结果里标明。
+- 模型：通道内 id（如 `default`、`pool-glm-5.2`）。`qclaw/pool-glm-5.2` ≠ `workbuddy/glm-5.2`。
+- Flag：可先 `CB_GATEWAY_PROVIDERS=workbuddy` 不含 qclaw；合入后默认是否启用与 QwenWork 相同策略——模块可在仓库，**默认 registry 仅 workbuddy**，直到最小 chat 冒烟 200。
+- 无 LICENSE 参考树：只对照路径与头名，Python 原创。
 
 ### WorkBuddy adapter
 
@@ -673,7 +689,8 @@ Admin Cookie、API Key 哈希、Responses 清洗、`enc:v1:` 前缀、日志保�
 | `POST .../checkin-all` | 串行；`{channels:[...]}`；顶层 `credit` 仅 WorkBuddy 且 deprecated |
 | `GET .../checkin-status-all` | 无跨通道并行 |
 | `GET /admin/credit-summary` | `channels[]`；`total_balance` 恒 null |
-| `POST /admin/api-keys` | 可选 `default_channel`（PR7） |
+| `POST /admin/api-keys` | **必填** `default_channel`（启用中的 ChannelId） |
+| `PATCH /admin/api-keys/{id}` | `{default_channel}`：下拉切换；不搬账号 |
 | `GET /health` | `channels: {workbuddy:{accounts,active}, ...}`（PR2） |
 
 环境变量若设置了 `CB_GATEWAY_PROVIDERS`，UI 通道开关为 **只读**。
@@ -684,14 +701,15 @@ Admin Cookie、API Key 哈希、Responses 清洗、`enc:v1:` 前缀、日志保�
 
 | 变量 | 默认 | 含义 |
 |---|---|---|
-| `CB_GATEWAY_PROVIDERS` | `workbuddy` | 启用列表。未知 id 启动失败。若设置，**优先于** `settings.enabled_providers`，UI 只读 |
+| `CB_GATEWAY_PROVIDERS` | `workbuddy` | 启用列表。未知 id 启动失败。若设置，**优先于** `settings.enabled_providers`，UI 只读。Wave 1 合法值：`workbuddy`、`qclaw`、`qwenwork` |
 | `CB_GATEWAY_AUTO_IMPORT` | `0` | `1` 启动时按通道导入（含 token 更新） |
 | `CB_GATEWAY_CHECKIN_GAP_MS` | `800` | claim 间隔 |
 | `CB_AUTH_DIR` | 现逻辑 | **仅 WorkBuddy**。其他通道 **禁止**回退到此目录（避免 `/auth` 下误解析 `auth-v2.dat`） |
 | `CB_CONTAINER_AUTH_DIR` | `/auth` | 容器内 WorkBuddy 挂载别名（已有 `CB_DOCKER` 检测） |
 | `CB_DOCKER` | 现逻辑 | 保持 |
 | `CB_QWENWORK_AUTH_DIR` | 平台默认 | 仅 QwenWork |
-| `CB_QODERWORK_AUTH_DIR` | 平台默认 | 仅 QoderWork |
+| `CB_QODERWORK_AUTH_DIR` | 平台默认 | 仅 QoderWork（2.0.0 不接） |
+| `CB_QCLAW_AUTH_DIR` | 空 | 仅 QClaw 落盘 JSON；**禁止**回退 `CB_AUTH_DIR` |
 | `CB_HOST_AUTH_DIR` | 现逻辑 | 宿主机 WorkBuddy 目录 |
 | `CB_HOST_QWENWORK_DIR` | 空 | 见 Docker 拓扑 |
 | `CB_GATEWAY_MASTER_KEY` | 空 | Fernet。拓扑 2 **强制** |
@@ -727,7 +745,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_provider_uid
 
 `get_active_accounts(provider: str)` **必填**，无 `None`=全部。控制面按 registry 迭代。
 
-`api_keys.default_channel` **留到 PR7**。PR2 bind 从 key dict 读，缺列当 NULL。
+同一 PR1 加：
+
+```sql
+ALTER TABLE api_keys ADD COLUMN default_channel TEXT NOT NULL DEFAULT 'workbuddy';
+```
+
+存量行得到 `workbuddy`。PR2 bind **读这一列**（不再模拟 NULL）。PR7 做 Keys 页下拉 + 创建必选 + PATCH。
 
 `expires_at`：毫秒整数。不靠 `extra.expires_at_unit`。
 
@@ -854,10 +878,12 @@ WorkBuddy 已用 HTTP。失败就推迟 QoderWork 通道。
 
 **PR2 bind（在 QwenWork 实现前用 stub provider / flag）**
 
-- `{model:"auto"}` unbound → workbuddy。
+- `{model:"auto"}` + workbuddy-bound key（存量默认）→ workbuddy。
 - `{model:"auto"}` + qwenwork-bound key + qwenwork **启用** → **qwenwork**（方案 B；步骤 2 不得 403）。
+- `{model:"auto"}` + qclaw-bound key + qclaw 启用 → **qclaw**，零调用 WorkBuddy。
+- `PATCH` Key `workbuddy`→`qclaw` 后，下一笔 `{model:"auto"}` 走 qclaw；进行中的流不改绑。
 - `{model:"auto"}` + qwenwork-bound key + qwenwork **关闭** → **400** `unknown_channel`，WorkBuddy 零调用。
-- `{model:"qwork-advanced"}` unbound → **400**，且 WorkBuddy client 零调用。
+- `{model:"qwork-advanced"}` + workbuddy-bound key → **400**，且 WorkBuddy client 零调用。
 - `{model:"glm-5.2"}` + qwenwork-bound key → 400。
 - `{model:"qwenwork/qwork-advanced"}` flag 关 → 400。
 - `{model:"workbuddy/auto"}` + qwenwork key → 403。
@@ -898,16 +924,18 @@ WorkBuddy 已用 HTTP。失败就推迟 QoderWork 通道。
 
 ```text
 CB_GATEWAY_PROVIDERS=workbuddy
-CB_GATEWAY_PROVIDERS=workbuddy,qwenwork    # 仅冒烟后
+CB_GATEWAY_PROVIDERS=workbuddy,qclaw
+CB_GATEWAY_PROVIDERS=workbuddy,qclaw,qwenwork    # QwenWork 仅冒烟后
 ```
 
-未知 id fail fast。QoderWork 在 Appendix A 齐之前不要写入默认文档作为已支持。
+未知 id fail fast。QoderWork / Lingma 不要写入默认文档作为已支持。
 
 ### 发布火车
 
 | 阶段 | 内容 | 对外 |
 |---|---|---|
 | PR0–PR4 + THIRD_PARTY | WorkBuddy 隔离壳，registry 仅 workbuddy | 不打 1.4.11；可选 2.0.0-rc |
+| QClaw 最小 chat 200 | 可选启用 qclaw | 2.0.0 可宣传「可选 qclaw」 |
 | PR5 冒烟 200 | QwenWork flag 可用 | 2.0.0 可宣传「可选 qwenwork」 |
 | Appendix A + PR6 | QoderWork | 2.0.x，**不是** 2.0.0 必做 |
 
@@ -937,13 +965,15 @@ PR3  控制面：preview_token、导入更新、串行签到、按通道额度�
     ▼
 PR4  Docker helper 跳过 windows overlay；拓扑文档（可与 PR3 同发布说明）
     ▼
+PR-QClaw  QClaw adapter（flag；冒烟前不进默认 registry）
+    │
 PR5  QwenWork adapter（依赖 PR-DOC + 0.1.8 冒烟记录；默认 flag 关）
     │
 PR6  QoderWork —— 非 2.0.0 必做；依赖 Appendix A 向量
     │
-PR7  api_keys.default_channel（bind 在 PR2 已按 NULL 实现）
+PR7  Keys 页通道下拉（列已在 PR1）
     ▼
-PR8  版本字符串 + release notes
+PR8  2.0.0 发布
 ```
 
 ### PR-DOC — `THIRD_PARTY.md`
@@ -963,10 +993,10 @@ PR8  版本字符串 + release notes
 
 ### PR1 — schema
 
-- **标题：** `feat(db): accounts.provider, extra, logs.provider`
+- **标题：** `feat(db): accounts.provider, extra, logs.provider, api_keys.default_channel`
 - **依赖：** PR0
 - **文件：** `database.py` 迁移/白名单/`get_active_accounts(provider: str)`；auth_manager pick/fallback 改为传入 `"workbuddy"`
-- **描述：** 去重后 unique index。测试：异 provider 过期行不被 WorkBuddy refresh；无 `provider=None` 表示全部。
+- **描述：** 去重后 unique index。`api_keys.default_channel NOT NULL DEFAULT 'workbuddy'`。测试：异 provider 过期行不被 WorkBuddy refresh；无 `provider=None` 表示全部。
 
 ### PR2 — registry + Router + bind
 
@@ -989,6 +1019,14 @@ PR8  版本字符串 + release notes
 - **文件：** `start-docker-win.ps1`、`start-docker-wsl.sh`、compose 注释、README 拓扑 1/2
 - **描述：** 缺目录不 `exit 1`；不发明 optional volume；MASTER_KEY 拓扑；Linux 上 QwenWork 挂载 → `dpapi_unavailable`。
 
+### PR-QClaw — QClaw adapter（Wave 1，2.0.0 可合、默认 registry 可先不含）
+
+- **标题：** `feat(qclaw): isolated aizone/jprx adapter behind flag`
+- **依赖：** PR-DOC、PR2；作者环境最小 chat 200 之后才改默认 `CB_GATEWAY_PROVIDERS`
+- **文件：** `providers/qclaw/*`、控制面 OAuth/JSON 导入
+- **禁止：** 与 WorkBuddy 共用 `fingerprint.py` / `copilot.tencent.com`；从参考仓复制 HMAC secret
+- **描述：** 对话 aizone；登录/额度 jprx。`checkin_supported` 以官方是否有 claim 为准。
+
 ### PR5 — QwenWork
 
 - **标题：** `feat(qwenwork): clean-room adapter behind flag`
@@ -1002,17 +1040,18 @@ PR8  版本字符串 + release notes
 - **依赖：** Appendix A 测试向量 + 作者 HTTP 冒烟；**不是**「PR5 的 COSY 经验」
 - **合并条件：** 事实附录已写入本文或后续修订，且 CI 标识符扫描绿
 
-### PR7 — Key 绑定列
+### PR7 — Key 通道下拉
 
-- **标题：** `feat(keys): optional default_channel`
-- **依赖：** PR2（算法已在）
-- **文件：** `database.py` ALTER、admin keys、UI、OpenCode 双方案文档
+- **标题：** `feat(keys): required default_channel dropdown`
+- **依赖：** PR1 列已在；PR2 bind
+- **文件：** `server.py` keys API、`web/index.html` Keys 页下拉、创建必选、PATCH 切换
+- **描述：** 创建不选通道 → 400。下拉选项 = 已启用通道。切换立即影响下一笔 bind，不中断已有 SSE。
 
 ### PR8 — 发布
 
-- **标题：** `release: Buddy2api 2.0.0`（或 Open Question 的 1.5.0）
-- **依赖：** PR0–PR4 必做；PR5 仅当冒烟且文档诚实；PR6 非必须
-- **描述：** 列出 breaking：`channel_unavailable` 替换 `server_error` 空仓；启动默认不入库；裸外通道 id 400。
+- **标题：** `release: Buddy2api 2.0.0`
+- **依赖：** PR0–PR4 + PR7 必做；PR-QClaw / PR5 仅当冒烟且文档诚实；PR6 非必须
+- **描述：** 版本字符串 **2.0.0**。Breaking：`channel_unavailable`；启动默认不入库；裸外通道 id 400；Key 必绑通道（存量视为 workbuddy）。
 
 **不要：** 1.4.11 夹带 QwenWork。
 
@@ -1020,11 +1059,15 @@ PR8  版本字符串 + release notes
 
 ## Open Questions
 
-1. **QClaw 是否 Wave 1？** 微信 OAuth + JPRX；模型池像腾讯但不是 `copilot.tencent.com`。无 LICENSE 参考尚未 clone。默认 **out / candidate**。
-2. **Lingma / Qoder CN Wave 1 还是 2？** `~/.lingma` 等；clienttype 2；无每日签到。**不是** QoderWork CN。默认 Wave 2。
-3. **`default_channel` 创建必填？** 算法已同时支持。建议 **可选**，UI 强烈建议新 Key 绑定。必填则存量 Key 升级填 `workbuddy`。
-4. **版本字符串 `2.0.0` vs `1.5.0`？** 推荐 **2.0.0**（schema + bind + 启动 UX breaking）。
-5. **QwenWork 冒烟强度？** 推荐 **A：** adapter 可在 flag 后合入，README/默认 registry 必须等 0.1.8 的 `qwork-advanced` 200。静态头以抓包冻结。
+**已决议（2026-08-25 用户）：**
+
+1. **QClaw：** Wave 1。与 WorkBuddy 隔离。参考仓已 clone 至 `_external/2api-refs/qclaw2api`（无 LICENSE 文件，仅协议对照）。
+2. **Lingma / Qoder CN：** **2.0 不做。**
+3. **`default_channel`：** **创建必填**；Keys 页 **下拉切换**；存量填 `workbuddy`。
+4. **版本字符串：** **2.0.0**。
+5. **QwenWork 冒烟：** **方案 A** — adapter 可合入、flag 默认关；README/默认 registry 等 `qwork-advanced` 200。
+
+无未决议项。
 
 ---
 
@@ -1049,7 +1092,7 @@ PR8  版本字符串 + release notes
 
 ## Compatibility
 
-- 未绑定 Key + 裸 `auto` / `glm-5.2` / WorkBuddy 别名 → 仍 WorkBuddy。
+- 存量 Key 迁移 `default_channel=workbuddy` 后，裸 `auto` / `glm-5.2` / WorkBuddy 别名 → 仍 WorkBuddy。
 - 命名空间 id 只出现在客户端 `original`；厂商 HTTP 的 `model` / `x-model-key` **从不**带 `channel/`。`/v1` 回显 `original`。
 - 裸 `qwork-advanced` → **400**（1.4.10 会原样打腾讯，这是有意收紧）。
 - 空仓：预留前 `channel_unavailable` 不扣配额；预留后耗尽仍扣次（同 1.4.10）。`type` 从 `server_error` 改为 `channel_unavailable`：**breaking**。
@@ -1107,12 +1150,32 @@ PR8  版本字符串 + release notes
 
 ---
 
+## Appendix C — QClaw 协议事实（清洁室边界）
+
+公开可写进实现的 **host / 头名 / 路径**（来自产品行为与公开文档，实现须原创）：
+
+| 项 | 值 |
+|---|---|
+| 对话 | `POST https://mmgrcalltoken.3g.qq.com/aizone/v1/chat/completions` |
+| 登录/额度网关 | `https://jprx.m.qq.com` |
+| 签名头名 | `X-Sign-Timestamp`、`X-Sign-Signature`、`X-OpenClaw-ClientVersion`、`X-OpenClaw-Token`、`X-Guid`、`X-Account` / `X-Account-Id` |
+| 签名算法类型 | HMAC-SHA256；canonical = body 键字典序 + `timestamp`（毫秒） |
+| HMAC 密钥 | **从本机官方 QClaw 客户端提取**，禁止从参考 git 复制 |
+| 对话鉴权 | Bearer `sk_api_key`（jprx 业务下发），不是 Copilot JWT |
+| 额度查询 | jprx 业务 cmd（Q 点 / 日 token）；每日 claim 以官方是否存在为准 |
+| 登录 | 微信 OAuth；回调含 `code=` |
+
+禁止：与 WorkBuddy 混用账号表行而不带 `provider='qclaw'`；把 `glm-5.2` 裸 id 在 qclaw-bound key 下打到 Copilot。
+
+---
+
 ## References
 
 - 本仓库：`server.py`、`auth_manager.py`、`fingerprint.py`、`proxy.py`、`database.py`、`responses.py`、`credential_crypto.py`、`web/index.html`、`version.py`、`tests/test_core.py`、`README.md`、`SECURITY.md`、`docker-compose.yml`、`docker-compose.windows.yml`、`start-docker-win.ps1`、`docs/releases/v1.4.10.md`、`docs/maintenance/release_workflow_zh.md`
 - `_external/2api-refs/SOURCES.md`（只读，非 submodule）
 - QwenWork 笔记（无许可，只读，0.1.3）：`xrl-router-plugin-qwenwork/docs/specs/qwenwork-{signing,forward,token}.md`、`docs/reverse/QWENWORKCN_REVERSE.md`（Encode=1 与后来明文规格冲突 → 以 0.1.8 冒烟为准）
 - QoderWork README（声称 MIT，无 LICENSE 文件）：仅 host/path 级事实进入 Appendix A
+- QClaw：`_external/2api-refs/qclaw2api`（声称 MIT，无 LICENSE 文件）→ Appendix C；HMAC 密钥从官方客户端取
 - `lingma-proxy/docs/qoderwork-cn-integration-plan.md`：spawn CLI 观点，本设计拒绝
 - 许可证：本仓库 MIT；HanHan666666/codebuddy2openai、orangeboyChen/codebuddy2api、autumnsentiment/Trae2api-cn（MIT，Trae 不用）；ds2api AGPL 禁用
 - 产品姿态：README 本地自用；`claim_daily_checkin` 无定时
