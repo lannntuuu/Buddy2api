@@ -26,7 +26,7 @@ python server.py
 
 ## 注意事项
 
-新手按下面「安装与启动」做即可。这几条是 2.0 里最容易踩空的：
+按下面「安装与启动」即可。这几条是 2.0 里最容易踩空的：
 
 1. **启动后账号页是空的，这是正常的。** 默认不再自动入库。到「账号」页：选通道 → 重新检测 → 一键导入。三个通道都能选。
 2. **一把 API Key 只打一个通道。** 创建时必须选通道。WorkBuddy 的 Key 发 `auto` / `glm-5.2`；QwenWork 的 Key 发 `auto` 或 `qwork-advanced`。通道和模型对不上会 400 或 403，不会帮你转到另一家。
@@ -36,7 +36,7 @@ python server.py
 
 ## 安装与启动
 
-适合第一次用 Git / Conda 的人。已经有自己虚拟环境的，装完 `requirements.txt` 后执行 `python server.py` 即可。
+还没装环境时按这几步走。已经有虚拟环境的，装完 `requirements.txt` 后执行 `python server.py` 即可。
 
 ### 1. 安装工具
 
