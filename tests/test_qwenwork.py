@@ -32,10 +32,10 @@ def qwen_enabled(monkeypatch):
     monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
 
 
-def test_qwenwork_not_in_default_registry(monkeypatch):
+def test_qwenwork_in_default_registry(monkeypatch):
     monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
-    assert providers.enabled_provider_ids() == ["workbuddy"]
-    assert providers.get_provider("qwenwork") is None
+    assert providers.enabled_provider_ids() == ["workbuddy", "qclaw", "qwenwork"]
+    assert providers.get_provider("qwenwork") is not None
     assert "qwenwork" in providers._LOADED
 
 
@@ -114,7 +114,7 @@ def test_bind_qwenwork_when_enabled(qwen_enabled):
 
 
 def test_bind_qwenwork_disabled_is_unknown_channel(monkeypatch):
-    monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
+    monkeypatch.setenv("CB_GATEWAY_PROVIDERS", "workbuddy")
     with pytest.raises(UnknownChannel):
         router.bind({"model": "qwenwork/qwork-advanced"}, {"default_channel": "qwenwork"})
 

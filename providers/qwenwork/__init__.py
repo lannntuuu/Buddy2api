@@ -1,4 +1,4 @@
-"""QwenWork provider. Isolated COSY adapter; default registry does not enable it."""
+"""QwenWork provider. Isolated COSY adapter."""
 
 from __future__ import annotations
 

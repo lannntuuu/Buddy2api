@@ -2,39 +2,37 @@
 
 [English](README_EN.md) | 中文
 
-> 把本机已经登录的消费级 AI 客户端，接成 OpenAI 兼容接口，给 Codex、OpenCode、Cherry Studio、NextChat 等用。默认通道是腾讯 Work Buddy / CodeBuddy；需要时再打开 QClaw 或千问办公（QwenWork）。一次请求只走一个通道。
+> 把本机已经登录的消费级 AI 客户端，接成 OpenAI 兼容接口，给 Codex、OpenCode、Cherry Studio、NextChat 等用。默认打开 Work Buddy / CodeBuddy、QClaw、千问办公（QwenWork）三个通道；管理页下拉选其中一个。一次请求只走一个通道。
 
-当前版本 **2.0.0**。这个项目只适合本机自用，不要公开部署，也不要把登录凭据、API Key、数据库文件发给别人。
+当前版本 **2.0.1**。这个项目只适合本机自用，不要公开部署，也不要把登录凭据、API Key、数据库文件发给别人。
 
 ## 这是什么？
 
 Buddy2api 在本机提供 `http://127.0.0.1:8787/v1`。你在官方客户端里登录并且还有额度，这个网关把本机登录导入进来，把请求转到对应厂商。普通客户端走 Chat Completions；Codex 走 `/v1/responses`，管理页把 Key 类型选成 Codex 时会做一轮内容清洗。
 
-默认只开 WorkBuddy。QClaw、QwenWork 要自己打开：
+三个通道默认都开。没装、没登录的通道，账号页检测为空，不会自动入库。
 
 ```powershell
-$env:CB_GATEWAY_PROVIDERS="workbuddy,qclaw,qwenwork"
 python server.py
 ```
 
 | 通道 | 默认 | 本机登录位置 |
 |---|---|---|
 | WorkBuddy / CodeBuddy | 开 | `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth` |
-| QClaw | 关 | `%APPDATA%\QClaw` |
-| 千问办公 QwenWork | 关 | `%APPDATA%\QwenWorkCN` |
+| QClaw | 开 | `%APPDATA%\QClaw` |
+| 千问办公 QwenWork | 开 | `%APPDATA%\QwenWorkCN` |
 
-路径不对时可用 `CB_AUTH_DIR`、`CB_QCLAW_AUTH_DIR`、`CB_QWENWORK_AUTH_DIR` 指定。三个通道的登录文件不要混在同一个目录。
+路径不对时可用 `CB_AUTH_DIR`、`CB_QCLAW_AUTH_DIR`、`CB_QWENWORK_AUTH_DIR` 指定。三个通道的登录文件不要混在同一个目录。只要其中一家时，可设 `CB_GATEWAY_PROVIDERS=workbuddy` 收窄。
 
 ## 注意事项
 
 新手按下面「安装与启动」做即可。这几条是 2.0 里最容易踩空的：
 
-1. **启动后账号页是空的，这是正常的。** 2.0 默认不再自动入库。到「账号」页：选通道 → 重新检测 → 一键导入。
+1. **启动后账号页是空的，这是正常的。** 默认不再自动入库。到「账号」页：选通道 → 重新检测 → 一键导入。三个通道都能选。
 2. **一把 API Key 只打一个通道。** 创建时必须选通道。WorkBuddy 的 Key 发 `auto` / `glm-5.2`；QwenWork 的 Key 发 `auto` 或 `qwork-advanced`。通道和模型对不上会 400 或 403，不会帮你转到另一家。
-3. **某个通道返回 503 `channel_unavailable`：** 多半是这个通道还没导入账号，或启动时没把它写进 `CB_GATEWAY_PROVIDERS`。
-4. **PowerShell 里的 `$env:...` 只对当前窗口有效。** 关掉终端再开，要重新设一遍再 `python server.py`。用 `start.bat` 前也要先在同一个窗口里设好。
-5. **QClaw / QwenWork 请在 Windows 上直接跑 `python server.py`。** Linux Docker 读不了这两家用 DPAPI 加密的本机文件。
-6. 本项目和聊天客户端最好在同一台电脑。客户端如果跑在 Docker 里，Base URL 填 `http://host.docker.internal:8787/v1`，不要填容器自己的 `127.0.0.1`。
+3. **某个通道返回 503 `channel_unavailable`：** 这个通道还没导入可用账号。
+4. **QClaw / QwenWork 请在 Windows 上直接跑 `python server.py`。** Linux Docker 读不了这两家用 DPAPI 加密的本机文件；管理页会写明这一点。WorkBuddy 可以继续用 Docker。
+5. 本项目和聊天客户端最好在同一台电脑。客户端如果跑在 Docker 里，Base URL 填 `http://host.docker.internal:8787/v1`，不要填容器自己的 `127.0.0.1`。
 
 ## 安装与启动
 
@@ -89,26 +87,24 @@ conda activate buddy2api
 python server.py
 ```
 
-只要 WorkBuddy，不用设 `CB_GATEWAY_PROVIDERS`。提示符前面应出现 `(buddy2api)`，再执行 `python -m pip`，避免装到系统 Python。
+提示符前面应出现 `(buddy2api)`，再执行 `python -m pip`，避免装到系统 Python。
 
 ### 其他启动方式
 
 - **脚本：** Windows 安装 Python 时勾选 Add Python to PATH，在项目目录执行 `.\start.bat`。Linux / macOS：`chmod +x start.sh && ./start.sh`。脚本优先用名为 `buddy2api` 的 Conda 环境，没有 Conda 才建 `.venv`。
-- **Docker：** `powershell -ExecutionPolicy Bypass -File .\start-docker-win.ps1`。本机没有 WorkBuddy 登录目录时脚本仍会启动。容器读不了 Windows DPAPI，有 QClaw / QwenWork 时请用上面的 `python server.py`。
+- **Docker：** `powershell -ExecutionPolicy Bypass -File .\start-docker-win.ps1`。本机没有 WorkBuddy 登录目录时脚本仍会启动。容器下拉里仍有三个通道，但 QClaw / QwenWork 请用上面的 `python server.py`。
 
 ### 第一次打开网页之后
 
 本机浏览器一般会自动带上管理 Cookie，不用粘贴 Token。
 
-1. 打开「账号」。默认通道是 WorkBuddy。点「重新检测」，再点「一键导入本机登录」。
+1. 打开「账号」。下拉里选 WorkBuddy / QClaw / 千问办公，点「重新检测」，再点「一键导入本机登录」。
 2. 点该账号的「测试」，能返回一句话就说明这条通道通了。
-3. 打开「API Keys」，**先选通道**再创建。给 Codex 用时 Key 类型选 Codex，接口用 `/v1/responses`。创建后可以再显示、复制完整 Key。
+3. 打开「API Keys」，**先选同一个通道**再创建。给 Codex 用时 Key 类型选 Codex，接口用 `/v1/responses`。创建后可以再显示、复制完整 Key。
 4. 在客户端里填：
    - Base URL：`http://127.0.0.1:8787/v1`
    - API Key：刚复制的 Key
-   - 模型：WorkBuddy 用 `auto` 即可
-
-还要用 QClaw / QwenWork 时：关掉服务 → 设好 `CB_GATEWAY_PROVIDERS` → 再启动 → 账号页把通道下拉切过去再检测导入 → 再为那个通道单独建一把 Key。
+   - 模型：WorkBuddy 用 `auto` 即可；QClaw 用 `auto`；千问办公用 `auto` 或 `qwork-advanced`
 
 管理页打不开或要远程访问时：
 
@@ -135,7 +131,7 @@ python server.py
 - `No module named ...`：先 `conda activate buddy2api`，再 `python -m pip install -r requirements.txt`。
 - 下载依赖很慢：确认能访问 PyPI，不要混用好几个 Python。
 - 端口 8787 被占用：关掉旧的 Buddy2api，或 `python server.py --port 8788`。
-- 网页里一个账号都没有：还没导入。选对通道再检测；WorkBuddy 登录目录不对就设 `CB_AUTH_DIR`。
+- 网页里一个账号都没有：还没导入。选对通道再检测；登录目录不对就设 `CB_AUTH_DIR` / `CB_QCLAW_AUTH_DIR` / `CB_QWENWORK_AUTH_DIR`。
 - 创建 Key 失败：没选通道。
 - 客户端 503 `channel_unavailable`：这个 Key 绑定的通道还没有可用账号。
 - 客户端 403 `key_channel_mismatch`：模型带了别的通道前缀，和当前 Key 不一致。
@@ -204,7 +200,7 @@ QwenWork、QClaw 各用自己那把 Key，不要混用。
 
 | 变量 | 说明 |
 |---|---|
-| `CB_GATEWAY_PROVIDERS` | 启用哪些通道，逗号分隔。默认只有 `workbuddy`。可加上 `qclaw`、`qwenwork` |
+| `CB_GATEWAY_PROVIDERS` | 启用哪些通道，逗号分隔。默认 `workbuddy,qclaw,qwenwork`。只想留一家时再改 |
 | `CB_GATEWAY_AUTO_IMPORT` | 设 `1` 则启动时自动导入。默认 `0` |
 | `CB_GATEWAY_CHECKIN_GAP_MS` | 一键领取间隔，默认 `800` |
 | `CB_AUTH_DIR` | WorkBuddy 登录目录 |

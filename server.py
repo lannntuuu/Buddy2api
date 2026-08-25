@@ -409,6 +409,7 @@ async def resp_responses(
 async def admin_channels(authorization: str | None = Header(default=None)):
     _check_admin(authorization)
     env_set = bool((os.environ.get("CB_GATEWAY_PROVIDERS") or "").strip())
+    in_container = auth_manager._running_in_container()
     items = []
     for channel in providers.enabled_provider_ids():
         provider = providers.get_provider(channel)
@@ -419,6 +420,7 @@ async def admin_channels(authorization: str | None = Header(default=None)):
             "loaded": provider is not None,
             "checkin_supported": bool(getattr(provider, "checkin_supported", False)),
             "env_locked": env_set,
+            "host_auth_limited": bool(in_container and channel in {"qclaw", "qwenwork"}),
         })
     return {"channels": items, "known": list(KNOWN_CHANNEL_SET)}
 

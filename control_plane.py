@@ -96,6 +96,21 @@ def lookup_preview(token: str, channel: str) -> dict:
     return item
 
 
+_WINDOWS_DPAPI_CHANNELS = frozenset({"qclaw", "qwenwork"})
+
+
+def _attach_runtime(payload: dict, channel: str) -> dict:
+    runtime = dict(payload.get("runtime") or {})
+    in_container = auth_manager._running_in_container()
+    runtime["container"] = bool(runtime.get("container") or in_container)
+    runtime["host_auth_limited"] = bool(
+        runtime["container"] and channel in _WINDOWS_DPAPI_CHANNELS
+    )
+    payload["runtime"] = runtime
+    payload["channel"] = channel
+    return payload
+
+
 def workbuddy_discover(auth_dir: str | None = None) -> dict:
     payload = auth_manager.discover_auth_files(auth_dir)
     files = []
@@ -104,9 +119,8 @@ def workbuddy_discover(auth_dir: str | None = None) -> dict:
         row["channel"] = "workbuddy"
         files.append(row)
     payload["files"] = files
-    payload["channel"] = "workbuddy"
     payload["preview_token"] = issue_preview("workbuddy", files)
-    return payload
+    return _attach_runtime(payload, "workbuddy")
 
 
 def discover(channel: str | None = None, auth_dir: str | None = None) -> dict:
@@ -122,9 +136,8 @@ def discover(channel: str | None = None, auth_dir: str | None = None) -> dict:
     if not isinstance(payload, dict):
         payload = {"files": [], "dirs": []}
     files = payload.get("files") or []
-    payload["channel"] = channel
     payload["preview_token"] = issue_preview(channel, files)
-    return payload
+    return _attach_runtime(payload, channel)
 
 
 def _allowed_roots_workbuddy(auth_dir: str | None) -> list[Path]:

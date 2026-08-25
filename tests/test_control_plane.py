@@ -76,6 +76,16 @@ def test_preview_import_roundtrip(isolated_db, tmp_path, monkeypatch):
     assert row["priority"] == 3
 
 
+def test_discover_marks_docker_host_auth_limited(isolated_db, monkeypatch):
+    monkeypatch.setenv("CB_DOCKER", "1")
+    qclaw = control_plane.discover("qclaw")
+    assert qclaw["runtime"]["container"] is True
+    assert qclaw["runtime"]["host_auth_limited"] is True
+    workbuddy = control_plane.discover("workbuddy")
+    assert workbuddy["runtime"]["container"] is True
+    assert workbuddy["runtime"]["host_auth_limited"] is False
+
+
 def test_credit_summary_has_null_total(isolated_db):
     payload = asyncio.run(control_plane.credit_summary())
     assert payload["total_balance"] is None
