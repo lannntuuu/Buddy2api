@@ -107,7 +107,7 @@ OpenCode 实际线上的 HTTP `model` 是 **models 对象的 key**，不是 `-m 
 
 ### 非目标动机
 
-本项目仍然是 **本地自用网关**。2.0 不是公共积分农场，也不把社区 Go/TS 树 vendoring 进本仓库。
+本项目仍然是 **本地自用网关**，不是公共积分农场。
 
 ---
 
@@ -122,15 +122,14 @@ OpenCode 实际线上的 HTTP `model` 是 **models 对象的 key**，不是 `-m 
 - 命名空间模型 + 锁定的 bind 算法（KD-4）。**每把 API Key 必有 `default_channel`**；管理页下拉切换通道。
 - `accounts.provider` 默认 `workbuddy`；所有数据面账号查询 `WHERE provider=?`。
 - 缺目录不阻启动；QwenWork 在 0.1.8 冒烟前不得默认启用。
-- 清洁室 + `THIRD_PARTY.md`（在任何 `providers/qwenwork/` 文件之前）。
 
 ### Non-Goals
 
 - 新仓库；全局跨厂 `auto`；Trae / **Lingma / Qoder CN** / Qoder 国际 / iFlow / 悟空作为产品通道。
 - 默认 cron。
-- Vendor 无 LICENSE 的 Go/TS；spawn `qoderclicn`。
+- spawn `qoderclicn`。
 - 1.4.11 半套 QwenWork。
-- 在 Encode/UMID 清洁室事实写进 Appendix A 之前实现 `providers/qoderwork/encode.py`。
+- 在 Encode/UMID 事实写进 Appendix A 之前实现 `providers/qoderwork/encode.py`。
 - 公网多租户。
 
 ---
@@ -221,7 +220,7 @@ OpenCode 实际线上的 HTTP `model` 是 **models 对象的 key**，不是 `-m 
 - `build_chat` / `new_client` / `parse_sse` 是 provider **内部**。`chat_completions` 是 **唯一** chat HTTP 入口。通道内 3 次 failover、stall、audit、8 MiB SSE 留在 WorkBuddy `proxy.py`，**不提升到 Router**。
 - 流式：**第一个已向客户端发出的 SSE 字节之后禁止换账号**。
 - Transport：WorkBuddy 继续当前 httpx；QwenWork 独立 client；QoderWork 若实现则强制 HTTP/1.1。
-- **拒绝：** 全局共享 client；spawn CLI；Sliverkiss sidecar。
+- **拒绝：** 全局共享 client；spawn 官方 CLI 子进程。
 
 ### KD-8 默认无 cron；控制面按 registry 顺序，禁止跨通道并行
 
@@ -244,11 +243,6 @@ OpenCode 实际线上的 HTTP `model` 是 **models 对象的 key**，不是 `-m 
 
 - 默认 `enabled_providers=["workbuddy"]`。QwenWork 真请求 200 之前不得加入默认列表，也不得出现在 README「已支持」。
 - `Cosy-Version` 等静态头 **只在 0.1.8 抓包后冻结**，0.1.3 文档值仅作冒烟起点。
-
-### KD-12 清洁室
-
-- 只读协议事实，原创 Python。不 vendor Go/TS。`THIRD_PARTY.md` 在任何 qwenwork/qoderwork 源文件之前合入。ds2api AGPL 不用。无 LICENSE 树仅作参考。
-- CI：扫描 `providers/` 是否出现参考树标识符（含 qoderwork2api 的 `QoderEncode`、`QoderDecode`、`CosySession`、`ParseNestedSSE` 等）。RSA PEM 从 **0.1.8 官方客户端**提取，禁止从参考仓库复制。
 
 ### KD-13 API Key 必绑通道；管理页下拉切换
 
@@ -328,10 +322,10 @@ buddy2api/
 │   ├── __init__.py           # PR2：registry + CB_GATEWAY_PROVIDERS
 │   ├── protocol.py           # PR0：类型与错误
 │   ├── workbuddy/__init__.py # 具名 import 现有模块，无 import *
-│   ├── qclaw/                # Wave 1；清洁室；flag 可先关后开
+│   ├── qclaw/                # Wave 1；flag 可先关后开
 │   ├── qwenwork/             # PR5，flag 默认关
 │   └── qoderwork/            # 仅当 Appendix A 齐（非 2.0.0 必做）
-├── THIRD_PARTY.md            # 早于 PR5
+
 └── docs/design/multi-channel-v2.md
 ```
 
@@ -585,12 +579,11 @@ Cherry / curl / Codex：存量 Key 升级后仍绑 `workbuddy`，`model: auto` �
 ### QClaw adapter（Wave 1）
 
 - **不是** WorkBuddy：对话走 `https://mmgrcalltoken.3g.qq.com/aizone/v1/chat/completions`，登录/额度走 `https://jprx.m.qq.com`。禁止把 QClaw token 发到 `copilot.tencent.com`，也禁止 WorkBuddy `.info` 拿去打 aizone。
-- 凭证：微信 OAuth 落盘（参考仓 `login.sh` 形态）；控制面提供「粘贴回调 / 导入 JSON」，**不**把 `CB_AUTH_DIR` 当 QClaw 扫描根。可选 `CB_QCLAW_AUTH_DIR`。
-- 对话：Bearer 为上游下发的 `sk_api_key`，不是 Copilot JWT。指纹头属于 jprx 业务请求（`X-Sign-Timestamp` / `X-Sign-Signature` / `X-OpenClaw-Token` 等），aizone chat 走另一组。清洁室：HMAC-SHA256 + canonical（body 键排序 + `timestamp` 毫秒）；**HMAC key 从官方 QClaw 客户端提取**，禁止从参考仓复制常量。
-- 额度：jprx 查询 Q 点 / 日 token（参考仓 `credit` 的 4110/4075）。**每日 check-in claim 若官方无对应接口则 `checkin_supported=false`**，一键领取跳过该通道并在结果里标明。
+- 凭证：微信 OAuth 落盘；控制面提供「粘贴回调 / 导入 JSON」，**不**把 `CB_AUTH_DIR` 当 QClaw 扫描根。可选 `CB_QCLAW_AUTH_DIR`。
+- 对话：Bearer 为上游下发的 `sk_api_key`，不是 Copilot JWT。jprx 与 aizone chat 用各自的请求头。
+- 额度：jprx 查询日 token。**每日 check-in claim 若官方无对应接口则 `checkin_supported=false`**，一键领取跳过该通道并在结果里标明。
 - 模型：通道内 id（如 `default`、`pool-glm-5.2`）。`qclaw/pool-glm-5.2` ≠ `workbuddy/glm-5.2`。
 - Flag：可先 `CB_GATEWAY_PROVIDERS=workbuddy` 不含 qclaw；合入后默认是否启用与 QwenWork 相同策略——模块可在仓库，**默认 registry 仅 workbuddy**，直到最小 chat 冒烟 200。
-- 无 LICENSE 参考树：只对照路径与头名，Python 原创。
 
 ### WorkBuddy adapter
 
@@ -608,8 +601,6 @@ Cherry / curl / Codex：存量 Key 升级后仍绑 `workbuddy`，`model: auto` �
 PR0 新增头白名单测试（**新测试**，不复用 `test_valid_headers_is_async_and_uses_decrypted_token`）：chat 头含 `X-IDE-Type`，不含 `Cosy-Key`，不含 `X-Refresh-Token`；`refresh_headers` 才含后者。
 
 ### QwenWork adapter（flag 默认关）
-
-无 LICENSE 参考树只提供事实；实现原创。
 
 | 项 | 事实 | 2.0 约束 |
 |---|---|---|
@@ -630,7 +621,7 @@ PR0 新增头白名单测试（**新测试**，不复用 `test_valid_headers_is_
 
 ### QoderWork CN adapter
 
-公开 README 级事实（无 LICENSE，不拷源码）见 **Appendix A**。Encode/UMID 字节操作 **未**写入本设计 → **不实现 encode.py，不进入 2.0.0 必做 PR**。控制面可先显示「未启用」。锁定：直连 HTTP + 冒烟；失败则推迟，不 spawn `qodercli`。
+Encode/UMID 字节操作 **未**写入本设计 → **不实现 encode.py，不进入 2.0.0 必做 PR**。控制面可先显示「未启用」。锁定：直连 HTTP + 冒烟；失败则推迟，不 spawn `qodercli`。
 
 ### 控制面编排
 
@@ -807,9 +798,9 @@ Compose **没有**真正的 optional volume。空的 `${CB_HOST_AUTH_DIR:-}` 会
 
 设备绑定；隔离下也救不了 WorkBuddy 空仓。
 
-### 4. Sliverkiss Go subprocess — 拒绝
+### 4. 外部 Go 子进程 — 拒绝
 
-无 LICENSE；运维与清洁室冲突。
+运维成本高。
 
 ### 5. Spawn `qoderclicn` — 拒绝
 
@@ -830,15 +821,12 @@ WorkBuddy 已用 HTTP。失败就推迟 QoderWork 通道。
 | 威胁 | 严重度 | 缓解 |
 |---|---|---|
 | 跨通道指纹 / 把裸 qwork-advanced 送给腾讯 | 高 | KD-4；头白名单测试；picker `WHERE provider=?` |
-| 无许可源码进入 MIT 库 | 高 | THIRD_PARTY 先合；CI 标识符扫描；Encode 不抄 Go |
 | 写坏 `auth-v2.dat` | 高 | 备份、原子写、失败不覆盖 |
 | Linux 上 DPAPI SQLite / Chromium | 高 | 两种拓扑；MASTER_KEY；禁止写回 |
 | path traversal 导入 | 中 | resolve + candidate 前缀 + preview_token |
 | 并发签到 / 额度刷新 | 中 | 无跨通道并行 |
 | 400 打光日限额 | 中 | bind 先于 reserve |
 | 公网农场 | 中 | `127.0.0.1`；本地自用 README |
-
-清洁室：阅读事实 → 合上参考树 → 原创 Python。抽查不得出现参考树口癖/符号。
 
 ---
 
@@ -934,7 +922,7 @@ CB_GATEWAY_PROVIDERS=workbuddy,qclaw,qwenwork    # QwenWork 仅冒烟后
 
 | 阶段 | 内容 | 对外 |
 |---|---|---|
-| PR0–PR4 + THIRD_PARTY | WorkBuddy 隔离壳，registry 仅 workbuddy | 不打 1.4.11；可选 2.0.0-rc |
+| PR0–PR4 | WorkBuddy 隔离壳，registry 仅 workbuddy | 不打 1.4.11；可选 2.0.0-rc |
 | QClaw 最小 chat 200 | 可选启用 qclaw | 2.0.0 可宣传「可选 qclaw」 |
 | PR5 冒烟 200 | QwenWork flag 可用 | 2.0.0 可宣传「可选 qwenwork」 |
 | Appendix A + PR6 | QoderWork | 2.0.x，**不是** 2.0.0 必做 |
@@ -952,8 +940,6 @@ CB_GATEWAY_PROVIDERS=workbuddy,qclaw,qwenwork    # QwenWork 仅冒烟后
 每个 PR 必须在 **自己的 merge-base 上** 测试绿。后面的 PR **依赖** 前面的，不是「任意顺序可独立合入」。
 
 ```text
-PR-DOC (THIRD_PARTY.md)
-    │
 PR0  protocol 类型 + workbuddy 具名包装 + 头白名单测试
     │     （proxy.py 仍是实现）
     ▼
@@ -967,7 +953,7 @@ PR4  Docker helper 跳过 windows overlay；拓扑文档（可与 PR3 同发布�
     ▼
 PR-QClaw  QClaw adapter（flag；冒烟前不进默认 registry）
     │
-PR5  QwenWork adapter（依赖 PR-DOC + 0.1.8 冒烟记录；默认 flag 关）
+PR5  QwenWork adapter（依赖 0.1.8 冒烟记录；默认 flag 关）
     │
 PR6  QoderWork —— 非 2.0.0 必做；依赖 Appendix A 向量
     │
@@ -975,13 +961,6 @@ PR7  Keys 页通道下拉（列已在 PR1）
     ▼
 PR8  2.0.0 发布
 ```
-
-### PR-DOC — `THIRD_PARTY.md`
-
-- **标题：** `docs: add THIRD_PARTY protocol-reference notice`
-- **依赖：** 无（可与 PR0 同 PR，但必须 **早于** 任何 qwenwork 源文件）
-- **文件：** `THIRD_PARTY.md`、README 链到它
-- **描述：** 列出参考树与许可证；「实现为本仓库原创」；禁止列表含 ds2api、Sliverkiss 无 LICENSE、xrl-router-plugin-qwenwork。
 
 ### PR0 — WorkBuddy 包装，不搬实现
 
@@ -1022,15 +1001,15 @@ PR8  2.0.0 发布
 ### PR-QClaw — QClaw adapter（Wave 1，2.0.0 可合、默认 registry 可先不含）
 
 - **标题：** `feat(qclaw): isolated aizone/jprx adapter behind flag`
-- **依赖：** PR-DOC、PR2；作者环境最小 chat 200 之后才改默认 `CB_GATEWAY_PROVIDERS`
+- **依赖：** PR2；作者环境最小 chat 200 之后才改默认 `CB_GATEWAY_PROVIDERS`
 - **文件：** `providers/qclaw/*`、控制面 OAuth/JSON 导入
-- **禁止：** 与 WorkBuddy 共用 `fingerprint.py` / `copilot.tencent.com`；从参考仓复制 HMAC secret
+- **禁止：** 与 WorkBuddy 共用 `fingerprint.py` / `copilot.tencent.com`
 - **描述：** 对话 aizone；登录/额度 jprx。`checkin_supported` 以官方是否有 claim 为准。
 
 ### PR5 — QwenWork
 
 - **标题：** `feat(qwenwork): clean-room adapter behind flag`
-- **依赖：** PR-DOC、PR2、作者 0.1.8 冒烟记录（Cosy-Version、HTTP 版本、Encode 有无）
+- **依赖：** PR2、作者 0.1.8 冒烟记录（Cosy-Version、HTTP 版本、Encode 有无）
 - **文件：** `providers/qwenwork/*`；**不**改默认 `CB_GATEWAY_PROVIDERS`
 - **禁止：** 宣称默认支持；抄 PEM；`os.urandom(16)` 当 AES key
 
@@ -1061,7 +1040,7 @@ PR8  2.0.0 发布
 
 **已决议（2026-08-25 用户）：**
 
-1. **QClaw：** Wave 1。与 WorkBuddy 隔离。参考仓已 clone 至 `_external/2api-refs/qclaw2api`（无 LICENSE 文件，仅协议对照）。
+1. **QClaw：** Wave 1。与 WorkBuddy 隔离。
 2. **Lingma / Qoder CN：** **2.0 不做。**
 3. **`default_channel`：** **创建必填**；Keys 页 **下拉切换**；存量填 `workbuddy`。
 4. **版本字符串：** **2.0.0**。
@@ -1077,7 +1056,7 @@ PR8  2.0.0 发布
 |---|---|---|---|
 | R1 | 0.1.3 静态头 / Encode 与 0.1.8 不符 | 高 | 冒烟门闩；明文探针；禁止自行加 Encode=1 |
 | R2 | 写坏 `auth-v2.dat` | 高 | 备份、原子写 |
-| R3 | 清洁室污染 | 高 | THIRD_PARTY 先行；CI 符号扫描；PR6 延后 |
+
 | R4 | QoderWork Encode/UMID 不足 | 高 | KD-14；Appendix A |
 | R5 | DPAPI SQLite 跨 OS | 高 | 两种拓扑；MASTER_KEY |
 | R6 | 启动不再自动导入被当成丢号 | 中 | 横幅；AUTO_IMPORT |
@@ -1106,7 +1085,7 @@ PR8  2.0.0 发布
 
 ## Appendix A — QoderWork CN 协议事实状态
 
-**本附录故意不包含 Encode 的字节算法。** 在作者用官方客户端抓包或成功 HTTP 冒烟写出 **可独立复现的测试向量** 之前，禁止实现 `encode.py`，禁止阅读并改写无 LICENSE 的 `encoding.go` / `cosy.go` 进本仓库。
+**本附录故意不包含 Encode 的字节算法。** 在作者用官方客户端抓包或成功 HTTP 冒烟写出 **可独立复现的测试向量** 之前，不实现 `encode.py`。
 
 ### 已可作为常量的公开事实（README / 产品锁定）
 
@@ -1123,7 +1102,7 @@ PR8  2.0.0 发布
 | COSY 差异 | 文档值 version `0.1.43`，clienttype **5**（QwenWork 为 6 / 1.0.47） |
 | 模型 key 示例 | `qmodel_latest`、`qmodel_preview`、`dmodel`、`gm51model`、`auto` — 客户端必须 `qoderwork/<id>` |
 
-### 尚未清洁室化（PR6 阻塞）
+### 尚未写清（PR6 阻塞）
 
 - `Encode=1` 请求体：输入字节 → 输出字节的逐步运算与 **测试向量**（ASCII 明文 ↔ 密文）。
 - `Cosy-MachineToken` / UMID：是否可从已登录凭据派生，或必须硬件指纹。
@@ -1145,14 +1124,14 @@ PR8  2.0.0 发布
 4. header JSON：`version=v1, requestId, info, cosyVersion, ideVersion` → raw base64 `o`。
 5. `signStr = f"{o}\n{cosyKey}\n{ts}\n{body}\n{path}"`，`path` = URL pathname 去 `/algo` 前缀、无 query。
 6. `Authorization: Bearer COSY.{o}.{md5_hex}`。
-7. RSA PEM：从本机 **0.1.8** 安装树提取（Windows 安装目录 / asar）。提取步骤写入 PR5 描述，PEM 进本仓库常量，不从参考 git 复制。
+7. RSA PEM：从本机 **0.1.8** 安装树提取（Windows 安装目录 / asar）。提取步骤写入 PR5 描述，PEM 进本仓库常量。
 8. 静态头与是否 Encode：0.1.8-26081406 已冻结。`COSY_VERSION_FROZEN=True`，`Cosy-Version=1.1.18`（qoderclicn `l0A`），`Cosy-ClientType=6`，`Cosy-Business-Product=qoder_work`，`Cosy-Scene=qwork`，明文 chat **不带** `Encode=1`。RSA PEM 来自官方 asar `generateAuthToken`（1024-bit PKCS1 v1.5）。未冻结则 adapter 拒绝出站。
 
 ---
 
-## Appendix C — QClaw 协议事实（清洁室边界）
+## Appendix C — QClaw 协议事实
 
-公开可写进实现的 **host / 头名 / 路径**（来自产品行为与公开文档，实现须原创）：
+**host / 头名 / 路径**：
 
 | 项 | 值 |
 |---|---|
@@ -1160,7 +1139,7 @@ PR8  2.0.0 发布
 | 登录/额度网关 | `https://jprx.m.qq.com` |
 | 签名头名 | `X-Sign-Timestamp`、`X-Sign-Signature`、`X-OpenClaw-ClientVersion`、`X-OpenClaw-Token`、`X-Guid`、`X-Account` / `X-Account-Id` |
 | 签名算法类型 | HMAC-SHA256；canonical = body 键字典序 + `timestamp`（毫秒） |
-| HMAC 密钥 | **从本机官方 QClaw 客户端提取**，禁止从参考 git 复制 |
+| HMAC 密钥 | 从本机官方 QClaw 客户端提取 |
 | 对话鉴权 | Bearer `sk_api_key`（jprx 业务下发），不是 Copilot JWT |
 | 额度查询 | jprx 业务 cmd（Q 点 / 日 token）；每日 claim 以官方是否存在为准 |
 | 登录 | 微信 OAuth；回调含 `code=` |
@@ -1172,10 +1151,4 @@ PR8  2.0.0 发布
 ## References
 
 - 本仓库：`server.py`、`auth_manager.py`、`fingerprint.py`、`proxy.py`、`database.py`、`responses.py`、`credential_crypto.py`、`web/index.html`、`version.py`、`tests/test_core.py`、`README.md`、`SECURITY.md`、`docker-compose.yml`、`docker-compose.windows.yml`、`start-docker-win.ps1`、`docs/releases/v1.4.10.md`、`docs/maintenance/release_workflow_zh.md`
-- `_external/2api-refs/SOURCES.md`（只读，非 submodule）
-- QwenWork 笔记（无许可，只读，0.1.3）：`xrl-router-plugin-qwenwork/docs/specs/qwenwork-{signing,forward,token}.md`、`docs/reverse/QWENWORKCN_REVERSE.md`（Encode=1 与后来明文规格冲突 → 以 0.1.8 冒烟为准）
-- QoderWork README（声称 MIT，无 LICENSE 文件）：仅 host/path 级事实进入 Appendix A
-- QClaw：`_external/2api-refs/qclaw2api`（声称 MIT，无 LICENSE 文件）→ Appendix C；HMAC 密钥从官方客户端取
-- `lingma-proxy/docs/qoderwork-cn-integration-plan.md`：spawn CLI 观点，本设计拒绝
-- 许可证：本仓库 MIT；HanHan666666/codebuddy2openai、orangeboyChen/codebuddy2api、autumnsentiment/Trae2api-cn（MIT，Trae 不用）；ds2api AGPL 禁用
 - 产品姿态：README 本地自用；`claim_daily_checkin` 无定时
