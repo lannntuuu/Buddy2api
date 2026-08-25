@@ -10,9 +10,13 @@ from providers.protocol import (
     ChannelId,
     Provider,
 )
+from providers.qclaw import PROVIDER as QCLAW_PROVIDER
 from providers.workbuddy import PROVIDER as WORKBUDDY_PROVIDER
 
-_LOADED: dict[str, Provider] = {"workbuddy": WORKBUDDY_PROVIDER}
+_LOADED: dict[str, Provider] = {
+    "workbuddy": WORKBUDDY_PROVIDER,
+    "qclaw": QCLAW_PROVIDER,
+}
 
 
 def _parse_enabled() -> list[str]:

@@ -1,0 +1,119 @@
+"""QClaw provider. Isolated aizone/jprx adapter; default registry does not enable it."""
+
+from __future__ import annotations
+
+from typing import Optional
+
+import auth_manager
+import database as db
+from providers.protocol import ChannelId, QuotaSnapshot
+from providers.qclaw import chat, jprx, oauth, store
+from providers.qclaw.constants import (
+    ALIASES,
+    CHANNEL_ID,
+    DISPLAY_NAME,
+    STATIC_MODELS,
+)
+
+
+class QClawProvider:
+    id: ChannelId = CHANNEL_ID
+    display_name = DISPLAY_NAME
+    checkin_supported = False
+
+    def list_models(self) -> list[dict]:
+        return [{"id": item} for item in STATIC_MODELS]
+
+    def alias_map(self) -> dict[str, str]:
+        return dict(ALIASES)
+
+    def accepts_model(self, inner: str) -> bool:
+        value = (inner or "").strip()
+        if value in STATIC_MODELS or value in ALIASES:
+            return True
+        return value.startswith("pool-")
+
+    def translate_model(self, model: str) -> str:
+        return chat.translate_model(model)
+
+    def pick_account(self, exclude_ids: set[int] | None = None) -> Optional[dict]:
+        return auth_manager.pick_account(exclude_ids, provider=self.id)
+
+    async def pick_account_with_fallback(
+        self, exclude_ids: set[int] | None = None
+    ) -> Optional[dict]:
+        account = self.pick_account(exclude_ids)
+        if account:
+            return account
+        expired = [
+            row
+            for row in db.list_accounts(provider=self.id)
+            if row.get("status") == "expired"
+            and row.get("id") not in (exclude_ids or set())
+        ]
+        for row in expired:
+            try:
+                await jprx.refresh_channel(row)
+                fresh = db.get_account(row["id"])
+                if fresh:
+                    db.update_account(fresh["id"], {"status": "active"})
+                    return db.get_account(fresh["id"])
+            except jprx.JprxError:
+                continue
+        return None
+
+    async def has_usable_account(self) -> bool:
+        return await self.pick_account_with_fallback() is not None
+
+    async def chat_completions(self, payload: dict, api_key_info: dict | None) -> tuple:
+        return await chat.chat_completions(payload, api_key_info)
+
+    def parse_credentials(self, body: dict) -> dict:
+        return store.parse_credentials(body)
+
+    def discover(self) -> dict:
+        return store.discover()
+
+    def import_path(self, path: str) -> dict:
+        return store.import_discovered(path)
+
+    async def fetch_quota(self, account: dict) -> QuotaSnapshot:
+        try:
+            data = await jprx.today_tokens(account)
+        except jprx.JprxError as exc:
+            return QuotaSnapshot(
+                ok=False,
+                channel=self.id,
+                account_id=int(account.get("id") or 0),
+                unit="tokens",
+                remaining=None,
+                unsupported=False,
+                message=str(exc)[:240],
+            )
+        limit = float(data.get("daily_token_limit") or 0)
+        used = float(data.get("daily_token_used") or 0)
+        remaining = max(0.0, limit - used)
+        return QuotaSnapshot(
+            ok=True,
+            channel=self.id,
+            account_id=int(account.get("id") or 0),
+            unit="tokens",
+            remaining=remaining,
+            extra={
+                "daily_token_limit": limit,
+                "daily_token_used": used,
+                "rpm_limit": data.get("rpm_limit"),
+            },
+        )
+
+    async def test_chat(self, account: dict, model: str = "default", prompt: str = "ping") -> dict:
+        return await chat.test_chat(account, model, prompt)
+
+    async def start_login(self, guid: str) -> dict:
+        return await oauth.start_login(guid)
+
+    async def complete_login(self, guid: str, code: str, state: str) -> dict:
+        return await oauth.complete_login(guid, code, state)
+
+
+PROVIDER = QClawProvider()

@@ -33,6 +33,7 @@ import responses
 import providers
 import router
 from providers.protocol import KNOWN_CHANNEL_SET
+from providers.qclaw.store import default_guid, upsert_account as upsert_qclaw_account
 from version import VERSION
 
 
@@ -511,9 +512,15 @@ async def admin_list_accounts(authorization: str | None = Header(default=None)):
 @app.get("/admin/accounts/discover")
 async def admin_discover_accounts(
     auth_dir: str | None = None,
+    channel: str | None = None,
     authorization: str | None = Header(default=None),
 ):
     _check_admin(authorization)
+    if channel == "qclaw":
+        provider = providers.get_provider("qclaw")
+        if provider is None:
+            raise HTTPException(status_code=400, detail="Channel 'qclaw' is not enabled")
+        return await run_in_threadpool(provider.discover)
     return await run_in_threadpool(auth_manager.discover_auth_files, auth_dir)
 
 
@@ -535,6 +542,17 @@ async def admin_add_account(
 ):
     _check_admin(authorization)
     data = await _read_json_object(request)
+    provider_id = str(data.get("provider") or data.get("channel") or "").strip()
+    if provider_id == "qclaw":
+        qclaw = providers.get_provider("qclaw")
+        if qclaw is None:
+            raise HTTPException(status_code=400, detail="Channel 'qclaw' is not enabled")
+        try:
+            parsed = qclaw.parse_credentials(data)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        result = upsert_qclaw_account(parsed)
+        return {"id": result["id"], "status": "ok", "updated": result["updated"], "provider": "qclaw"}
     # 直接粘贴 auth JSON
     auth_data = data.get("auth", {})
     account_data = data.get("account", {})
@@ -558,6 +576,70 @@ async def admin_add_account(
         raise HTTPException(status_code=400, detail="No accessToken found in auth data")
     aid = db.add_account(parsed)
     return {"id": aid, "status": "ok"}
+
+
+def _qclaw_provider():
+    provider = providers.get_provider("qclaw")
+    if provider is None:
+        raise HTTPException(status_code=400, detail="Channel 'qclaw' is not enabled")
+    return provider
+
+
+@app.post("/admin/qclaw/import-path")
+async def admin_qclaw_import_path(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    _check_admin(authorization)
+    provider = _qclaw_provider()
+    data = await _read_json_object(request)
+    path = str(data.get("path") or "").strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    try:
+        parsed = provider.import_path(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result = upsert_qclaw_account(parsed)
+    return {"id": result["id"], "status": "ok", "updated": result["updated"], "provider": "qclaw"}
+
+
+@app.post("/admin/qclaw/login/start")
+async def admin_qclaw_login_start(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    _check_admin(authorization)
+    provider = _qclaw_provider()
+    data = await _read_json_object(request, allow_empty=True)
+    guid = str((data or {}).get("guid") or default_guid() or "").strip()
+    if not guid:
+        raise HTTPException(status_code=400, detail="guid is required (or login to official QClaw once)")
+    return await provider.start_login(guid)
+
+
+@app.post("/admin/qclaw/login/complete")
+async def admin_qclaw_login_complete(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    _check_admin(authorization)
+    provider = _qclaw_provider()
+    data = await _read_json_object(request)
+    from providers.qclaw.oauth import parse_callback
+
+    guid = str(data.get("guid") or default_guid() or "").strip()
+    callback = str(data.get("callback") or data.get("code") or "").strip()
+    if not guid or not callback:
+        raise HTTPException(status_code=400, detail="guid and callback/code are required")
+    parsed_cb = parse_callback(callback)
+    state = str(data.get("state") or parsed_cb.get("state") or "")
+    try:
+        parsed = await provider.complete_login(guid, parsed_cb["code"], state)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result = upsert_qclaw_account(parsed)
+    return {"id": result["id"], "status": "ok", "updated": result["updated"], "provider": "qclaw"}
 
 
 @app.put("/admin/accounts/{aid}")
@@ -625,6 +707,15 @@ async def admin_test_account(
     data = await _read_json_object(request, allow_empty=True)
     model = data.get("model") if isinstance(data, dict) else None
     prompt = data.get("prompt") if isinstance(data, dict) else None
+    channel = str(account.get("provider") or "workbuddy")
+    if channel != "workbuddy":
+        provider = providers.get_provider(channel)
+        if provider is None:
+            raise HTTPException(status_code=400, detail=f"Channel '{channel}' is not enabled")
+        test = getattr(provider, "test_chat", None)
+        if test is None:
+            raise HTTPException(status_code=400, detail=f"Channel '{channel}' does not support account test")
+        return await test(account, model or "auto", prompt or "ping")
     return await proxy.test_account_chat(account, model or "auto", prompt or "ping")
 
 
