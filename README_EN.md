@@ -32,7 +32,7 @@ Narrow with `CB_GATEWAY_PROVIDERS=workbuddy` if you only want one.
 4. **Run QClaw / QwenWork with `python server.py` on Windows.** A Linux Docker container cannot decrypt those DPAPI files; the UI says so. WorkBuddy can stay on Docker.
 5. If the chat client is itself in Docker, Base URL is `http://host.docker.internal:8787/v1`.
 
-## Install (beginner path)
+## Install
 
 1. [Git](https://git-scm.com/downloads), [Miniconda](https://docs.conda.io/projects/miniconda/en/latest/) (Python 3.12), and sign into Work Buddy / CodeBuddy at least once.
 2. Reopen the terminal, then:
