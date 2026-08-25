@@ -47,9 +47,13 @@ class _QwenStub:
 def qwen_enabled(monkeypatch):
     monkeypatch.setenv("CB_GATEWAY_PROVIDERS", "workbuddy,qwenwork")
     stub = _QwenStub()
+    previous = providers._LOADED.get("qwenwork")
     providers.register_provider(stub)
     yield stub
-    providers._LOADED.pop("qwenwork", None)
+    if previous is not None:
+        providers._LOADED["qwenwork"] = previous
+    else:
+        providers._LOADED.pop("qwenwork", None)
 
 
 def test_unprefixed_auto_on_workbuddy_key():

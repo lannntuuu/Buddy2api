@@ -115,5 +115,15 @@ class QClawProvider:
     async def complete_login(self, guid: str, code: str, state: str) -> dict:
         return await oauth.complete_login(guid, code, state)
 
+    async def refresh(self, account: dict) -> dict:
+        await jprx.refresh_channel(account)
+        import database as db
+
+        fresh = db.get_account(account["id"])
+        if fresh:
+            db.update_account(fresh["id"], {"status": "active"})
+            return db.get_account(fresh["id"]) or fresh
+        return account
+
 
 PROVIDER = QClawProvider()

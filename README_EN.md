@@ -2,7 +2,7 @@
 
 [English](README_EN.md) | 中文
 
-> Convert your local Tencent Work Buddy / CodeBuddy accounts into an OpenAI-compatible API for use in OpenCode, OpenClaw, Cherry Studio, NextChat, and other tools.
+> Convert locally logged-in consumer AI clients into an OpenAI-compatible API. WorkBuddy is the default channel; QClaw and QwenWork are optional flags. The data plane never failovers across vendors.
 
 ## What is this?
 
@@ -12,11 +12,20 @@ In short: you're already logged into Work Buddy with available credits. This pro
 
 This project is mainly for personal use and testing. Do not deploy publicly, do not share with others, and do not send your login credentials, API keys, or database files to anyone.
 
+## 2.0 breaking changes
+
+- Empty channel now returns HTTP **503** `channel_unavailable` and never failovers to another vendor.
+- Startup **does not auto-import** local login files. Preview then import from the Accounts page, or set `CB_GATEWAY_AUTO_IMPORT=1`.
+- Every API key **must bind a channel** (existing keys migrate to `workbuddy`). Switch channels with the Keys dropdown.
+- Unprefixed foreign model ids such as `qwork-advanced` on a WorkBuddy-bound key return **400** `unknown_model` instead of being posted to Tencent Copilot.
+- Default registry is `workbuddy` only. Optional: `CB_GATEWAY_PROVIDERS=workbuddy,qclaw` or `workbuddy,qclaw,qwenwork`.
+
 ## Features
 
 - **OpenAI Compatible** - `/v1/chat/completions`, `/v1/responses`, and `/v1/models`
 - **Streaming Output** - SSE streaming and non-streaming aggregated responses
-- **Auto Import Accounts** - Scans Work Buddy / CodeBuddy auth files on startup
+- **Local credential import** - Per-channel preview then import; startup does not ingest files unless `CB_GATEWAY_AUTO_IMPORT=1`
+- **Isolated channel routing** - One request binds one channel; sticky routing and failover stay inside that channel
 - **Multi-Account Routing** - Higher priority accounts are used first; accounts at the same priority stay sticky when possible, with automatic failover
 - **Account Diagnostics** - Enable/disable accounts, set weight/priority, refresh tokens, and run single-account tests
 - **Official Balance** - Accounts page can read official Work Buddy resource balance, credits expiring within 30 days, and package details
@@ -366,9 +375,14 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `CB_GATEWAY_NODE_VERSION` | Official SDK fingerprint Node runtime version, default `v22.13.1` |
 | `CB_GATEWAY_TOOL_STALL_RETRY` | Auto-retry non-streaming "tool stall" turns once with `tool_choice=required`; enabled by default, set `0` to disable |
 | `CB_GATEWAY_TOOL_STALL_FAIL_STREAM` | Mark streaming "tool stall" turns as failed so retrying clients (DSH / OpenCode) retry automatically; disabled by default |
-| `CB_AUTH_DIR` | Work Buddy / CodeBuddy auth file directory |
-| `CB_HOST_AUTH_DIR` | Host auth directory used by Docker helper scripts |
+| `CB_AUTH_DIR` | Work Buddy / CodeBuddy auth file directory (WorkBuddy only; other channels must not fall back here) |
+| `CB_HOST_AUTH_DIR` | Host WorkBuddy auth directory used by Docker helper scripts. Missing directory skips the overlay instead of exiting |
 | `CB_CONTAINER_AUTH_DIR` | Auth mount directory inside Docker, default `/auth` |
+| `CB_GATEWAY_PROVIDERS` | Enabled channels, comma-separated. Default `workbuddy`. Optional `qclaw`, `qwenwork` |
+| `CB_GATEWAY_AUTO_IMPORT` | Set `1` to import on startup. Default `0` |
+| `CB_GATEWAY_CHECKIN_GAP_MS` | Gap between check-in claims, default `800` |
+| `CB_QCLAW_AUTH_DIR` | QClaw credential directory only |
+| `CB_QWENWORK_AUTH_DIR` | QwenWork credential directory only, default `%APPDATA%\QwenWorkCN` |
 
 ## Official request fingerprint
 

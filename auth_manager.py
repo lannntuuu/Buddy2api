@@ -328,7 +328,21 @@ def auto_scan_and_import(auth_dir: Optional[str] = None) -> dict:
             continue
         existing = existing_by_uid.get(parsed.get("uid"))
         if existing:
-            db.update_account(existing["id"], parsed)
+            patch = {
+                key: parsed[key]
+                for key in (
+                    "access_token",
+                    "refresh_token",
+                    "expires_at",
+                    "refresh_expires_at",
+                    "session_state",
+                    "nickname",
+                    "name",
+                    "phone",
+                )
+                if key in parsed
+            }
+            db.update_account(existing["id"], patch)
             result["updated"] += 1
         else:
             aid = db.add_account(parsed)

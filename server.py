@@ -32,6 +32,7 @@ import proxy
 import responses
 import providers
 import router
+import control_plane
 from providers.protocol import KNOWN_CHANNEL_SET
 from providers.qclaw.store import default_guid, upsert_account as upsert_qclaw_account
 from version import VERSION
@@ -434,59 +435,7 @@ async def admin_credit_summary(
     authorization: str | None = Header(default=None),
 ):
     _check_admin(authorization)
-    accounts = db.list_accounts()
-    active_accounts = [a for a in accounts if a.get("status") == "active"]
-    resources = await _gather_limited(
-        active_accounts,
-        lambda account: auth_manager.fetch_account_resources(account, force=bool(force)),
-    )
-
-    ok_resources = [r for r in resources if r.get("ok")]
-    total_balance = round(sum(float(r.get("total_dosage") or r.get("available_total") or 0) for r in ok_resources), 4)
-    expiring_7d_total = round(sum(float(r.get("expiring_7d_total") or 0) for r in ok_resources), 4)
-    expiring_30d_total = round(sum(float(r.get("expiring_30d_total") or 0) for r in ok_resources), 4)
-    package_count = sum(int(r.get("package_count") or 0) for r in ok_resources)
-    stale_count = sum(1 for r in resources if r.get("stale"))
-    failed_count = sum(1 for r in resources if not r.get("ok"))
-    now_ts = int(time.time())
-    low_accounts = []
-    expiring_accounts = []
-    for r in resources:
-        balance = float(r.get("total_dosage") or r.get("available_total") or 0)
-        row = {
-            "account_id": r.get("account_id"),
-            "account_name": r.get("account_name"),
-            "balance": round(balance, 4),
-            "expiring_30d_total": round(float(r.get("expiring_30d_total") or 0), 4),
-            "next_expire_time": r.get("next_expire_time") or "",
-            "next_expire_days": r.get("next_expire_days"),
-            "ok": bool(r.get("ok")),
-            "stale": bool(r.get("stale")),
-            "age_seconds": int(r.get("age_seconds") or 0),
-        }
-        if r.get("ok") and balance <= 300:
-            low_accounts.append(row)
-        if r.get("ok") and float(r.get("expiring_30d_total") or 0) > 0:
-            expiring_accounts.append(row)
-
-    low_accounts.sort(key=lambda x: (x["balance"], x["account_id"] or 0))
-    expiring_accounts.sort(key=lambda x: (x["next_expire_days"] if x["next_expire_days"] is not None else 9999, -x["expiring_30d_total"]))
-    return {
-        "ok": failed_count == 0,
-        "updated_at": now_ts,
-        "active_accounts": len(active_accounts),
-        "resource_accounts": len(resources),
-        "ok_accounts": len(ok_resources),
-        "failed_accounts": failed_count,
-        "stale_accounts": stale_count,
-        "total_balance": total_balance,
-        "expiring_7d_total": expiring_7d_total,
-        "expiring_30d_total": expiring_30d_total,
-        "package_count": package_count,
-        "low_accounts": low_accounts[:8],
-        "expiring_accounts": expiring_accounts[:8],
-        "accounts": resources,
-    }
+    return await control_plane.credit_summary(force=bool(force))
 
 
 # --- Accounts ---
@@ -505,6 +454,7 @@ async def admin_list_accounts(authorization: str | None = Header(default=None)):
         s["weight"] = int(a.get("weight") or 1)
         s["priority"] = int(a.get("priority") or 0)
         s["credit_limit"] = float(a.get("credit_limit") or 0)
+        s["provider"] = a.get("provider") or "workbuddy"
         result.append(s)
     return result
 
@@ -516,12 +466,34 @@ async def admin_discover_accounts(
     authorization: str | None = Header(default=None),
 ):
     _check_admin(authorization)
-    if channel == "qclaw":
-        provider = providers.get_provider("qclaw")
-        if provider is None:
-            raise HTTPException(status_code=400, detail="Channel 'qclaw' is not enabled")
-        return await run_in_threadpool(provider.discover)
-    return await run_in_threadpool(auth_manager.discover_auth_files, auth_dir)
+    try:
+        return await run_in_threadpool(control_plane.discover, channel, auth_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/admin/accounts/import")
+async def admin_import_accounts(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    _check_admin(authorization)
+    data = await _read_json_object(request)
+    channel = str(data.get("channel") or "workbuddy").strip() or "workbuddy"
+    token = str(data.get("preview_token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="preview_token is required")
+    paths = data.get("paths")
+    if paths is not None and (
+        not isinstance(paths, list) or not all(isinstance(item, str) for item in paths)
+    ):
+        raise HTTPException(status_code=400, detail="paths must be an array of strings")
+    try:
+        return await run_in_threadpool(
+            control_plane.import_channel, channel, token, paths, data.get("auth_dir")
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/admin/accounts/scan")
@@ -543,16 +515,26 @@ async def admin_add_account(
     _check_admin(authorization)
     data = await _read_json_object(request)
     provider_id = str(data.get("provider") or data.get("channel") or "").strip()
-    if provider_id == "qclaw":
-        qclaw = providers.get_provider("qclaw")
-        if qclaw is None:
-            raise HTTPException(status_code=400, detail="Channel 'qclaw' is not enabled")
+    if provider_id and provider_id != "workbuddy":
+        provider = providers.get_provider(provider_id)
+        if provider is None:
+            raise HTTPException(status_code=400, detail=f"Channel '{provider_id}' is not enabled")
+        parse_credentials = getattr(provider, "parse_credentials", None)
+        if parse_credentials is None:
+            raise HTTPException(status_code=400, detail=f"Channel '{provider_id}' does not support pasted credentials")
         try:
-            parsed = qclaw.parse_credentials(data)
+            parsed = parse_credentials(data)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        result = upsert_qclaw_account(parsed)
-        return {"id": result["id"], "status": "ok", "updated": result["updated"], "provider": "qclaw"}
+        upsert = getattr(provider, "upsert_account", None)
+        if upsert is None and provider_id == "qclaw":
+            result = upsert_qclaw_account(parsed)
+        elif upsert is None:
+            aid = db.add_account({**parsed, "provider": provider_id})
+            result = {"id": aid, "updated": False}
+        else:
+            result = upsert(parsed)
+        return {"id": result["id"], "status": "ok", "updated": result["updated"], "provider": provider_id}
     # 直接粘贴 auth JSON
     auth_data = data.get("auth", {})
     account_data = data.get("account", {})
@@ -690,6 +672,19 @@ async def admin_refresh_account(
     account = db.get_account(aid)
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
+    channel = str(account.get("provider") or "workbuddy")
+    if channel != "workbuddy":
+        provider = providers.get_provider(channel)
+        if provider is None:
+            raise HTTPException(status_code=400, detail=f"Channel '{channel}' is not enabled")
+        refresh = getattr(provider, "refresh", None)
+        if refresh is None:
+            raise HTTPException(status_code=400, detail=f"Channel '{channel}' does not support refresh")
+        try:
+            await refresh(account)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)[:240]) from exc
+        return {"status": "ok"}
     ok = await auth_manager.refresh_token(account)
     return {"status": "ok" if ok else "failed"}
 
@@ -729,6 +724,33 @@ async def admin_account_resources(
     account = db.get_account(aid)
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
+    channel = str(account.get("provider") or "workbuddy")
+    if channel != "workbuddy":
+        provider = providers.get_provider(channel)
+        if provider is None:
+            raise HTTPException(status_code=400, detail=f"Channel '{channel}' is not enabled")
+        fetch_quota = getattr(provider, "fetch_quota", None)
+        if fetch_quota is None:
+            return {
+                "ok": True,
+                "unsupported": True,
+                "account_id": aid,
+                "unit": "unknown",
+                "remaining": None,
+                "message": "quota API not available",
+            }
+        snapshot = await fetch_quota(account)
+        remaining = getattr(snapshot, "remaining", None)
+        return {
+            "ok": bool(getattr(snapshot, "ok", False)),
+            "account_id": aid,
+            "unit": getattr(snapshot, "unit", "unknown"),
+            "remaining": remaining,
+            "total_dosage": remaining,
+            "unsupported": bool(getattr(snapshot, "unsupported", False)),
+            "message": getattr(snapshot, "message", "") or "",
+            "packages": [],
+        }
     return await auth_manager.fetch_account_resources(account, force=bool(force))
 
 
@@ -751,21 +773,7 @@ async def admin_checkin_status_all(
     authorization: str | None = Header(default=None),
 ):
     _check_admin(authorization)
-    accounts = [a for a in db.list_accounts() if a.get("status") == "active"]
-    results = await _gather_limited(
-        accounts,
-        lambda account: auth_manager.fetch_checkin_status(account, force=bool(force)),
-    )
-    return {
-        "total": len(results),
-        "ok": sum(1 for r in results if r.get("ok")),
-        "claimed": sum(1 for r in results if r.get("claimed")),
-        "already_claimed": sum(1 for r in results if r.get("already_claimed") or r.get("today_checked_in")),
-        "available": sum(1 for r in results if r.get("ok") and not (r.get("already_claimed") or r.get("today_checked_in"))),
-        "failed": sum(1 for r in results if not r.get("ok")),
-        "stale": sum(1 for r in results if r.get("stale")),
-        "results": results,
-    }
+    return await control_plane.checkin_status_all(force=bool(force))
 
 
 @app.post("/admin/accounts/{aid}/checkin")
@@ -784,24 +792,18 @@ async def admin_claim_checkin(
 
 
 @app.post("/admin/accounts/checkin-all")
-async def admin_claim_all_checkin(authorization: str | None = Header(default=None)):
+async def admin_claim_all_checkin(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
     _check_admin(authorization)
-    accounts = [a for a in db.list_accounts() if a.get("status") == "active"]
-    async def claim(account: dict):
-        result = await auth_manager.claim_daily_checkin(account)
-        if result.get("ok"):
-            result["resources"] = await auth_manager.fetch_account_resources(account, force=True)
-        return result
-
-    results = await _gather_limited(accounts, claim)
-    return {
-        "total": len(results),
-        "claimed": sum(1 for r in results if r.get("claimed")),
-        "already_claimed": sum(1 for r in results if r.get("already_claimed")),
-        "failed": sum(1 for r in results if not r.get("ok")),
-        "credit": round(sum(float(r.get("credit") or 0) for r in results if r.get("claimed")), 4),
-        "results": results,
-    }
+    data = await _read_json_object(request, allow_empty=True)
+    channels = data.get("channels") if isinstance(data, dict) else None
+    if channels is not None and (
+        not isinstance(channels, list) or not all(isinstance(item, str) for item in channels)
+    ):
+        raise HTTPException(status_code=400, detail="channels must be an array of strings")
+    return await control_plane.checkin_all(channels)
 
 
 # --- API Keys ---
@@ -832,7 +834,9 @@ async def admin_create_key(
     client_type = data.get("client_type", "custom")
     if client_type not in {"custom", "codex"}:
         raise HTTPException(status_code=400, detail="Invalid client_type")
-    default_channel = _validate_key_channel(data.get("default_channel", "workbuddy"))
+    if "default_channel" not in data or data.get("default_channel") in (None, ""):
+        raise HTTPException(status_code=400, detail="default_channel is required")
+    default_channel = _validate_key_channel(data.get("default_channel"))
     # 生成 sk- 前缀的 key
     key = f"sk-cb-{secrets.token_urlsafe(32)}"
     kid = db.add_api_key(
@@ -1170,10 +1174,8 @@ def main():
 
     db.init_db()
 
-    # 启动时自动扫描
-    result = auth_manager.auto_scan_and_import()
-    if result["imported"] or result["updated"]:
-        sys.stderr.write(f"[startup] Auto-scan: {result}\n")
+    startup = control_plane.startup_scan()
+    sys.stderr.write(f"[startup] discover: {startup}\n")
 
     accounts = db.list_accounts()
     sys.stderr.write(f"\n")
@@ -1181,6 +1183,10 @@ def main():
     sys.stderr.write(f"  ========================\n")
     sys.stderr.write(f"  监听: http://{args.host}:{args.port}\n")
     sys.stderr.write(f"  账号: {len(accounts)} 个 ({sum(1 for a in accounts if a['status']=='active')} active)\n")
+    sys.stderr.write(f"  通道: {', '.join(providers.enabled_provider_ids())}\n")
+    sys.stderr.write(
+        f"  启动导入: {'on' if control_plane.auto_import_enabled() else 'off (CB_GATEWAY_AUTO_IMPORT=1 可打开)'}\n"
+    )
     sys.stderr.write(f"  Admin: {'no auth' if ALLOW_NO_ADMIN_AUTH else 'enabled'}\n")
     if ADMIN_TOKEN:
         sys.stderr.write("  Admin Token: configured (hidden)\n")

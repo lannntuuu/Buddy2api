@@ -622,7 +622,7 @@ PR0 新增头白名单测试（**新测试**，不复用 `test_valid_headers_is_
 | Encode | 0.1.3 逆向 URL **带 `Encode=1`**；后来插件规格改为明文 | Wave 1 **按明文、不带 Encode=1** 去冒烟。0.1.8 抓包若仍要 Encode=1，更新本文后再写代码。**禁止**实现者自行「修回」Encode=1 |
 | COSY AES | **16 个 ASCII hex 字符**（`uuid.uuid4().hex[:16]`，`[0-9a-f]{16}`），`key = iv = utf-8 字节`。不是 `os.urandom(16)` | RSA PKCS1 v1.5 包该 16 字符；OAEP → 403 |
 | Auth 头 | `Bearer COSY.<b64(header JSON)>.<md5>`；签名 path 去 `/algo` 前缀与 query | PEM 从 **0.1.8** 官方 asar/二进制提取，不粘贴参考模量 |
-| 静态头 | 0.1.3 记录：`Cosy-Version=1.0.47`，clienttype 6，`User-Agent: node`，`Cosy-Scene=qwork` 等 | **抓包后冻结**；在此之前只作冒烟探针 |
+| 静态头 | 0.1.8 冻结：`Cosy-Version=1.1.18`，clienttype 6，`User-Agent: qoderwork/0.1.8`，`Cosy-Scene=qwork` | 未冻结不得出站 |
 | 模型 | `qwork-advanced` / `qwork-auto` / `qwork-lite` / `qmodel_latest` | 禁止 `x-model-key: glm-5.2` |
 | SSE | 外层 envelope + 内层 OpenAI chunk | 剥外层；单一 `[DONE]` |
 | 签到 | 无 | `checkin_supported=False` |
@@ -1146,7 +1146,7 @@ PR8  2.0.0 发布
 5. `signStr = f"{o}\n{cosyKey}\n{ts}\n{body}\n{path}"`，`path` = URL pathname 去 `/algo` 前缀、无 query。
 6. `Authorization: Bearer COSY.{o}.{md5_hex}`。
 7. RSA PEM：从本机 **0.1.8** 安装树提取（Windows 安装目录 / asar）。提取步骤写入 PR5 描述，PEM 进本仓库常量，不从参考 git 复制。
-8. 静态头与是否 Encode：冒烟矩阵记录后再赋值；代码里用命名常量 `COSY_VERSION_FROZEN`，未冻结则 adapter 拒绝出站。
+8. 静态头与是否 Encode：0.1.8-26081406 已冻结。`COSY_VERSION_FROZEN=True`，`Cosy-Version=1.1.18`（qoderclicn `l0A`），`Cosy-ClientType=6`，`Cosy-Business-Product=qoder_work`，`Cosy-Scene=qwork`，明文 chat **不带** `Encode=1`。RSA PEM 来自官方 asar `generateAuthToken`（1024-bit PKCS1 v1.5）。未冻结则 adapter 拒绝出站。
 
 ---
 

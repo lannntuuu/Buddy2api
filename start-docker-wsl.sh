@@ -28,27 +28,27 @@ if [ -z "$auth_dir" ] || [ ! -d "$auth_dir" ]; then
     auth_dir="$(find /mnt/c/Users -path '*/AppData/Local/CodeBuddyExtension/Data/Public/auth' -type d 2>/dev/null | head -n 1 || true)"
 fi
 
-if [ -z "$auth_dir" ] || [ ! -d "$auth_dir" ]; then
-    echo "  [提示] 未找到 Work Buddy auth 目录。"
-    echo "  请先确认 Windows 里的 Work Buddy 已登录，或指定路径后重试："
+compose_files=(-f docker-compose.yml)
+if [ -n "$auth_dir" ] && [ -d "$auth_dir" ]; then
+    export CB_HOST_AUTH_DIR="$auth_dir"
+    compose_files+=(-f docker-compose.windows.yml)
+    echo "  [auth] $auth_dir"
+    echo "  [挂载] $auth_dir -> /auth:ro"
+else
+    echo "  [提示] 未找到 Work Buddy auth 目录，将不挂载 Windows overlay。"
+    echo "  启动后可在管理页手动导入。指定路径："
     echo "  export CB_HOST_AUTH_DIR=/mnt/c/Users/你的用户名/AppData/Local/CodeBuddyExtension/Data/Public/auth"
-    echo "  ./start-docker-wsl.sh"
-    exit 1
 fi
-
-export CB_HOST_AUTH_DIR="$auth_dir"
 if [ -z "${CB_GATEWAY_ADMIN_TOKEN:-}" ]; then
     CB_GATEWAY_ADMIN_TOKEN="cb-admin-$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
     export CB_GATEWAY_ADMIN_TOKEN
     echo "  [安全] 已为本次会话生成随机管理 Token。"
 fi
 
-echo "  [auth] $auth_dir"
-echo "  [挂载] $auth_dir -> /auth:ro"
 echo "  [启动] http://127.0.0.1:8787"
 echo ""
 
-docker compose -f docker-compose.yml -f docker-compose.windows.yml up -d --build
+docker compose "${compose_files[@]}" up -d --build
 
 echo ""
 echo "  已启动。打开 http://127.0.0.1:8787 后，账号页点“重新检测”或“一键导入本机登录”。"

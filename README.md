@@ -2,9 +2,17 @@
 
 [English](README_EN.md) | 中文
 
-> 把本机已经登录的腾讯 Work Buddy / CodeBuddy 账号接成 OpenAI 兼容 API，方便在 OpenCode、OpenClaw、Cherry Studio、NextChat 等工具里使用。
+> 把本机已经登录的消费级 AI 客户端接成 OpenAI 兼容 API。默认通道是腾讯 Work Buddy / CodeBuddy；QClaw 与 QwenWork 可按通道开关启用。数据面绝不跨厂商 failover。
 
 多通道协议对照与许可证说明见 [THIRD_PARTY.md](THIRD_PARTY.md)。2.0 设计见 [docs/design/multi-channel-v2.md](docs/design/multi-channel-v2.md)。
+
+## 2.0 破坏性变更
+
+- 空仓从 `server_error` 改为 HTTP **503** `channel_unavailable`，且不会静默切到另一家厂商。
+- 启动默认 **不再自动导入** 本机登录文件。账号页先检测再导入，或设 `CB_GATEWAY_AUTO_IMPORT=1`。
+- 每把 API Key **必须绑定通道**（存量 Key 视为 `workbuddy`）。管理页用下拉框切换。
+- 未加前缀的外通道模型 id（例如 `qwork-advanced`）在 WorkBuddy-bound Key 上返回 **400** `unknown_model`，不会再打到腾讯 Copilot。
+- 默认只启用 `workbuddy`。可选：`CB_GATEWAY_PROVIDERS=workbuddy,qclaw` 或 `workbuddy,qclaw,qwenwork`。QwenWork / QClaw **不会**出现在默认 registry。QwenWork 已在官方 0.1.8-26081406 上对 `qwork-advanced` 冒烟 200，仍需显式打开 flag。
 
 ## 这是什么？
 
@@ -18,7 +26,8 @@ Work Buddy 2 API 是一个本地网关。它会扫描本机 Work Buddy / CodeBud
 
 - **OpenAI 兼容接口**：支持 `/v1/chat/completions`、`/v1/responses` 和 `/v1/models`
 - **流式输出**：支持 SSE 流式响应，也支持非流式聚合响应
-- **自动导入账号**：启动时扫描本机 Work Buddy / CodeBuddy 的 auth 文件
+- **本机登录导入**：账号页按通道检测并预览导入；启动默认不入库（`CB_GATEWAY_AUTO_IMPORT=1` 可打开）
+- **通道隔离路由**：一次请求绑定一个通道；通道内仍按优先级粘性，失败只在同通道切换
 - **多账号路由**：支持多个账号，优先级高的账号先用；同优先级会尽量固定当前账号，失败后自动切换
 - **账号状态诊断**：支持启用/禁用、权重、优先级、单账号测试和 token 刷新
 - **官方真实余额**：账号页可读取 Work Buddy 官方资源余额、30 天内即将到期额度和额度包明细
@@ -368,9 +377,14 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `CB_GATEWAY_NODE_VERSION` | 官方 SDK 指纹 Node 运行时版本，默认 `v22.13.1` |
 | `CB_GATEWAY_TOOL_STALL_RETRY` | 非流式请求遇到"工具停转"时自动用 `tool_choice=required` 重试一次，默认开启，设 `0` 关闭 |
 | `CB_GATEWAY_TOOL_STALL_FAIL_STREAM` | 流式请求遇到"工具停转"时把该回合标记为失败（让 DSH / OpenCode 等客户端自动重试），默认关闭 |
-| `CB_AUTH_DIR` | 指定 Work Buddy / CodeBuddy auth 文件目录 |
-| `CB_HOST_AUTH_DIR` | Docker 启动脚本使用的宿主机 auth 目录 |
+| `CB_AUTH_DIR` | 指定 Work Buddy / CodeBuddy auth 文件目录（只服务 WorkBuddy，禁止给其他通道回退） |
+| `CB_HOST_AUTH_DIR` | Docker 启动脚本使用的宿主机 WorkBuddy auth 目录。目录不存在时 helper 只跑基线 compose，不再 `exit 1` |
 | `CB_CONTAINER_AUTH_DIR` | Docker 容器内 auth 挂载目录，默认 `/auth` |
+| `CB_GATEWAY_PROVIDERS` | 启用通道，逗号分隔。默认 `workbuddy`。可选 `qclaw`、`qwenwork`。未知 id 启动失败。设置后 UI 通道列表只读 |
+| `CB_GATEWAY_AUTO_IMPORT` | 设为 `1` 时启动按通道导入（含 token 更新）。默认 `0` |
+| `CB_GATEWAY_CHECKIN_GAP_MS` | 一键领取的账号间隔，默认 `800` |
+| `CB_QCLAW_AUTH_DIR` | 仅 QClaw 凭据目录，禁止回退 `CB_AUTH_DIR` |
+| `CB_QWENWORK_AUTH_DIR` | 仅 QwenWork 凭据目录，默认 `%APPDATA%\QwenWorkCN` |
 
 ## 官方请求头指纹
 

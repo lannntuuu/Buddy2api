@@ -11,11 +11,13 @@ from providers.protocol import (
     Provider,
 )
 from providers.qclaw import PROVIDER as QCLAW_PROVIDER
+from providers.qwenwork import PROVIDER as QWENWORK_PROVIDER
 from providers.workbuddy import PROVIDER as WORKBUDDY_PROVIDER
 
 _LOADED: dict[str, Provider] = {
     "workbuddy": WORKBUDDY_PROVIDER,
     "qclaw": QCLAW_PROVIDER,
+    "qwenwork": QWENWORK_PROVIDER,
 }
 
 
