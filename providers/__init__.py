@@ -1,4 +1,4 @@
-"""Channel registry. Only WorkBuddy is loaded by default."""
+"""Channel registry. WorkBuddy, QClaw, and QwenWork are enabled by default."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ from providers.qclaw import PROVIDER as QCLAW_PROVIDER
 from providers.qwenwork import PROVIDER as QWENWORK_PROVIDER
 from providers.workbuddy import PROVIDER as WORKBUDDY_PROVIDER
 
+DEFAULT_PROVIDER_IDS: tuple[str, ...] = ("workbuddy", "qclaw", "qwenwork")
+
 _LOADED: dict[str, Provider] = {
     "workbuddy": WORKBUDDY_PROVIDER,
     "qclaw": QCLAW_PROVIDER,
@@ -22,12 +24,12 @@ _LOADED: dict[str, Provider] = {
 
 
 def _parse_enabled() -> list[str]:
-    raw = (os.environ.get("CB_GATEWAY_PROVIDERS") or "workbuddy").strip()
+    raw = (os.environ.get("CB_GATEWAY_PROVIDERS") or "").strip()
     if not raw:
-        return ["workbuddy"]
+        return list(DEFAULT_PROVIDER_IDS)
     parts = [item.strip() for item in raw.split(",") if item.strip()]
     if not parts:
-        return ["workbuddy"]
+        return list(DEFAULT_PROVIDER_IDS)
     unknown = [item for item in parts if item not in KNOWN_CHANNEL_SET]
     if unknown:
         raise RuntimeError(

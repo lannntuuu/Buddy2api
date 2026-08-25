@@ -51,4 +51,5 @@ echo ""
 docker compose "${compose_files[@]}" up -d --build
 
 echo ""
-echo "  已启动。打开 http://127.0.0.1:8787 后，账号页点“重新检测”或“一键导入本机登录”。"
+echo "  已启动。打开 http://127.0.0.1:8787，账号页先选通道再检测导入。"
+echo "  QClaw / 千问办公的 Windows 登录文件在 Linux 容器里解不开，这两家请用 python server.py。"

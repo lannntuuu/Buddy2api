@@ -1,4 +1,4 @@
-"""QClaw provider. Isolated aizone/jprx adapter; default registry does not enable it."""
+"""QClaw provider. Isolated aizone/jprx adapter."""
 
 from __future__ import annotations
 

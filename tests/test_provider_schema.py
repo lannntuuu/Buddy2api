@@ -18,6 +18,16 @@ def isolated_db(tmp_path, monkeypatch):
     credential_crypto.reset_cache()
 
 
+def test_default_registry_enables_wave1_channels(monkeypatch):
+    import providers
+
+    monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
+    assert providers.enabled_provider_ids() == ["workbuddy", "qclaw", "qwenwork"]
+    monkeypatch.setenv("CB_GATEWAY_PROVIDERS", "workbuddy")
+    assert providers.enabled_provider_ids() == ["workbuddy"]
+    assert providers.get_provider("qclaw") is None
+
+
 def test_accounts_and_keys_have_channel_columns(isolated_db):
     account_id = db.add_account({"name": "wb", "uid": "u1", "access_token": "a"})
     account = db.get_account(account_id)

@@ -40,10 +40,10 @@ def test_qclaw_quota_is_credit_not_token_cap(qclaw_enabled):
     assert snapshot.unsupported is True
 
 
-def test_qclaw_not_in_default_registry(monkeypatch):
+def test_qclaw_in_default_registry(monkeypatch):
     monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
-    assert providers.enabled_provider_ids() == ["workbuddy"]
-    assert providers.get_provider("qclaw") is None
+    assert providers.enabled_provider_ids() == ["workbuddy", "qclaw", "qwenwork"]
+    assert providers.get_provider("qclaw") is not None
     assert "qclaw" in providers._LOADED
 
 
@@ -112,7 +112,7 @@ def test_bind_qclaw_when_enabled(qclaw_enabled):
 
 
 def test_bind_qclaw_disabled_is_unknown_channel(monkeypatch):
-    monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
+    monkeypatch.setenv("CB_GATEWAY_PROVIDERS", "workbuddy")
     with pytest.raises(UnknownChannel):
         router.bind({"model": "qclaw/default"}, {"default_channel": "qclaw"})
 

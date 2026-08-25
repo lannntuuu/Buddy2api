@@ -388,7 +388,7 @@ createApp({
   template:`
   <div class="layout">
     <header class="topbar">
-      <div class="brand-block"><div class="brand-symbol">B2</div><div class="brand-copy"><div class="brand-title">Buddy 2 API</div><div class="brand-meta">Local model gateway · v2.0.0</div></div></div>
+      <div class="brand-block"><div class="brand-symbol">B2</div><div class="brand-copy"><div class="brand-title">Buddy 2 API</div><div class="brand-meta">Local model gateway · v2.0.1</div></div></div>
       <nav class="topnav"><div v-for="n in nav" :key="n.k" class="nav-item" :class="{on:page===n.k}" @click="go(n.k)" v-html="n.i+'<span>'+n.l+'</span>'"></div></nav>
       <div class="top-actions">
         <button class="refresh-cta" @click="hardRefresh"><span v-html="I.refresh"></span><span>刷新</span></button>
@@ -601,7 +601,7 @@ createApp({
   </template>
 </div>`
 }).component('accs',{props:['token','toast'],setup(p){
-  const l=ref([]),ld=ref(true),sa=ref(false),ai=ref(''),nm=ref(''),disc=ref(null),dl=ref(false),scanning=ref(false),adding=ref(false),authPath=ref(''),test=ref(null),claim=ref(null),pkg=ref(null),tl=ref(0),claimingAll=ref(false),officialRefreshing=ref(false),checkins=ref({}),checkinSummary=ref(null),checkinLoading=ref(false),busy=ref({}),discChannel=ref('workbuddy'),channels=ref([{id:'workbuddy',display_name:'WorkBuddy'}]);
+  const l=ref([]),ld=ref(true),sa=ref(false),ai=ref(''),nm=ref(''),disc=ref(null),dl=ref(false),scanning=ref(false),adding=ref(false),authPath=ref(''),test=ref(null),claim=ref(null),pkg=ref(null),tl=ref(0),claimingAll=ref(false),officialRefreshing=ref(false),checkins=ref({}),checkinSummary=ref(null),checkinLoading=ref(false),busy=ref({}),discChannel=ref('workbuddy'),channels=ref([{id:'workbuddy',display_name:'WorkBuddy'},{id:'qclaw',display_name:'QClaw'},{id:'qwenwork',display_name:'QwenWork / 千问办公'}]);
   const filters=reactive({q:'',status:'all',claim:'all',sort:'priority'});
   function hydrate(a){return {...a,_weight:a.weight||1,_priority:a.priority||0,_creditSnapshot:a.credit_snapshot||a.credit_limit||0,_baseWeight:a.weight||1,_basePriority:a.priority||0,_baseCreditSnapshot:a.credit_snapshot||a.credit_limit||0}}
   function dirty(a){return Number(a._weight||1)!==Number(a._baseWeight||1)||Number(a._priority||0)!==Number(a._basePriority||0)||Number(a._creditSnapshot||0)!==Number(a._baseCreditSnapshot||0)}
@@ -678,7 +678,7 @@ createApp({
         <div>
           <div class="detect-title" v-if="disc">检测到 {{disc.file_count}} 个登录文件，其中 {{disc.valid_count}} 个有效</div>
           <div class="detect-title" v-else>正在检测本机登录文件</div>
-          <div class="hint">先选通道再检测导入。启动默认不再自动入库。已导入账号默认只更新 token，不改权重/优先级。</div>
+          <div class="hint">三个通道默认都能选。先选通道再检测导入；没登录的通道检测为空。启动默认不再自动入库。已导入账号默认只更新 token，不改权重/优先级。</div>
         </div>
         <div class="detect-actions">
           <select class="selectctl" v-model="discChannel" @change="discover(authPath)"><option v-for="c in channels" :key="c.id" :value="c.id">{{c.display_name||c.id}}</option></select>
@@ -686,7 +686,8 @@ createApp({
           <button class="btn s" @click="discover('')" :disabled="dl"><span v-html="I.refresh"></span>重新检测</button>
         </div>
       </div>
-      <div class="callout" v-if="disc?.runtime?.container && !disc.runtime.auth_mount_exists" style="margin-bottom:12px">当前运行在 Docker 容器内，容器不能直接扫描 Windows 的 C 盘。Windows Docker 推荐用 <span class="mono">.\start-docker-win.ps1</span> 启动，它会自动把默认登录目录只读挂载到 <span class="mono">/auth</span>。</div>
+      <div class="callout" v-if="disc?.runtime?.host_auth_limited" style="margin-bottom:12px">当前是 Linux Docker。QClaw / 千问办公的 Windows 登录文件在容器里解不开。这两家请在本机用 <span class="mono">python server.py</span> 启动后再检测导入。WorkBuddy 可以继续用这个容器。</div>
+      <div class="callout" v-else-if="disc?.runtime?.container && !disc.runtime.auth_mount_exists" style="margin-bottom:12px">当前运行在 Docker 容器内，容器不能直接扫描 Windows 的 C 盘。Windows Docker 推荐用 <span class="mono">.\start-docker-win.ps1</span> 启动，它会自动把默认登录目录只读挂载到 <span class="mono">/auth</span>。</div>
       <div v-if="dl" class="load" style="padding:18px"><div class="spin"></div></div>
       <template v-else>
         <div class="detect-grid">
@@ -733,7 +734,7 @@ createApp({
   <div class="ov" v-if="sa" @click.self="sa=false"><div class="modal"><div class="modal-h"><h3>高级手动添加</h3><button class="x" @click="sa=false">&times;</button></div><div class="modal-b"><div class="field"><label>名称</label><input v-model="nm" placeholder="可选"/></div><div class="field"><label>Auth JSON</label><textarea v-model="ai" placeholder="粘贴 .info 文件内容"></textarea><div class="hint">只有自动检测失败时才需要手动粘贴完整 JSON。</div></div></div><div class="modal-f"><button class="btn" @click="sa=false" :disabled="adding">取消</button><button class="btn pri" @click="add" :disabled="adding">{{adding?'添加中':'添加'}}</button></div></div></div>
 </div>`
 }).component('keys',{props:['token','toast'],setup(p){
-  const l=ref([]),ld=ref(true),sa=ref(false),f=reactive({name:'',models:'',limit:null,preset:'custom',channel:'workbuddy'}),res=ref(''),saving=ref(false),copied=ref(false),busy=ref({}),shown=ref({}),codexResult=ref(null),codexBusy=ref(false),channels=ref([{id:'workbuddy',display_name:'WorkBuddy'}]);
+  const l=ref([]),ld=ref(true),sa=ref(false),f=reactive({name:'',models:'',limit:null,preset:'custom',channel:'workbuddy'}),res=ref(''),saving=ref(false),copied=ref(false),busy=ref({}),shown=ref({}),codexResult=ref(null),codexBusy=ref(false),channels=ref([{id:'workbuddy',display_name:'WorkBuddy'},{id:'qclaw',display_name:'QClaw'},{id:'qwenwork',display_name:'QwenWork / 千问办公'}]);
   const clientTypes=[
     {k:'custom',name:'默认',icon:'⚙'},
     {k:'codex',name:'Codex',icon:'◉'},
@@ -804,7 +805,7 @@ createApp({
         </div>
         <div class="hint" style="margin-top:4px">选择目标客户端，创建后自动展示对应配置。选"默认"仅创建 Key（无任何改写，原样透传）。Codex 类型会对请求做敏感词清洗；其余类型仅展示对应客户端的接入配置模板，行为与"默认"完全一致。</div>
       </div>
-      <div class="field"><label>通道</label><select class="selectctl" v-model="f.channel"><option v-for="c in channels" :key="c.id" :value="c.id">{{c.display_name||c.id}}</option></select><div class="hint">这把 Key 只会打到所选通道。可在列表里随时切换；进行中的请求不会改绑。</div></div>
+      <div class="field"><label>通道</label><select class="selectctl" v-model="f.channel"><option v-for="c in channels" :key="c.id" :value="c.id">{{c.display_name||c.id}}</option></select><div class="hint">默认三个通道都能选。这把 Key 只会打到所选通道，不会静默切到另一家。可在列表里随时切换；进行中的请求不会改绑。</div></div>
       <div class="field"><label>名称</label><input v-model="f.name" :placeholder="presets[f.preset].autoName||'Key 名称'"/></div>
       <div class="field"><label>允许模型</label><input v-model="f.models" placeholder="auto,glm-5.2（留空=全部）"/></div>
       <div class="field"><label>每日请求限额</label><input v-model="f.limit" type="number" placeholder="不限"/></div>

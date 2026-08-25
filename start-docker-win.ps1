@@ -46,4 +46,5 @@ Write-Host ""
 docker compose @composeFiles up -d --build
 
 Write-Host ""
-Write-Host "  Started. Open http://127.0.0.1:8787, then rescan/import accounts on the Accounts page."
+Write-Host "  Started. Open http://127.0.0.1:8787, pick a channel on Accounts, then detect/import."
+Write-Host "  QClaw / QwenWork Windows logins cannot be read inside Linux Docker; use python server.py for those."

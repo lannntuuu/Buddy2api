@@ -2,35 +2,35 @@
 
 [English](README_EN.md) | [中文](README.md)
 
-> Local consumer AI clients → one OpenAI-compatible API for Codex, OpenCode, Cherry Studio, NextChat, and similar agents. Work Buddy / CodeBuddy is on by default; turn on QClaw or QwenWork when you need them. Each request stays on one channel.
+> Local consumer AI clients → one OpenAI-compatible API for Codex, OpenCode, Cherry Studio, NextChat, and similar agents. Work Buddy / CodeBuddy, QClaw, and QwenWork are on by default; pick one in the UI dropdown. Each request stays on one channel.
 
-Release **2.0.0**. Local use only. Do not expose this on the public internet, and do not share credentials, API keys, or the database.
+Release **2.0.1**. Local use only. Do not expose this on the public internet, and do not share credentials, API keys, or the database.
 
 ## What is this?
 
 Buddy2api listens on `http://127.0.0.1:8787/v1`. You stay signed into the official apps; this gateway imports those sessions and forwards chat. Typical clients use Chat Completions. Codex uses `/v1/responses`; create the key as type Codex in the UI to enable Codex prompt sanitization.
 
-Default channel is WorkBuddy only:
+All three channels are on by default. A channel with no local login shows empty on Accounts; nothing is imported until you click Import.
 
 ```powershell
-$env:CB_GATEWAY_PROVIDERS="workbuddy,qclaw,qwenwork"
 python server.py
 ```
 
 | Channel | Default | Where logins live |
 |---|---|---|
 | WorkBuddy / CodeBuddy | on | `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth` |
-| QClaw | off | `%APPDATA%\QClaw` |
-| QwenWork | off | `%APPDATA%\QwenWorkCN` |
+| QClaw | on | `%APPDATA%\QClaw` |
+| QwenWork | on | `%APPDATA%\QwenWorkCN` |
+
+Narrow with `CB_GATEWAY_PROVIDERS=workbuddy` if you only want one.
 
 ## Before you start
 
-1. **An empty Accounts page after startup is expected.** 2.0 does not import on boot. Pick a channel → Detect → Import.
+1. **An empty Accounts page after startup is expected.** 2.0 does not import on boot. Pick a channel → Detect → Import. All three channels are in the dropdown.
 2. **One API key is one channel.** Create the key with a channel selected. A WorkBuddy key uses `auto` / `glm-5.2`; a QwenWork key uses `auto` or `qwork-advanced`. Mismatched model/key returns 400 or 403 — there is no cross-vendor failover.
-3. **HTTP 503 `channel_unavailable`** usually means that channel has no imported account, or it was not listed in `CB_GATEWAY_PROVIDERS`.
-4. **PowerShell `$env:...` lasts only for that window.** Set it again after you close the terminal, including before `start.bat`.
-5. **Run QClaw / QwenWork with `python server.py` on Windows.** A Linux Docker container cannot decrypt those DPAPI files.
-6. If the chat client is itself in Docker, Base URL is `http://host.docker.internal:8787/v1`.
+3. **HTTP 503 `channel_unavailable`** means that channel has no imported account.
+4. **Run QClaw / QwenWork with `python server.py` on Windows.** A Linux Docker container cannot decrypt those DPAPI files; the UI says so. WorkBuddy can stay on Docker.
+5. If the chat client is itself in Docker, Base URL is `http://host.docker.internal:8787/v1`.
 
 ## Install (beginner path)
 
@@ -51,7 +51,7 @@ python server.py
 
 3. Open http://127.0.0.1:8787 → Accounts → Detect → Import → Test → API Keys (select a channel; pick Codex if the client is Codex) → point your client at `http://127.0.0.1:8787/v1`.
 
-Windows script: `.\start.bat`. Docker helper: `.\start-docker-win.ps1` (WorkBuddy mount only; use native Python for QClaw/QwenWork).
+Windows script: `.\start.bat`. Docker helper: `.\start-docker-win.ps1` (WorkBuddy mount; use native Python for QClaw/QwenWork).
 
 Later starts: `conda activate buddy2api` then `python server.py` in the project directory.
 
@@ -88,7 +88,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 ## Environment
 
-`CB_GATEWAY_PROVIDERS` (default `workbuddy`), `CB_GATEWAY_AUTO_IMPORT` (default `0`), `CB_AUTH_DIR` / `CB_QCLAW_AUTH_DIR` / `CB_QWENWORK_AUTH_DIR`, `CB_GATEWAY_ADMIN_TOKEN`, `CB_GATEWAY_MASTER_KEY`.
+`CB_GATEWAY_PROVIDERS` (default `workbuddy,qclaw,qwenwork`), `CB_GATEWAY_AUTO_IMPORT` (default `0`), `CB_AUTH_DIR` / `CB_QCLAW_AUTH_DIR` / `CB_QWENWORK_AUTH_DIR`, `CB_GATEWAY_ADMIN_TOKEN`, `CB_GATEWAY_MASTER_KEY`.
 
 Keep `--host 127.0.0.1`. Do not share the database, auth folders, or key screenshots.
 
