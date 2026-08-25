@@ -30,6 +30,9 @@ import database as db
 import auth_manager
 import proxy
 import responses
+import providers
+import router
+from providers.protocol import KNOWN_CHANNEL_SET
 from version import VERSION
 
 
@@ -177,15 +180,28 @@ def _reserve_client_quota(key_info: dict | None):
         )
 
 
-def _check_model_access(api_key_info: dict | None, payload: dict):
+def _validate_key_channel(channel: str) -> str:
+    value = str(channel or "").strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="default_channel is required")
+    if value not in KNOWN_CHANNEL_SET:
+        raise HTTPException(status_code=400, detail=f"Unknown channel '{value}'")
+    if not providers.is_channel_enabled(value) or providers.get_provider(value) is None:
+        raise HTTPException(status_code=400, detail=f"Channel '{value}' is not enabled")
+    return value
+
+
+def _check_model_access(api_key_info: dict | None, original: str, inner: str, channel: str):
     if not api_key_info or not api_key_info.get("allowed_models"):
         return
-    raw_model = payload.get("model", "auto")
-    resolved_model = proxy.resolve_model_alias(raw_model)
-    if raw_model not in api_key_info["allowed_models"] and resolved_model not in api_key_info["allowed_models"]:
+    provider = providers.get_provider(channel)
+    translated = provider.translate_model(inner) if provider else inner
+    allowed = set(api_key_info["allowed_models"])
+    candidates = {original, inner, translated, f"{channel}/{inner}"}
+    if allowed.isdisjoint(candidates):
         raise HTTPException(
             status_code=403,
-            detail={"error": {"message": f"Model '{raw_model}' not allowed for this API key", "type": "invalid_request_error"}},
+            detail={"error": {"message": f"Model '{original}' not allowed for this API key", "type": "invalid_request_error"}},
         )
 
 
@@ -231,12 +247,21 @@ async def _gather_limited(accounts: list[dict], operation, limit: int = 4) -> li
 async def health():
     accounts = db.list_accounts()
     keys = db.list_api_keys()
+    channels = {}
+    for channel in providers.enabled_provider_ids():
+        rows = db.list_accounts(provider=channel)
+        channels[channel] = {
+            "accounts": len(rows),
+            "active": sum(1 for account in rows if account.get("status") == "active"),
+            "loaded": providers.get_provider(channel) is not None,
+        }
     return {
         "status": "ok",
         "version": VERSION,
         "accounts": len(accounts),
         "active_accounts": sum(1 for account in accounts if account.get("status") == "active"),
         "active_keys": sum(1 for key in keys if key.get("status") == "active"),
+        "channels": channels,
     }
 
 
@@ -248,14 +273,41 @@ async def list_models(
     await run_in_threadpool(
         lambda: _check_client_auth(authorization, x_api_key, consume_quota=False)
     )
-    models = db.get_setting("models", proxy.DEFAULT_MODELS)
-    return {
-        "object": "list",
-        "data": [
-            {"id": m["id"], "object": "model", "created": 0, "owned_by": "buddy2api"}
-            for m in models
-        ],
-    }
+    data = []
+    workbuddy = providers.get_provider("workbuddy")
+    wb_models = workbuddy.list_models() if workbuddy else db.get_setting("models", proxy.DEFAULT_MODELS)
+    for item in wb_models:
+        mid = item["id"] if isinstance(item, dict) else str(item)
+        data.append({
+            "id": mid,
+            "object": "model",
+            "created": 0,
+            "owned_by": "buddy2api",
+            "channel": "workbuddy",
+        })
+        data.append({
+            "id": f"workbuddy/{mid}",
+            "object": "model",
+            "created": 0,
+            "owned_by": "buddy2api",
+            "channel": "workbuddy",
+        })
+    for channel in providers.enabled_provider_ids():
+        if channel == "workbuddy":
+            continue
+        provider = providers.get_provider(channel)
+        if provider is None:
+            continue
+        for item in provider.list_models():
+            mid = item["id"] if isinstance(item, dict) else str(item)
+            data.append({
+                "id": f"{channel}/{mid}",
+                "object": "model",
+                "created": 0,
+                "owned_by": "buddy2api",
+                "channel": channel,
+            })
+    return {"object": "list", "data": data}
 
 
 @app.post("/v1/chat/completions")
@@ -278,10 +330,12 @@ async def chat_completions(
     if api_key_info and api_key_info.get("client_type") == "codex":
         payload = responses.apply_codex_sanitize(payload)
 
-    _check_model_access(api_key_info, payload)
+    bound = router.bind_http(payload, api_key_info)
+    _check_model_access(api_key_info, bound.original, bound.inner, bound.channel)
+    await router.ensure_usable(bound.channel)
     await run_in_threadpool(_reserve_client_quota, api_key_info)
 
-    result = await proxy.proxy_chat_completions(payload, api_key_info)
+    result = await router.chat_after_bind(bound, payload, api_key_info)
 
     if result[0] == "error":
         status, detail = result[1]
@@ -314,11 +368,18 @@ async def resp_responses(
         )
     if "model" in payload and not isinstance(payload["model"], str):
         raise HTTPException(status_code=400, detail={"error": {"message": "model must be a string", "type": "invalid_request_error"}})
-    _check_model_access(api_key_info, payload)
+    bound = router.bind_http(payload, api_key_info)
+    _check_model_access(api_key_info, bound.original, bound.inner, bound.channel)
+    await router.ensure_usable(bound.channel)
     await run_in_threadpool(_reserve_client_quota, api_key_info)
+    dispatch = router.dispatch_payload(payload, bound.inner)
+    info = dict(api_key_info or {})
+    info["_log_model"] = bound.original
+    info["_bind_channel"] = bound.channel
 
     try:
-        result = await responses.proxy_responses(payload, api_key_info)
+        result = await responses.proxy_responses(dispatch, info)
+        result = await router.echo_original(result, bound.original)
     except Exception as e:
         import traceback
         sys.stderr.write(f"[responses] ERROR: {e}\n{traceback.format_exc()}\n")
@@ -341,6 +402,24 @@ async def resp_responses(
 # ============================================================
 # Admin API
 # ============================================================
+
+@app.get("/admin/channels")
+async def admin_channels(authorization: str | None = Header(default=None)):
+    _check_admin(authorization)
+    env_set = bool((os.environ.get("CB_GATEWAY_PROVIDERS") or "").strip())
+    items = []
+    for channel in providers.enabled_provider_ids():
+        provider = providers.get_provider(channel)
+        items.append({
+            "id": channel,
+            "display_name": getattr(provider, "display_name", channel),
+            "enabled": True,
+            "loaded": provider is not None,
+            "checkin_supported": bool(getattr(provider, "checkin_supported", False)),
+            "env_locked": env_set,
+        })
+    return {"channels": items, "known": list(KNOWN_CHANNEL_SET)}
+
 
 @app.get("/admin/stats")
 async def admin_stats(authorization: str | None = Header(default=None)):
@@ -662,10 +741,13 @@ async def admin_create_key(
     client_type = data.get("client_type", "custom")
     if client_type not in {"custom", "codex"}:
         raise HTTPException(status_code=400, detail="Invalid client_type")
+    default_channel = _validate_key_channel(data.get("default_channel", "workbuddy"))
     # 生成 sk- 前缀的 key
     key = f"sk-cb-{secrets.token_urlsafe(32)}"
-    kid = db.add_api_key(key, name, allowed, daily_limit, client_type)
-    return {"id": kid, "key": key, "status": "ok"}
+    kid = db.add_api_key(
+        key, name, allowed, daily_limit, client_type, default_channel=default_channel
+    )
+    return {"id": kid, "key": key, "status": "ok", "default_channel": default_channel}
 
 
 @app.put("/admin/api-keys/{kid}")
@@ -685,6 +767,8 @@ async def admin_update_key(
         raise HTTPException(status_code=400, detail="Invalid API key status")
     if "client_type" in data and data["client_type"] not in {"custom", "codex"}:
         raise HTTPException(status_code=400, detail="Invalid client_type")
+    if "default_channel" in data:
+        data["default_channel"] = _validate_key_channel(data.get("default_channel"))
     if "allowed_models" in data and (
         data["allowed_models"] is not None
         and (not isinstance(data["allowed_models"], list) or not all(isinstance(model, str) for model in data["allowed_models"]))

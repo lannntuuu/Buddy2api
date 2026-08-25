@@ -4,6 +4,8 @@
 
 > 把本机已经登录的腾讯 Work Buddy / CodeBuddy 账号接成 OpenAI 兼容 API，方便在 OpenCode、OpenClaw、Cherry Studio、NextChat 等工具里使用。
 
+多通道协议对照与许可证说明见 [THIRD_PARTY.md](THIRD_PARTY.md)。2.0 设计见 [docs/design/multi-channel-v2.md](docs/design/multi-channel-v2.md)。
+
 ## 这是什么？
 
 Work Buddy 2 API 是一个本地网关。它会扫描本机 Work Buddy / CodeBuddy 桌面端或插件保存的登录凭据，把请求转发到腾讯的模型接口，并在本机提供标准 OpenAI 兼容接口。
