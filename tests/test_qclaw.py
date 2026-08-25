@@ -9,7 +9,7 @@ import providers
 import router
 from providers.protocol import KeyChannelMismatch, UnknownChannel, UnknownModel
 from providers.qclaw.constants import JPRX_SIGNATURE_KEY, STATIC_MODELS
-from providers.qclaw.sign import jprx_ctx
+from providers.qclaw.sign import aizone_headers, jprx_ctx
 from providers.qclaw.store import parse_credentials, qclaw_auth_dirs
 
 
@@ -145,6 +145,13 @@ def test_upsert_qclaw_account_updates_token(isolated_db):
     assert row["refresh_token"] == "jwt-new"
     wb = db.add_account({"name": "wb", "uid": "u1", "access_token": "wb", "provider": "workbuddy"})
     assert wb != first["id"]
+
+
+def test_aizone_headers_require_conversation_request_id():
+    headers = aizone_headers(api_key="sk-test", guid="g", account="1")
+    assert headers["Authorization"] == "Bearer sk-test"
+    assert headers["X-Conversation-Request-ID"]
+    assert "x-signature" not in {k.lower() for k in headers}
 
 
 def test_static_models_include_pool_glm():

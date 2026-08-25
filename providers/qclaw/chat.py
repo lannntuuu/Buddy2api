@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import time
-import uuid
 from typing import AsyncGenerator
 
 import httpx
@@ -12,7 +11,6 @@ import httpx
 import auth_manager
 import database as db
 from providers.qclaw.constants import AIZONE_BASE, ALIASES, CHANNEL_ID, RETRYABLE_STATUS
-from providers.qclaw.jprx import JprxError, time_sync
 from providers.qclaw.sign import aizone_headers
 
 
@@ -64,21 +62,9 @@ def _build_body(payload: dict) -> tuple[dict, str]:
     return body, raw
 
 
-async def _headers_for(account: dict, raw_body: str) -> dict[str, str]:
+def _headers_for(account: dict) -> dict[str, str]:
     guid, user_id, jwt, api_key = _ids(account)
-    try:
-        server_ts = await time_sync(account)
-    except JprxError:
-        server_ts = str(int(time.time()))
-    return aizone_headers(
-        api_key=api_key,
-        jwt=jwt,
-        guid=guid,
-        account=user_id,
-        body=raw_body,
-        server_ts=server_ts,
-        trace_id=str(uuid.uuid4()),
-    )
+    return aizone_headers(api_key=api_key, jwt=jwt, guid=guid, account=user_id)
 
 
 async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
@@ -101,7 +87,7 @@ async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
         tried.add(account["id"])
         t0 = time.time()
         try:
-            headers = await _headers_for(account, raw)
+            headers = _headers_for(account)
             async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.post(
                     f"{AIZONE_BASE}/chat/completions",
@@ -161,7 +147,7 @@ async def _stream(body: dict, raw: str, api_key_info, model_name: str) -> AsyncG
         t0 = time.time()
         output_started = False
         try:
-            headers = await _headers_for(account, raw)
+            headers = _headers_for(account)
             async with httpx.AsyncClient(timeout=None) as client:
                 async with client.stream(
                     "POST",
@@ -208,7 +194,7 @@ async def test_chat(account: dict, model: str = "default", prompt: str = "ping")
     t0 = time.time()
     body, raw = _build_body(payload)
     try:
-        headers = await _headers_for(account, raw)
+        headers = _headers_for(account)
         async with httpx.AsyncClient(timeout=45.0) as client:
             response = await client.post(
                 f"{AIZONE_BASE}/chat/completions",
