@@ -36,7 +36,7 @@ _lock = threading.Lock()
 _token_locks: dict[int, asyncio.Lock] = {}
 _token_locks_guard = threading.Lock()
 _route_lock = threading.Lock()
-_sticky_account_id: Optional[int] = None
+_sticky_account_id: dict[str, int] = {}
 _failure_lock = threading.Lock()
 _account_failures: dict[int, tuple[int, float]] = {}
 
@@ -328,7 +328,21 @@ def auto_scan_and_import(auth_dir: Optional[str] = None) -> dict:
             continue
         existing = existing_by_uid.get(parsed.get("uid"))
         if existing:
-            db.update_account(existing["id"], parsed)
+            patch = {
+                key: parsed[key]
+                for key in (
+                    "access_token",
+                    "refresh_token",
+                    "expires_at",
+                    "refresh_expires_at",
+                    "session_state",
+                    "nickname",
+                    "name",
+                    "phone",
+                )
+                if key in parsed
+            }
+            db.update_account(existing["id"], patch)
             result["updated"] += 1
         else:
             aid = db.add_account(parsed)
@@ -908,17 +922,15 @@ def _route_sort_key(account: dict):
     )
 
 
-def _set_sticky_account(aid: int):
-    global _sticky_account_id
+def _set_sticky_account(aid: int, provider: str = "workbuddy"):
     with _route_lock:
-        _sticky_account_id = aid
+        _sticky_account_id[provider] = aid
 
 
-def pick_account(exclude_ids: set[int] = None) -> Optional[dict]:
+def pick_account(exclude_ids: set[int] = None, provider: str = "workbuddy") -> Optional[dict]:
     """选择一个可用账号。优先级越高越先用，同优先级尽量粘住当前账号。"""
-    global _sticky_account_id
     exclude_ids = exclude_ids or set()
-    accounts = db.get_active_accounts()
+    accounts = db.get_active_accounts(provider)
     candidates = [
         a for a in accounts
         if a["id"] not in exclude_ids and not account_is_cooling_down(a["id"])
@@ -929,25 +941,31 @@ def pick_account(exclude_ids: set[int] = None) -> Optional[dict]:
     highest_priority = max(_route_priority(a) for a in candidates)
     top_candidates = [a for a in candidates if _route_priority(a) == highest_priority]
     with _route_lock:
-        if _sticky_account_id is not None:
-            sticky = next((a for a in top_candidates if a["id"] == _sticky_account_id), None)
+        sticky_id = _sticky_account_id.get(provider)
+        if sticky_id is not None:
+            sticky = next((a for a in top_candidates if a["id"] == sticky_id), None)
             if sticky:
                 return sticky
 
         chosen = sorted(top_candidates, key=_route_sort_key)[0]
-        _sticky_account_id = chosen["id"]
+        _sticky_account_id[provider] = chosen["id"]
         return chosen
 
 
-async def pick_account_with_fallback(exclude_ids: set[int] = None) -> Optional[dict]:
-    """选账号，如果全部过期则尝试刷新过期账号。"""
-    account = pick_account(exclude_ids)
+async def pick_account_with_fallback(
+    exclude_ids: set[int] = None, provider: str = "workbuddy"
+) -> Optional[dict]:
+    """选账号，如果全部过期则尝试刷新过期账号。只刷新同一 provider。"""
+    account = pick_account(exclude_ids, provider=provider)
     if account:
         return account
 
-    # 尝试过期账号，但不碰 inactive/disabled 账号。
     expired_accounts = sorted(
-        (account for account in db.list_accounts() if account.get("status") == "expired"),
+        (
+            account
+            for account in db.list_accounts(provider=provider)
+            if account.get("status") == "expired"
+        ),
         key=_route_sort_key,
     )
     for a in expired_accounts:
@@ -956,7 +974,7 @@ async def pick_account_with_fallback(exclude_ids: set[int] = None) -> Optional[d
         if await refresh_token(a):
             fresh = db.get_account(a["id"])
             if fresh:
-                _set_sticky_account(fresh["id"])
+                _set_sticky_account(fresh["id"], provider)
             return fresh
     return None
 

@@ -636,6 +636,9 @@ def _log_request(api_key_info, account, model_name, stream,
         "api_key_name": api_key_info["name"] if api_key_info else None,
         "account_id": account["id"] if account else None,
         "account_name": account.get("name") if account else None,
+        "provider": (account.get("provider") if account else None)
+        or (api_key_info.get("_bind_channel") if api_key_info else None)
+        or "workbuddy",
         "model": model_name,
         "stream": 1 if stream else 0,
         "prompt_tokens": prompt_t,
@@ -657,6 +660,7 @@ def _log_request(api_key_info, account, model_name, stream,
 async def proxy_chat_completions(
     payload: dict,
     api_key_info: Optional[dict] = None,
+    log_model: Optional[str] = None,
 ) -> tuple:
     """
     主代理函数。
@@ -668,7 +672,9 @@ async def proxy_chat_completions(
     """
     client_wants_stream = bool(payload.get("stream"))
     body = build_backend_body(payload)
-    model_name = payload.get("model", "auto")
+    if log_model is None and isinstance(api_key_info, dict):
+        log_model = api_key_info.get("_log_model")
+    model_name = log_model if log_model is not None else payload.get("model", "auto")
 
     if client_wants_stream:
         return (

@@ -1,23 +1,13 @@
 """
-fingerprint.py — Work Buddy / CodeBuddy 官方客户端请求头指纹模拟
+fingerprint.py — Work Buddy / CodeBuddy outbound request headers.
 
-综合 fingerprint-refs 中四份逆向参考实现的共识字段构建，让出站请求与
-官方 CLI 客户端（CLI/x.y CodeBuddy/x.y）在请求头层面保持一致：
+Env overrides:
 
-  - workbuddy2api_sliv（Go）：common / chat / billing / refresh 头规范、
-    Origin/Referer 地域规则、X-No-* 缺省字段约定
-  - workbuddy2api_wug（TS）：X-IDE-Type/Name/Version、x-codebuddy-request、X-Product
-  - workbuddy2api_orange（TS）：X-B3-* / b3 分布式追踪头、X-Agent-Intent、
-    X-Conversation-ID / X-Conversation-Request-ID / X-Conversation-Message-ID
-  - workbuddy2api_xue（Python）：x-stainless-* SDK 指纹头
-
-可用环境变量覆盖（默认值均为逆向捕获到的官方值）：
-
-  CB_GATEWAY_USER_AGENT                 完整 User-Agent，默认 CLI/<v> CodeBuddy/<v>
-  CB_GATEWAY_IDE_VERSION                CLI 版本号，默认 2.109.2
-  CB_GATEWAY_STAINLESS_OS               上报的操作系统，默认按当前平台推断
-  CB_GATEWAY_STAINLESS_PACKAGE_VERSION  x-stainless-package-version，默认 5.10.1
-  CB_GATEWAY_NODE_VERSION               x-stainless-runtime-version，默认 v22.13.1
+  CB_GATEWAY_USER_AGENT                 full User-Agent
+  CB_GATEWAY_IDE_VERSION                CLI version, default 2.109.2
+  CB_GATEWAY_STAINLESS_OS               OS string, inferred from the host by default
+  CB_GATEWAY_STAINLESS_PACKAGE_VERSION  default 5.10.1
+  CB_GATEWAY_NODE_VERSION               default v22.13.1
 """
 
 import os

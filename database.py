@@ -83,6 +83,16 @@ def _account_dict(row: sqlite3.Row) -> dict:
     for field in _CREDENTIAL_FIELDS:
         if field in account:
             account[field] = credential_crypto.decrypt_secret(account.get(field), DB_PATH)
+    extra = account.get("extra")
+    if isinstance(extra, str) and extra:
+        try:
+            account["extra"] = json.loads(extra)
+        except (json.JSONDecodeError, TypeError):
+            account["extra"] = {}
+    elif extra is None:
+        account["extra"] = {}
+    if not account.get("provider"):
+        account["provider"] = "workbuddy"
     return account
 
 
@@ -183,6 +193,7 @@ def init_db():
         """)
         _migrate_accounts(conn)
         _migrate_api_keys(conn)
+        _migrate_logs_provider(conn)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS api_key_daily_usage (
                 api_key_id    INTEGER NOT NULL,
@@ -203,6 +214,25 @@ def init_db():
 
 def _migrate_accounts(conn: sqlite3.Connection):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()}
+    if "provider" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN provider TEXT NOT NULL DEFAULT 'workbuddy'")
+    if "extra" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN extra TEXT")
+    conn.execute("UPDATE accounts SET provider='workbuddy' WHERE provider IS NULL OR provider=''")
+    _dedupe_accounts_provider_uid(conn)
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_provider_uid
+            ON accounts(provider, uid)
+            WHERE uid IS NOT NULL AND uid != ''
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_accounts_provider_status
+            ON accounts(provider, status, priority, id)
+        """
+    )
     if "weight" not in cols:
         conn.execute("ALTER TABLE accounts ADD COLUMN weight INTEGER DEFAULT 1")
     if "priority" not in cols:
@@ -291,6 +321,42 @@ def _migrate_api_keys(conn: sqlite3.Connection):
         "UPDATE api_keys SET client_type='custom' "
         "WHERE client_type IS NULL OR client_type NOT IN ('custom','codex')"
     )
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(api_keys)").fetchall()}
+    if "default_channel" not in cols:
+        conn.execute(
+            "ALTER TABLE api_keys ADD COLUMN default_channel TEXT NOT NULL DEFAULT 'workbuddy'"
+        )
+    conn.execute(
+        "UPDATE api_keys SET default_channel='workbuddy' "
+        "WHERE default_channel IS NULL OR default_channel=''"
+    )
+
+
+def _dedupe_accounts_provider_uid(conn: sqlite3.Connection):
+    dupes = conn.execute(
+        """
+        SELECT provider, uid, MIN(id) AS keep_id
+        FROM accounts
+        WHERE uid IS NOT NULL AND uid != ''
+        GROUP BY provider, uid
+        HAVING COUNT(*) > 1
+        """
+    ).fetchall()
+    for row in dupes:
+        conn.execute(
+            """
+            DELETE FROM accounts
+            WHERE provider=? AND uid=? AND id!=?
+            """,
+            (row["provider"], row["uid"], row["keep_id"]),
+        )
+
+
+def _migrate_logs_provider(conn: sqlite3.Connection):
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(logs)").fetchall()}
+    if "provider" not in cols:
+        conn.execute("ALTER TABLE logs ADD COLUMN provider TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_provider ON logs(provider)")
 
 
 def _migrate_account_credentials(conn: sqlite3.Connection):
@@ -348,14 +414,23 @@ def add_account(data: dict) -> int:
     priority = int(data.get("priority", 0) or 0)
     credit_limit = max(0.0, float(data.get("credit_limit", 0) or 0))
     credit_baseline = max(0.0, float(data.get("credit_baseline", 0) or 0))
+    provider = str(data.get("provider") or "workbuddy").strip() or "workbuddy"
+    extra = data.get("extra")
+    if isinstance(extra, dict):
+        extra_text = json.dumps(extra, ensure_ascii=False)
+    elif extra is None:
+        extra_text = None
+    else:
+        extra_text = str(extra)
     with _lock:
         conn = get_conn()
         cur = conn.execute("""
             INSERT INTO accounts
                 (name, uid, nickname, phone, account_type, access_token, refresh_token,
                  expires_at, refresh_expires_at, domain, enterprise_id, session_state,
-                 status, weight, priority, credit_limit, credit_baseline, created_at, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 status, weight, priority, credit_limit, credit_baseline, provider, extra,
+                 created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             data.get("name", ""),
             data.get("uid", ""),
@@ -374,6 +449,8 @@ def add_account(data: dict) -> int:
             priority,
             credit_limit,
             credit_baseline,
+            provider,
+            extra_text,
             now, now,
         ))
         aid = cur.lastrowid
@@ -390,7 +467,7 @@ def update_account(aid: int, data: dict):
     for k in ["name", "uid", "nickname", "phone", "account_type", "access_token",
               "refresh_token", "expires_at", "refresh_expires_at", "domain",
               "enterprise_id", "session_state", "status", "weight", "priority",
-              "credit_limit", "credit_baseline"]:
+              "credit_limit", "credit_baseline", "provider", "extra"]:
         if k in data:
             if k == "weight":
                 data[k] = max(1, int(data[k] or 1))
@@ -398,6 +475,10 @@ def update_account(aid: int, data: dict):
                 data[k] = int(data[k] or 0)
             elif k in {"credit_limit", "credit_baseline"}:
                 data[k] = max(0.0, float(data[k] or 0))
+            elif k == "provider":
+                data[k] = str(data[k] or "workbuddy").strip() or "workbuddy"
+            elif k == "extra" and isinstance(data[k], dict):
+                data[k] = json.dumps(data[k], ensure_ascii=False)
             fields.append(f"{k}=?")
             values.append(data[k])
     if not fields:
@@ -429,24 +510,33 @@ def get_account(aid: int) -> Optional[dict]:
     return _account_dict(row) if row else None
 
 
-def list_accounts() -> list[dict]:
+def list_accounts(*, provider: Optional[str] = None) -> list[dict]:
     conn = get_conn()
-    rows = conn.execute("SELECT * FROM accounts ORDER BY id").fetchall()
+    if provider:
+        rows = conn.execute(
+            "SELECT * FROM accounts WHERE provider=? ORDER BY id",
+            (provider,),
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM accounts ORDER BY id").fetchall()
     conn.close()
     return [_account_dict(r) for r in rows]
 
 
-def get_active_accounts() -> list[dict]:
+def get_active_accounts(provider: str = "workbuddy") -> list[dict]:
+    if not provider:
+        raise ValueError("get_active_accounts requires provider")
     conn = get_conn()
     rows = conn.execute(
         """
         SELECT * FROM accounts
-        WHERE status='active'
+        WHERE status='active' AND provider=?
         ORDER BY priority DESC,
                  (CAST(total_requests AS REAL) / CASE WHEN weight > 0 THEN weight ELSE 1 END) ASC,
                  total_requests ASC,
                  id ASC
-        """
+        """,
+        (provider,),
     ).fetchall()
     conn.close()
     return [_account_dict(r) for r in rows]
@@ -565,17 +655,19 @@ def get_account_checkin_cache(account_id: int, today_only: bool = True) -> Optio
 # ============================================================
 
 def add_api_key(key: str, name: str, allowed_models: Optional[list] = None,
-                daily_limit: Optional[int] = None, client_type: str = "custom") -> int:
+                daily_limit: Optional[int] = None, client_type: str = "custom",
+                default_channel: str = "workbuddy") -> int:
     now = int(time.time())
     models_json = json.dumps(allowed_models) if allowed_models else None
     limit = int(daily_limit or 0)
+    channel = str(default_channel or "workbuddy").strip() or "workbuddy"
     with _lock:
         conn = get_conn()
         cur = conn.execute("""
             INSERT INTO api_keys
                 (key_prefix, key_hash, key_secret, name, status, allowed_models,
-                 daily_limit, client_type, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?)
+                 daily_limit, client_type, default_channel, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
         """, (
             _key_prefix(key),
             _hash_api_key(key),
@@ -585,6 +677,7 @@ def add_api_key(key: str, name: str, allowed_models: Optional[list] = None,
             models_json,
             limit,
             client_type,
+            channel,
             now,
         ))
         kid = cur.lastrowid
@@ -596,7 +689,7 @@ def add_api_key(key: str, name: str, allowed_models: Optional[list] = None,
 def update_api_key(kid: int, data: dict):
     fields = []
     values = []
-    for k in ["name", "status", "allowed_models", "daily_limit", "client_type"]:
+    for k in ["name", "status", "allowed_models", "daily_limit", "client_type", "default_channel"]:
         if k in data:
             val = data[k]
             if k == "allowed_models" and isinstance(val, list):
@@ -728,8 +821,8 @@ def add_log(data: dict):
             INSERT INTO logs
                 (api_key_id, api_key_name, account_id, account_name, model, stream,
                  prompt_tokens, completion_tokens, total_tokens, credit,
-                 finish_reason, duration_ms, status_code, error_msg, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 finish_reason, duration_ms, status_code, error_msg, provider, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             data.get("api_key_id"), data.get("api_key_name"),
             data.get("account_id"), data.get("account_name"),
@@ -738,6 +831,7 @@ def add_log(data: dict):
             data.get("total_tokens", 0), data.get("credit", 0),
             data.get("finish_reason", ""), data.get("duration_ms", 0),
             data.get("status_code", 200), data.get("error_msg", ""),
+            data.get("provider") or "workbuddy",
             now,
         ))
         conn.commit()
@@ -755,8 +849,8 @@ def record_request(data: dict):
                 INSERT INTO logs
                     (api_key_id, api_key_name, account_id, account_name, model, stream,
                      prompt_tokens, completion_tokens, total_tokens, credit,
-                     finish_reason, duration_ms, status_code, error_msg, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     finish_reason, duration_ms, status_code, error_msg, provider, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     data.get("api_key_id"), data.get("api_key_name"),
@@ -765,7 +859,8 @@ def record_request(data: dict):
                     data.get("prompt_tokens", 0), data.get("completion_tokens", 0),
                     data.get("total_tokens", 0), data.get("credit", 0),
                     data.get("finish_reason", ""), data.get("duration_ms", 0),
-                    data.get("status_code", 200), data.get("error_msg", ""), now,
+                    data.get("status_code", 200), data.get("error_msg", ""),
+                    data.get("provider") or "workbuddy", now,
                 ),
             )
             if data.get("account_id") and data.get("increment_usage", True):
