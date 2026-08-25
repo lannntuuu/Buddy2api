@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import providers
 import router
 from providers.protocol import KeyChannelMismatch, UnknownChannel, UnknownModel
 from providers.qclaw.constants import JPRX_SIGNATURE_KEY, STATIC_MODELS
+from providers.qclaw.chat import fill_empty_content
 from providers.qclaw.sign import aizone_headers, jprx_ctx
 from providers.qclaw.store import parse_credentials, qclaw_auth_dirs
 
@@ -31,11 +33,25 @@ def qclaw_enabled(monkeypatch):
     monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
 
 
+def test_qclaw_quota_is_credit_not_token_cap(qclaw_enabled):
+    snapshot = asyncio.run(providers.get_provider("qclaw").fetch_quota({"id": 1}))
+    assert snapshot.unit == "credit"
+    assert snapshot.remaining is None
+    assert snapshot.unsupported is True
+
+
 def test_qclaw_not_in_default_registry(monkeypatch):
     monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
     assert providers.enabled_provider_ids() == ["workbuddy"]
     assert providers.get_provider("qclaw") is None
     assert "qclaw" in providers._LOADED
+
+
+def test_fill_empty_content_uses_reasoning():
+    filled = fill_empty_content({"role": "assistant", "content": "", "reasoning_content": "你好"})
+    assert filled["content"] == "你好"
+    kept = fill_empty_content({"role": "assistant", "content": "可见", "reasoning_content": "隐藏"})
+    assert kept["content"] == "可见"
 
 
 def test_jprx_ctx_matches_official_md5_formula():

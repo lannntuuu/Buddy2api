@@ -78,32 +78,15 @@ class QClawProvider:
         return store.import_discovered(path)
 
     async def fetch_quota(self, account: dict) -> QuotaSnapshot:
-        try:
-            data = await jprx.today_tokens(account)
-        except jprx.JprxError as exc:
-            return QuotaSnapshot(
-                ok=False,
-                channel=self.id,
-                account_id=int(account.get("id") or 0),
-                unit="tokens",
-                remaining=None,
-                unsupported=False,
-                message=str(exc)[:240],
-            )
-        limit = float(data.get("daily_token_limit") or 0)
-        used = float(data.get("daily_token_used") or 0)
-        remaining = max(0.0, limit - used)
+        # Official balance column is credit-only. QClaw's daily token cap is not 积分.
         return QuotaSnapshot(
             ok=True,
             channel=self.id,
             account_id=int(account.get("id") or 0),
-            unit="tokens",
-            remaining=remaining,
-            extra={
-                "daily_token_limit": limit,
-                "daily_token_used": used,
-                "rpm_limit": data.get("rpm_limit"),
-            },
+            unit="credit",
+            remaining=None,
+            unsupported=True,
+            message="no credit balance",
         )
 
     async def test_chat(self, account: dict, model: str = "default", prompt: str = "ping") -> dict:

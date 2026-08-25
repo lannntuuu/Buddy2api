@@ -320,27 +320,37 @@ async def credit_summary(force: bool = False) -> dict:
             continue
         remaining_values = []
         ok_count = 0
-        unit = "unknown"
+        unsupported = False
+        message = ""
         for account in accounts:
             snapshot = await fetch_quota(account)
-            unit = getattr(snapshot, "unit", None) or (snapshot.get("unit") if isinstance(snapshot, dict) else unit)
+            unit = getattr(snapshot, "unit", None) if not isinstance(snapshot, dict) else snapshot.get("unit")
             ok = bool(getattr(snapshot, "ok", None) if not isinstance(snapshot, dict) else snapshot.get("ok"))
+            snap_unsupported = bool(
+                getattr(snapshot, "unsupported", False) if not isinstance(snapshot, dict) else snapshot.get("unsupported")
+            )
+            if snap_unsupported:
+                unsupported = True
+                message = (
+                    getattr(snapshot, "message", "") if not isinstance(snapshot, dict) else snapshot.get("message") or ""
+                )
             if ok:
                 ok_count += 1
             value = getattr(snapshot, "remaining", None) if not isinstance(snapshot, dict) else snapshot.get("remaining")
-            if value is not None:
+            if unit == "credit" and value is not None and not snap_unsupported:
                 remaining_values.append(float(value))
         remaining = round(sum(remaining_values), 4) if remaining_values else None
         channels.append(
             {
                 "id": channel,
                 "display_name": getattr(provider, "display_name", channel),
-                "unit": unit or "unknown",
+                "unit": "credit",
                 "remaining": remaining,
                 "ok": True,
                 "accounts": len(accounts),
                 "ok_accounts": ok_count,
-                "unsupported": remaining is None and unit == "unknown",
+                "unsupported": remaining is None,
+                "message": message or ("no credit balance" if remaining is None else ""),
             }
         )
     now_ts = int(time.time())

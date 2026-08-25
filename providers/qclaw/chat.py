@@ -19,6 +19,55 @@ def translate_model(model: str) -> str:
     return ALIASES.get(inner, inner)
 
 
+def _alt_text(value) -> str:
+    if isinstance(value, str) and value:
+        return value
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+            elif item:
+                parts.append(str(item))
+        return "".join(parts)
+    return ""
+
+
+def fill_empty_content(payload: dict) -> dict:
+    """Aizone often fills reasoning_content first; OpenAI clients only render content."""
+    if not isinstance(payload, dict):
+        return payload
+    out = dict(payload)
+    content = out.get("content")
+    if content not in (None, ""):
+        return out
+    for key in ("reasoning_content", "reasoning"):
+        text = _alt_text(out.get(key))
+        if text:
+            out["content"] = text
+            return out
+    return out
+
+
+def _normalize_completion(data: dict) -> dict:
+    if not isinstance(data, dict):
+        return data
+    out = dict(data)
+    choices = []
+    for choice in out.get("choices") or []:
+        if not isinstance(choice, dict):
+            choices.append(choice)
+            continue
+        item = dict(choice)
+        if isinstance(item.get("message"), dict):
+            item["message"] = fill_empty_content(item["message"])
+        if isinstance(item.get("delta"), dict):
+            item["delta"] = fill_empty_content(item["delta"])
+        choices.append(item)
+    out["choices"] = choices
+    return out
+
+
 def _ids(account: dict) -> tuple[str, str, str, str]:
     extra = account.get("extra") if isinstance(account.get("extra"), dict) else {}
     guid = str(extra.get("guid") or "") 
@@ -101,7 +150,7 @@ async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
         if response.status_code < 400:
             auth_manager.mark_account_success(account["id"])
             try:
-                data = response.json()
+                data = _normalize_completion(response.json())
             except ValueError:
                 data = {"id": "qclaw", "object": "chat.completion", "choices": []}
             usage = data.get("usage") or {}
@@ -166,11 +215,25 @@ async def _stream(body: dict, raw: str, api_key_info, model_name: str) -> AsyncG
                             return
                         continue
                     auth_manager.mark_account_success(account["id"])
-                    async for chunk in response.aiter_bytes():
-                        if not chunk:
+                    async for line in response.aiter_lines():
+                        if not line:
                             continue
+                        if not line.startswith("data:"):
+                            output_started = True
+                            yield (line + "\n").encode("utf-8")
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            output_started = True
+                            yield b"data: [DONE]\n\n"
+                            continue
+                        try:
+                            parsed = _normalize_completion(json.loads(data))
+                            payload = json.dumps(parsed, ensure_ascii=False)
+                        except (json.JSONDecodeError, TypeError):
+                            payload = data
                         output_started = True
-                        yield chunk
+                        yield f"data: {payload}\n\n".encode("utf-8")
             _log(api_key_info, account, model_name, True, 0, 0, 0, "stop", 200, "", t0)
             return
         except httpx.HTTPError as exc:
@@ -189,7 +252,7 @@ async def test_chat(account: dict, model: str = "default", prompt: str = "ping")
         "model": model or "default",
         "messages": [{"role": "user", "content": prompt or "ping"}],
         "stream": False,
-        "max_tokens": 16,
+        "max_tokens": 64,
     }
     t0 = time.time()
     body, raw = _build_body(payload)
@@ -211,8 +274,12 @@ async def test_chat(account: dict, model: str = "default", prompt: str = "ping")
             "duration_ms": duration_ms,
             "message": response.text[:400],
         }
-    data = response.json()
-    message = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+    try:
+        data = _normalize_completion(response.json())
+    except ValueError:
+        data = {}
+    message_obj = ((data.get("choices") or [{}])[0].get("message") or {})
+    message = message_obj.get("content") or message_obj.get("reasoning_content") or ""
     return {
         "ok": True,
         "status_code": 200,

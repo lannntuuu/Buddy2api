@@ -83,6 +83,24 @@ def test_credit_summary_has_null_total(isolated_db):
     assert any(item["id"] == "workbuddy" for item in payload["channels"])
 
 
+def test_credit_summary_qclaw_omits_token_cap(isolated_db, monkeypatch):
+    monkeypatch.setenv("CB_GATEWAY_PROVIDERS", "workbuddy,qclaw")
+    db.add_account(
+        {
+            "name": "qc",
+            "uid": "q1",
+            "provider": "qclaw",
+            "access_token": "sk",
+            "status": "active",
+        }
+    )
+    payload = asyncio.run(control_plane.credit_summary())
+    qclaw = next(item for item in payload["channels"] if item["id"] == "qclaw")
+    assert qclaw["unit"] == "credit"
+    assert qclaw["remaining"] is None
+    assert qclaw["unsupported"] is True
+
+
 def test_startup_does_not_import_by_default(isolated_db, monkeypatch):
     monkeypatch.delenv("CB_GATEWAY_AUTO_IMPORT", raising=False)
     called = []
