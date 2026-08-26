@@ -132,9 +132,8 @@ def encrypt_secret(value: str | None, db_path: Path) -> str:
     if not value or is_encrypted(value):
         return value or ""
     raw = value.encode("utf-8")
-    if os.name == "nt" and not os.environ.get("CB_GATEWAY_MASTER_KEY"):
-        protected = _dpapi_encrypt(raw)
-        return _DPAPI_PREFIX + base64.urlsafe_b64encode(protected).decode("ascii")
+    # Always Fernet (MASTER_KEY or sidecar key file). Linux Docker cannot open
+    # Windows DPAPI rows; existing enc:v1:dpapi: values still decrypt on Windows.
     token = _get_fernet(db_path).encrypt(raw).decode("ascii")
     return _FERNET_PREFIX + token
 

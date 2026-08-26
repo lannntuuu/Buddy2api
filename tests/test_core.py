@@ -300,6 +300,21 @@ def isolated_db(tmp_path, monkeypatch):
     credential_crypto.reset_cache()
 
 
+def test_encrypt_without_master_key_uses_fernet_key_file(tmp_path, monkeypatch):
+    path = tmp_path / "gateway.db"
+    monkeypatch.setattr(db, "DB_PATH", path)
+    monkeypatch.delenv("CB_GATEWAY_MASTER_KEY", raising=False)
+    credential_crypto.reset_cache()
+    db.init_db()
+    account_id = db.add_account({"name": "portable", "access_token": "access-secret"})
+    with sqlite3.connect(path) as conn:
+        raw = conn.execute("SELECT access_token FROM accounts WHERE id=?", (account_id,)).fetchone()[0]
+    assert raw.startswith("enc:v1:fernet:")
+    assert "access-secret" not in raw
+    assert db.get_account(account_id)["access_token"] == "access-secret"
+    credential_crypto.reset_cache()
+
+
 def test_account_credentials_are_encrypted_at_rest(isolated_db):
     account_id = db.add_account(
         {

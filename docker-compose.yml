@@ -20,8 +20,9 @@ services:
       - CB_AUTH_DIR=/auth
       - CB_CONTAINER_AUTH_DIR=/auth
       - CB_DOCKER=1
-      # Topology: Windows host + Linux container cannot decrypt DPAPI blobs.
-      # Set CB_GATEWAY_MASTER_KEY when the SQLite file is shared across OS.
+      # Official QClaw/QwenWork login files are Windows DPAPI; import them on
+      # the host. SQLite tokens use the sidecar key file (or MASTER_KEY) so
+      # Linux can use already-imported accounts. WorkBuddy still mounts /auth.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=3)"]
       interval: 30s
