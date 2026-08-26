@@ -16,7 +16,7 @@ services:
       - CB_GATEWAY_DEFAULT_REASONING_EFFORT=${CB_GATEWAY_DEFAULT_REASONING_EFFORT:-high}
       - CB_GATEWAY_DB_PATH=/app/data/buddy2api.db
       - CB_GATEWAY_AUTO_IMPORT=${CB_GATEWAY_AUTO_IMPORT:-0}
-      - CB_GATEWAY_PROVIDERS=${CB_GATEWAY_PROVIDERS:-workbuddy,qclaw,qwenwork}
+      - CB_GATEWAY_PROVIDERS=${CB_GATEWAY_PROVIDERS:-workbuddy,qclaw,qwenwork,traework}
       - CB_AUTH_DIR=/auth
       - CB_CONTAINER_AUTH_DIR=/auth
       - CB_DOCKER=1

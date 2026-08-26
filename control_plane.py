@@ -423,11 +423,19 @@ async def checkin_status_all(force: bool = False) -> dict:
         accounts = await _channel_accounts(channel)
         if not accounts:
             continue
-        chunk = await _gather_limited(
-            accounts,
-            lambda account: auth_manager.fetch_checkin_status(account, force=force),
-            limit=2,
-        )
+        fetch_checkin = getattr(provider, "fetch_checkin", None)
+        if fetch_checkin:
+            chunk = await _gather_limited(
+                accounts,
+                lambda account, fn=fetch_checkin: fn(account, force=force),
+                limit=2,
+            )
+        else:
+            chunk = await _gather_limited(
+                accounts,
+                lambda account: auth_manager.fetch_checkin_status(account, force=force),
+                limit=2,
+            )
         for item in chunk:
             if isinstance(item, dict):
                 item["channel"] = channel
@@ -464,8 +472,12 @@ async def checkin_all(channel_filter: list[str] | None = None) -> dict:
             if not first and gap:
                 await asyncio.sleep(gap)
             first = False
-            result = await auth_manager.claim_daily_checkin(account)
-            if result.get("ok"):
+            claim_fn = getattr(provider, "claim_checkin", None)
+            if claim_fn:
+                result = await claim_fn(account)
+            else:
+                result = await auth_manager.claim_daily_checkin(account)
+            if result.get("ok") and not claim_fn:
                 result["resources"] = await auth_manager.fetch_account_resources(account, force=True)
             result["channel"] = channel
             results.append(result)

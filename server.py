@@ -712,7 +712,8 @@ async def admin_test_account(
         test = getattr(provider, "test_chat", None)
         if test is None:
             raise HTTPException(status_code=400, detail=f"Channel '{channel}' does not support account test")
-        return await test(account, model or "auto", prompt or "ping")
+        default_prompt = "请回复：pong" if channel == "traework" else "ping"
+        return await test(account, model or "auto", prompt or default_prompt)
     return await proxy.test_account_chat(account, model or "auto", prompt or "ping")
 
 

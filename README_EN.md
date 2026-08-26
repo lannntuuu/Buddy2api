@@ -2,15 +2,15 @@
 
 [English](README_EN.md) | [中文](README.md)
 
-> Local consumer AI clients → one OpenAI-compatible API for Codex, OpenCode, Cherry Studio, NextChat, and similar agents. Work Buddy / CodeBuddy, QClaw, and QwenWork are on by default; pick one in the UI dropdown. Each request stays on one channel.
+> Local consumer AI clients → one OpenAI-compatible API for Codex, OpenCode, Cherry Studio, NextChat, and similar agents. Work Buddy / CodeBuddy, QClaw, QwenWork, and TraeWork are on by default; pick one in the UI dropdown. Each request stays on one channel.
 
-Release **2.0.1**. Local use only. Do not expose this on the public internet, and do not share credentials, API keys, or the database.
+Release **2.1.0**. Local use only. Do not expose this on the public internet, and do not share credentials, API keys, or the database.
 
 ## What is this?
 
 Buddy2api listens on `http://127.0.0.1:8787/v1`. You stay signed into the official apps; this gateway imports those sessions and forwards chat. Typical clients use Chat Completions. Codex uses `/v1/responses`; create the key as type Codex in the UI to enable Codex prompt sanitization.
 
-All three channels are on by default. A channel with no local login shows empty on Accounts; nothing is imported until you click Import.
+All four channels are on by default. A channel with no local login shows empty on Accounts; nothing is imported until you click Import.
 
 ```powershell
 python server.py
@@ -21,13 +21,14 @@ python server.py
 | WorkBuddy / CodeBuddy | on | `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth` |
 | QClaw | on | `%APPDATA%\QClaw` |
 | QwenWork | on | `%APPDATA%\QwenWorkCN` |
+| TraeWork | on | `%APPDATA%\TRAE SOLO CN\User\globalStorage` |
 
 Narrow with `CB_GATEWAY_PROVIDERS=workbuddy` if you only want one.
 
 ## Before you start
 
-1. **An empty Accounts page after startup is expected.** 2.0 does not import on boot. Pick a channel → Detect → Import. All three channels are in the dropdown.
-2. **One API key is one channel.** Create the key with a channel selected. A WorkBuddy key uses `auto` / `glm-5.2`; a QwenWork key uses `auto` or `qwork-advanced`. Mismatched model/key returns 400 or 403 — there is no cross-vendor failover.
+1. **An empty Accounts page after startup is expected.** 2.0 does not import on boot. Pick a channel → Detect → Import. All four channels are in the dropdown.
+2. **One API key is one channel.** Create the key with a channel selected. A WorkBuddy key uses `auto` / `glm-5.2`; a QwenWork key uses `auto` or `qwork-advanced`; a TraeWork key uses `auto` or `qwen-3.7-plus`. Mismatched model/key returns 400 or 403 — there is no cross-vendor failover.
 3. **HTTP 503 `channel_unavailable`** means that channel has no imported account.
 4. **Run QClaw / QwenWork with `python server.py` on Windows.** A Linux Docker container cannot decrypt those DPAPI files; the UI says so. WorkBuddy can stay on Docker.
 5. If the chat client is itself in Docker, Base URL is `http://host.docker.internal:8787/v1`.
@@ -88,7 +89,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 ## Environment
 
-`CB_GATEWAY_PROVIDERS` (default `workbuddy,qclaw,qwenwork`), `CB_GATEWAY_AUTO_IMPORT` (default `0`), `CB_AUTH_DIR` / `CB_QCLAW_AUTH_DIR` / `CB_QWENWORK_AUTH_DIR`, `CB_GATEWAY_ADMIN_TOKEN`, `CB_GATEWAY_MASTER_KEY`.
+`CB_GATEWAY_PROVIDERS` (default `workbuddy,qclaw,qwenwork,traework`), `CB_GATEWAY_AUTO_IMPORT` (default `0`), `CB_AUTH_DIR` / `CB_QCLAW_AUTH_DIR` / `CB_QWENWORK_AUTH_DIR` / `CB_TRAEWORK_AUTH_DIR`, `CB_GATEWAY_ADMIN_TOKEN`, `CB_GATEWAY_MASTER_KEY`.
 
 Keep `--host 127.0.0.1`. Do not share the database, auth folders, or key screenshots.
 

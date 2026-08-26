@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
-ChannelId = Literal["workbuddy", "qclaw", "qwenwork", "qoderwork"]
+ChannelId = Literal["workbuddy", "qclaw", "qwenwork", "qoderwork", "traework"]
 
-KNOWN_CHANNEL_IDS: tuple[ChannelId, ...] = ("workbuddy", "qclaw", "qwenwork", "qoderwork")
+KNOWN_CHANNEL_IDS: tuple[ChannelId, ...] = ("workbuddy", "qclaw", "qwenwork", "qoderwork", "traework")
 KNOWN_CHANNEL_SET = frozenset(KNOWN_CHANNEL_IDS)
 
 
