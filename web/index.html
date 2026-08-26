@@ -388,7 +388,7 @@ createApp({
   template:`
   <div class="layout">
     <header class="topbar">
-      <div class="brand-block"><div class="brand-symbol">B2</div><div class="brand-copy"><div class="brand-title">Buddy 2 API</div><div class="brand-meta">Local model gateway · v2.0.1</div></div></div>
+      <div class="brand-block"><div class="brand-symbol">B2</div><div class="brand-copy"><div class="brand-title">Buddy 2 API</div><div class="brand-meta">Local model gateway · v2.1.0</div></div></div>
       <nav class="topnav"><div v-for="n in nav" :key="n.k" class="nav-item" :class="{on:page===n.k}" @click="go(n.k)" v-html="n.i+'<span>'+n.l+'</span>'"></div></nav>
       <div class="top-actions">
         <button class="refresh-cta" @click="hardRefresh"><span v-html="I.refresh"></span><span>刷新</span></button>
@@ -601,7 +601,7 @@ createApp({
   </template>
 </div>`
 }).component('accs',{props:['token','toast'],setup(p){
-  const l=ref([]),ld=ref(true),sa=ref(false),ai=ref(''),nm=ref(''),disc=ref(null),dl=ref(false),scanning=ref(false),adding=ref(false),authPath=ref(''),test=ref(null),claim=ref(null),pkg=ref(null),tl=ref(0),claimingAll=ref(false),officialRefreshing=ref(false),checkins=ref({}),checkinSummary=ref(null),checkinLoading=ref(false),busy=ref({}),discChannel=ref('workbuddy'),channels=ref([{id:'workbuddy',display_name:'WorkBuddy'},{id:'qclaw',display_name:'QClaw'},{id:'qwenwork',display_name:'QwenWork / 千问办公'}]);
+  const l=ref([]),ld=ref(true),sa=ref(false),ai=ref(''),nm=ref(''),disc=ref(null),dl=ref(false),scanning=ref(false),adding=ref(false),authPath=ref(''),test=ref(null),claim=ref(null),pkg=ref(null),tl=ref(0),claimingAll=ref(false),officialRefreshing=ref(false),checkins=ref({}),checkinSummary=ref(null),checkinLoading=ref(false),busy=ref({}),discChannel=ref('workbuddy'),channels=ref([{id:'workbuddy',display_name:'WorkBuddy'},{id:'qclaw',display_name:'QClaw'},{id:'qwenwork',display_name:'QwenWork / 千问办公'},{id:'traework',display_name:'TraeWork'}]);
   const filters=reactive({q:'',status:'all',claim:'all',sort:'priority'});
   function hydrate(a){return {...a,_weight:a.weight||1,_priority:a.priority||0,_creditSnapshot:a.credit_snapshot||a.credit_limit||0,_baseWeight:a.weight||1,_basePriority:a.priority||0,_baseCreditSnapshot:a.credit_snapshot||a.credit_limit||0}}
   function dirty(a){return Number(a._weight||1)!==Number(a._baseWeight||1)||Number(a._priority||0)!==Number(a._basePriority||0)||Number(a._creditSnapshot||0)!==Number(a._baseCreditSnapshot||0)}
@@ -734,7 +734,7 @@ createApp({
   <div class="ov" v-if="sa" @click.self="sa=false"><div class="modal"><div class="modal-h"><h3>高级手动添加</h3><button class="x" @click="sa=false">&times;</button></div><div class="modal-b"><div class="field"><label>名称</label><input v-model="nm" placeholder="可选"/></div><div class="field"><label>Auth JSON</label><textarea v-model="ai" placeholder="粘贴 .info 文件内容"></textarea><div class="hint">只有自动检测失败时才需要手动粘贴完整 JSON。</div></div></div><div class="modal-f"><button class="btn" @click="sa=false" :disabled="adding">取消</button><button class="btn pri" @click="add" :disabled="adding">{{adding?'添加中':'添加'}}</button></div></div></div>
 </div>`
 }).component('keys',{props:['token','toast'],setup(p){
-  const l=ref([]),ld=ref(true),sa=ref(false),f=reactive({name:'',models:'',limit:null,preset:'custom',channel:'workbuddy'}),res=ref(''),saving=ref(false),copied=ref(false),busy=ref({}),shown=ref({}),codexResult=ref(null),codexBusy=ref(false),channels=ref([{id:'workbuddy',display_name:'WorkBuddy'},{id:'qclaw',display_name:'QClaw'},{id:'qwenwork',display_name:'QwenWork / 千问办公'}]);
+  const l=ref([]),ld=ref(true),sa=ref(false),f=reactive({name:'',models:'',limit:null,preset:'custom',channel:'workbuddy'}),res=ref(''),saving=ref(false),copied=ref(false),busy=ref({}),shown=ref({}),codexResult=ref(null),codexBusy=ref(false),channels=ref([{id:'workbuddy',display_name:'WorkBuddy'},{id:'qclaw',display_name:'QClaw'},{id:'qwenwork',display_name:'QwenWork / 千问办公'},{id:'traework',display_name:'TraeWork'}]);
   const clientTypes=[
     {k:'custom',name:'默认',icon:'⚙'},
     {k:'codex',name:'Codex',icon:'◉'},

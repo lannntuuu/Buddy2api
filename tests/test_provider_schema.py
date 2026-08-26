@@ -22,7 +22,7 @@ def test_default_registry_enables_wave1_channels(monkeypatch):
     import providers
 
     monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
-    assert providers.enabled_provider_ids() == ["workbuddy", "qclaw", "qwenwork"]
+    assert providers.enabled_provider_ids() == ["workbuddy", "qclaw", "qwenwork", "traework"]
     monkeypatch.setenv("CB_GATEWAY_PROVIDERS", "workbuddy")
     assert providers.enabled_provider_ids() == ["workbuddy"]
     assert providers.get_provider("qclaw") is None
