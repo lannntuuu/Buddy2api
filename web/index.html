@@ -377,14 +377,14 @@ const api={
 function apiErr(e,fallback='加载失败'){return e.message==='401'?'本机管理凭证无效，请刷新页面；远程访问时可在设置页填写备用 Token。':fallback}
 createApp({
   setup(){
-    const validPages=['dashboard','accounts','keys','models','usage','logs','settings'];
+    const validPages=['dashboard','accounts','quota','keys','channels','usage','logs','setup','settings'];
     const savedPage=localStorage.getItem('cb_gw_page');
     const page=ref(validPages.includes(savedPage)?savedPage:'dashboard'),token=ref(localStorage.getItem('cb_gw_token')||''),toasts=ref([]);
     function tf(m,t='ok'){const id=Date.now()+Math.random();toasts.value=[...toasts.value,{id,m,t}].slice(-4);setTimeout(()=>toasts.value=toasts.value.filter(x=>x.id!==id),2500)}
     function go(k){page.value=k;localStorage.setItem('cb_gw_page',k)}
     function saveToken(value){token.value=value.trim();if(token.value)localStorage.setItem('cb_gw_token',token.value);else localStorage.removeItem('cb_gw_token');tf(token.value?'备用 Admin Token 已保存':'备用 Admin Token 已清除')}
     function hardRefresh(){window.location.reload()}
-    const nav=[{k:'dashboard',l:'Dashboard',i:I.dash},{k:'accounts',l:'账号管理',i:I.users},{k:'keys',l:'API Keys',i:I.key},{k:'models',l:'模型配置',i:I.cpu},{k:'usage',l:'用量统计',i:I.tokens},{k:'logs',l:'请求日志',i:I.log},{k:'settings',l:'设置',i:I.gear}];
+    const nav=[{k:'dashboard',l:'运行总览',i:I.dash},{k:'accounts',l:'账号管理',i:I.users},{k:'quota',l:'额度与积分',i:I.wallet},{k:'keys',l:'API Keys',i:I.key},{k:'channels',l:'通道与模型',i:I.cpu},{k:'usage',l:'用量统计',i:I.tokens},{k:'logs',l:'请求日志',i:I.log},{k:'setup',l:'接入指南',i:I.scan},{k:'settings',l:'设置',i:I.gear}];
     return{page,token,toasts,tf,go,saveToken,hardRefresh,nav,I}
   },
   template:`
@@ -399,16 +399,18 @@ createApp({
     <div class="main">
       <div class="content" v-if="page==='dashboard'"><dash :token="token" :toast="tf"/></div>
       <div class="content" v-if="page==='accounts'"><accs :token="token" :toast="tf"/></div>
+      <div class="content" v-if="page==='quota'"><quota :token="token" :toast="tf"/></div>
       <div class="content" v-if="page==='keys'"><keys :token="token" :toast="tf"/></div>
-      <div class="content" v-if="page==='models'"><mdls :token="token" :toast="tf"/></div>
+      <div class="content" v-if="page==='channels'"><chns :token="token" :toast="tf"/></div>
       <div class="content" v-if="page==='usage'"><usg :token="token" :toast="tf"/></div>
       <div class="content" v-if="page==='logs'"><lgs :token="token"/></div>
+      <div class="content" v-if="page==='setup'"><setup :token="token" :toast="tf"/></div>
       <div class="content" v-if="page==='settings'"><stgs :token="token" :toast="tf" :save-token="saveToken"/></div>
     </div>
     <div class="toasts"><div class="toast" :class="x.t" v-for="x in toasts" :key="x.id">{{x.m}}</div></div>
   </div>`
 }).component('dash',{props:['token','toast'],setup(p){
-  const s=ref(null),credit=ref(null),ld=ref(true),cld=ref(false),copied=ref(''),err=ref(''),updatedAt=ref(''),todayChartMetric=ref('requests');
+  const s=ref(null),credit=ref(null),ld=ref(true),cld=ref(false),err=ref(''),updatedAt=ref(''),todayChartMetric=ref('requests');
   async function load(forceCredit=false){ld.value=true;err.value='';try{const [stats,cred]=await Promise.all([api.get('/admin/stats',p.token),api.get('/admin/credit-summary'+(forceCredit?'?force=1':''),p.token)]);s.value=stats;credit.value=cred;updatedAt.value=new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}catch(e){s.value=null;err.value=apiErr(e,'加载失败：'+e.message);p.toast(err.value,'err')}ld.value=false}
   async function refreshCredit(){if(cld.value)return;cld.value=true;try{credit.value=await api.get('/admin/credit-summary?force=1',p.token);updatedAt.value=new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});p.toast('官方额度已刷新')}catch(e){p.toast(apiErr(e,'官方额度刷新失败'),'err')}cld.value=false}
   function n(v){return Number(v||0).toLocaleString()}
@@ -420,8 +422,6 @@ createApp({
   function healthClass(){if(!s.value?.active_accounts||!s.value?.active_keys)return 'err';if((s.value?.today?.errors||0)>0||s.value?.filtered_requests>0)return 'warn';return ''}
   function healthText(){if(!s.value?.active_accounts)return '无可用账号';if(!s.value?.active_keys)return '无可用 API Key';if((s.value?.today?.errors||0)>0)return '有请求异常';if(s.value?.filtered_requests>0)return '存在内容过滤';return '运行正常'}
   function rateWidth(v){return Math.max(0,Math.min(100,Number(v||0)))+'%'}
-  function modelPct(m){return s.value?.total_requests?rateWidth(m.count/s.value.total_requests*100):'0%'}
-  function copy(v,name){navigator.clipboard.writeText(v);copied.value=name;p.toast('已复制','info');setTimeout(()=>copied.value='',1200)}
   function age(v){v=Number(v||0);if(v<60)return v+'s';if(v<3600)return Math.floor(v/60)+'m';return Math.floor(v/3600)+'h'}
   function expireMeta(a){if(a.next_expire_days===null||a.next_expire_days===undefined)return '无明确到期';return a.next_expire_days+' 天 · '+(a.next_expire_time||'-')}
   const mx=computed(()=>s.value?.daily?.length?Math.max(...s.value.daily.map(d=>d.requests),1):1);
@@ -453,7 +453,7 @@ createApp({
   function sparkHeight(card,v){v=Number(v||0);return(v?Math.max(7,Math.round(v/Math.max(card.max,1)*36)):4)+'px'}
   function hourBarHeight(v,max){v=Number(v||0);return(v?Math.max(6,Math.round(v/Math.max(max,1)*156)):3)+'px'}
   onMounted(load);
-  return{s,credit,ld,cld,copied,err,updatedAt,todayLabel,todayUsage,todayChartMetric,todayChart,load,refreshCredit,n,tok,pct,money,ms,fmt,healthClass,healthText,rateWidth,modelPct,copy,age,expireMeta,mx,heatRows,heatStyle,heatValue,sparkHeight,hourBarHeight,I}
+  return{s,credit,ld,cld,err,updatedAt,todayLabel,todayUsage,todayChartMetric,todayChart,load,refreshCredit,n,tok,pct,money,ms,fmt,healthClass,healthText,rateWidth,age,expireMeta,mx,heatRows,heatStyle,heatValue,sparkHeight,hourBarHeight,I}
 },template:`
 <div>
   <div class="phead"><h1>运行总览</h1><p>网关状态、额度和调用强度</p></div>
@@ -528,7 +528,7 @@ createApp({
       </div>
     </div>
 
-    <div class="dash-grid wide">
+    <div>
       <div class="card">
         <div class="card-h">7 天调用强度<span class="sub">每日请求 · Token · Credit</span></div>
         <div class="chart-box" v-if="s.daily?.length">
@@ -540,110 +540,33 @@ createApp({
         </div>
         <div class="empty" v-else>暂无趋势数据</div>
       </div>
-      <div class="card">
-        <div class="card-h">快速接入<span class="sub">OpenAI Compatible</span></div>
-        <div class="card-p quick">
-          <div class="quick-row"><div class="qk">Base URL</div><div class="qv">http://127.0.0.1:8787/v1</div><button class="btn s" @click="copy('http://127.0.0.1:8787/v1','base')">{{copied==='base'?'已复制':'复制'}}</button></div>
-          <div class="quick-row"><div class="qk">Models</div><div class="qv">auto, glm-5.2, kimi-k2.7, deepseek-v4-pro</div><button class="btn s" @click="copy('auto','model')">{{copied==='model'?'已复制':'复制'}}</button></div>
-          <div class="quick-row"><div class="qk">Auth</div><div class="qv">Authorization: Bearer sk-cb-...</div><span class="tag">API Keys</span></div>
-          <div class="codeblk" style="margin-top:2px"><span class="k">curl</span> http://127.0.0.1:8787/v1/chat/completions \\
-  -H <span class="s">"Authorization: Bearer YOUR_KEY"</span> \\
-  -d <span class="s">'{"model":"auto","messages":[{"role":"user","content":"hi"}]}'</span></div>
-        </div>
-      </div>
-    </div>
-
-    <div class="dash-grid">
-      <div class="card">
-        <div class="card-h">模型排行<span class="sub">按请求数</span></div>
-        <div class="card-p rank-list" v-if="s.model_stats?.length">
-          <div class="rank-item" v-for="m in s.model_stats" :key="m.model">
-            <div><div class="rank-name"><code>{{m.model}}</code></div><div class="rank-meta">{{tok(m.tokens)}} tokens · {{money(m.credit)}} credit · {{ms(m.avg_duration_ms)}}</div><div class="progress" style="margin-top:7px"><span :style="{width:modelPct(m)}"></span></div></div>
-            <div class="rank-value">{{n(m.count)}} req</div>
-          </div>
-        </div>
-        <div class="empty" v-else>暂无模型数据</div>
-      </div>
-      <div class="card">
-        <div class="card-h">账号状态<span class="sub">最多 5 个</span></div>
-        <table class="mini-table" v-if="s.account_stats?.length"><thead><tr><th>账号</th><th>状态</th><th>请求</th><th>最近</th></tr></thead><tbody>
-          <tr v-for="a in s.account_stats" :key="a.id"><td style="font-weight:600">{{a.nickname||a.name||'-'}}</td><td><span class="badge" :class="a.status">{{a.status}}</span></td><td>{{n(a.total_requests)}}</td><td class="mono">{{fmt(a.last_used_at)}}</td></tr>
-        </tbody></table>
-        <div class="empty" v-else>暂无账号</div>
-      </div>
-    </div>
-
-    <div class="dash-grid">
-      <div class="card">
-        <div class="card-h">Key 使用排行<span class="sub">最多 5 个</span></div>
-        <table class="mini-table" v-if="s.key_stats?.length"><thead><tr><th>Key</th><th>请求</th><th>Token</th><th>最近</th></tr></thead><tbody>
-          <tr v-for="k in s.key_stats" :key="k.name"><td style="font-weight:600">{{k.name||'-'}}</td><td>{{n(k.count)}}</td><td>{{tok(k.tokens)}}</td><td class="mono">{{fmt(k.last_used_at)}}</td></tr>
-        </tbody></table>
-        <div class="empty" v-else>暂无 Key 使用记录</div>
-      </div>
-      <div class="card">
-        <div class="card-h">今日质量<span class="sub">请求结果</span></div>
-        <div class="card-p">
-          <div class="metric-row">
-            <div class="metric"><div class="m-label">成功</div><div class="m-value">{{n(s.today?.success)}}</div><div class="m-sub">{{pct(s.today?.success_rate)}}</div></div>
-            <div class="metric"><div class="m-label">错误</div><div class="m-value">{{n(s.today?.errors)}}</div><div class="m-sub">HTTP / upstream</div></div>
-            <div class="metric"><div class="m-label">过滤</div><div class="m-value">{{n(s.today?.filtered)}}</div><div class="m-sub">content_filter</div></div>
-          </div>
-          <div class="progress ok" style="margin-top:14px"><span :style="{width:rateWidth(s.today?.success_rate)}"></span></div>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-h">最近请求<span class="sub">最新 8 条</span></div>
-      <table class="mini-table" v-if="s.recent_logs?.length"><thead><tr><th>时间</th><th>Key</th><th>账号</th><th>模型</th><th>Token</th><th>Credit</th><th>耗时</th><th>结果</th></tr></thead><tbody>
-        <tr v-for="x in s.recent_logs" :key="x.id"><td class="mono">{{fmt(x.created_at)}}</td><td>{{x.api_key_name||'-'}}</td><td>{{x.account_name||'-'}}</td><td><code>{{x.model}}</code></td><td>{{tok(x.total_tokens)}}</td><td>{{money(x.credit)}}</td><td>{{ms(x.duration_ms)}}</td><td><span class="badge" :class="x.status_code===200&&x.finish_reason!=='error'?'ok':'err'">{{x.finish_reason||x.status_code}}</span></td></tr>
-      </tbody></table>
-      <div class="empty" v-else>暂无请求记录</div>
     </div>
   </template>
 </div>`
 }).component('accs',{props:['token','toast'],setup(p){
-  const l=ref([]),ld=ref(true),sa=ref(false),ai=ref(''),nm=ref(''),disc=ref(null),dl=ref(false),scanning=ref(false),adding=ref(false),authPath=ref(''),test=ref(null),claim=ref(null),pkg=ref(null),tl=ref(0),claimingAll=ref(false),officialRefreshing=ref(false),checkins=ref({}),checkinSummary=ref(null),checkinLoading=ref(false),busy=ref({}),discChannel=ref('workbuddy'),channels=ref([{id:'workbuddy',display_name:'WorkBuddy'},{id:'qclaw',display_name:'QClaw'},{id:'qwenwork',display_name:'QwenWork / 千问办公'},{id:'traework',display_name:'TraeWork'},{id:'traesolo',display_name:'Trae SOLO'}]);
+  const l=ref([]),ld=ref(true),sa=ref(false),ai=ref(''),nm=ref(''),disc=ref(null),dl=ref(false),scanning=ref(false),adding=ref(false),authPath=ref(''),test=ref(null),tl=ref(0),busy=ref({}),discChannel=ref('workbuddy'),channels=ref([{id:'workbuddy',display_name:'WorkBuddy'},{id:'qclaw',display_name:'QClaw'},{id:'qwenwork',display_name:'QwenWork / 千问办公'},{id:'traework',display_name:'TraeWork'},{id:'traesolo',display_name:'Trae SOLO'}]);
   const solo=reactive({pending:false,url:'',pendingId:'',callbackUrl:'',state:'',uid:'',error:'',manual:''}),soloBusy=ref(false);let soloTimer=null,soloGen=0;
-  const filters=reactive({q:'',status:'all',claim:'all',sort:'priority'});
+  const filters=reactive({q:'',status:'all',sort:'priority'});
   function hydrate(a){return {...a,_weight:a.weight||1,_priority:a.priority||0,_creditSnapshot:a.credit_snapshot||a.credit_limit||0,_baseWeight:a.weight||1,_basePriority:a.priority||0,_baseCreditSnapshot:a.credit_snapshot||a.credit_limit||0}}
   function dirty(a){return Number(a._weight||1)!==Number(a._baseWeight||1)||Number(a._priority||0)!==Number(a._basePriority||0)||Number(a._creditSnapshot||0)!==Number(a._baseCreditSnapshot||0)}
   function busyKey(id,k){return busy.value[id+'-'+k]}
-  function mergeResource(a,r){if(!r)return;a.official_resource=r}
-  function applyResourceResult(r){const a=l.value.find(x=>Number(x.id)===Number(r?.account_id));if(a)mergeResource(a,r)}
-  async function load(withOfficial=false){ld.value=true;try{l.value=(await api.get('/admin/accounts',p.token)).map(hydrate)}catch(e){p.toast(apiErr(e),'err')}ld.value=false;await loadCheckins(false);if(withOfficial)await refreshAllResources(true)}
-  async function loadCheckins(force=false){checkinLoading.value=true;try{const r=await api.get('/admin/accounts/checkin-status-all'+(force?'?force=1':''),p.token);checkinSummary.value=r;const map={};(r.results||[]).forEach(x=>{map[x.account_id]=x});checkins.value=map}catch(e){if(force)p.toast(apiErr(e,'签到状态加载失败'),'err')}checkinLoading.value=false}
+  async function load(){ld.value=true;try{l.value=(await api.get('/admin/accounts',p.token)).map(hydrate)}catch(e){p.toast(apiErr(e),'err')}ld.value=false}
   async function loadChannels(){try{const ch=await api.get('/admin/channels',p.token);if(ch.channels?.length)channels.value=ch.channels}catch(e){}}
   async function discover(path=''){dl.value=true;try{const qs=new URLSearchParams();if(path&&path.trim())qs.set('auth_dir',path.trim());if(discChannel.value)qs.set('channel',discChannel.value);const q=qs.toString();disc.value=await api.get('/admin/accounts/discover'+(q?'?'+q:''),p.token)}catch(e){p.toast(apiErr(e,'检测失败'),'err')}dl.value=false}
   async function scan(path=''){if(scanning.value)return;scanning.value=true;try{if(disc.value?.preview_token){const body={channel:disc.value.channel||'workbuddy',preview_token:disc.value.preview_token};if(path&&path.trim())body.auth_dir=path.trim();const r=await api.post('/admin/accounts/import',body,p.token);p.toast('导入 '+r.imported+' · 更新 '+r.updated+' · 跳过 '+r.skipped)}else{const body=path&&path.trim()?{auth_dir:path.trim()}:{};const r=await api.post('/admin/accounts/scan',body,p.token);p.toast('导入 '+r.imported+' · 更新 '+r.updated+' · 跳过 '+r.skipped)}await load();await discover(path)}catch(e){p.toast(apiErr(e,'扫描失败'),'err')}scanning.value=false}
   async function scanCustom(){const path=authPath.value.trim();if(!path){p.toast('请先填写目录或 .info 文件路径','err');return}await scan(path)}
   async function add(){if(adding.value)return;if(!ai.value.trim()){p.toast('请先粘贴 Auth JSON','err');return}adding.value=true;try{const d=JSON.parse(ai.value);await api.post('/admin/accounts',{...d,name:nm.value,provider:d.provider||d.channel||discChannel.value},p.token);p.toast('添加成功');sa.value=false;ai.value='';nm.value='';await load();await discover(authPath.value)}catch(e){p.toast('失败:'+e.message,'err')}adding.value=false}
   async function withBusy(a,k,fn){busy.value={...busy.value,[a.id+'-'+k]:true};try{return await fn()}finally{const o={...busy.value};delete o[a.id+'-'+k];busy.value=o}}
-  async function refreshResource(a,silent=false,force=false){return await withBusy(a,'resource',async()=>{try{const r=await api.get('/admin/accounts/'+a.id+'/resources'+(force?'?force=1':''),p.token);mergeResource(a,r);if(!silent)p.toast(r.ok?(r.stale?'已显示旧额度缓存':'官方额度已刷新'):('官方额度失败：'+(r.message||r.status_code)),r.ok?'ok':'err');return r}catch(e){const r={ok:false,account_id:a.id,message:apiErr(e,'官方额度加载失败'),packages:[]};mergeResource(a,r);if(!silent)p.toast(r.message,'err');return r}})}
-  async function refreshAllResources(silent=false,force=false){if(officialRefreshing.value)return;officialRefreshing.value=true;const targets=l.value.filter(a=>a.status==='active');await Promise.all(targets.map(a=>refreshResource(a,true,force)));officialRefreshing.value=false;if(!silent)p.toast('官方额度已刷新 '+targets.length+' 个账号','ok')}
-  async function openPackages(a){if(!a.official_resource&&!busyKey(a.id,'resource'))await refreshResource(a,true);pkg.value={account:a,resource:a.official_resource||{ok:false,message:'未获取官方额度',packages:[]}}}
-  async function refreshPackages(){if(!pkg.value)return;const r=await refreshResource(pkg.value.account,true);pkg.value={account:pkg.value.account,resource:r||pkg.value.account.official_resource||pkg.value.resource}}
   async function ref2(a){await withBusy(a,'refresh',async()=>{try{await api.post('/admin/accounts/'+a.id+'/refresh',{},p.token);p.toast('刷新成功');await load()}catch(e){p.toast(apiErr(e,'刷新失败'),'err')}})}
   async function saveMeta(a){await withBusy(a,'save',async()=>{try{const creditSnapshot=Math.max(0,Number(a._creditSnapshot)||0);const body={weight:parseInt(a._weight)||1,priority:parseInt(a._priority)||0};if(Number(a._creditSnapshot||0)!==Number(a._baseCreditSnapshot||0))body.credit_limit=creditSnapshot;await api.put('/admin/accounts/'+a.id,body,p.token);a._baseWeight=parseInt(a._weight)||1;a._basePriority=parseInt(a._priority)||0;a._baseCreditSnapshot=creditSnapshot;p.toast(body.credit_limit!==undefined?'已保存余额快照':'已保存');await load()}catch(e){p.toast(apiErr(e,'保存失败'),'err')}})}
   async function toggle(a){await withBusy(a,'toggle',async()=>{try{await api.put('/admin/accounts/'+a.id,{status:a.status==='active'?'inactive':'active'},p.token);p.toast(a.status==='active'?'已禁用':'已启用');await load()}catch(e){p.toast(apiErr(e,'操作失败'),'err')}})}
   async function testOne(a){tl.value=a.id;test.value=null;try{const r=await api.post('/admin/accounts/'+a.id+'/test',{model:'auto',prompt:'ping'},p.token);test.value={account:a.nickname||a.name,result:r};p.toast(r.ok?'测试成功':'测试失败',r.ok?'ok':'err');await load()}catch(e){p.toast(apiErr(e,'测试失败'),'err');test.value={account:a.nickname||a.name,result:{ok:false,status_code:0,message:e.message}}}tl.value=0}
-  async function claimOne(a){await withBusy(a,'claim',async()=>{try{const r=await api.post('/admin/accounts/'+a.id+'/checkin',{},p.token);checkins.value={...checkins.value,[a.id]:r};claim.value={title:'领取结果',results:[r]};p.toast(r.claimed?'领取成功':(r.already_claimed?'今日已领':'领取失败'),r.ok?'ok':'err');await load();const fresh=l.value.find(x=>Number(x.id)===Number(a.id));if(fresh)await refreshResource(fresh,true,true);await loadCheckins(true)}catch(e){p.toast(apiErr(e,'领取失败'),'err')}})}
-  async function claimAll(){if(claimingAll.value)return;claimingAll.value=true;try{const r=await api.post('/admin/accounts/checkin-all',{},p.token);claim.value={title:'一键领取结果',summary:r,results:r.results||[]};p.toast('领取 '+r.claimed+' · 已领 '+r.already_claimed+' · 失败 '+r.failed,r.failed?'err':'ok');await load(true);await loadCheckins(true)}catch(e){p.toast(apiErr(e,'一键领取失败'),'err')}claimingAll.value=false}
   async function del(a){if(!confirm('删除账号 '+(a.nickname||a.name||a.id)+' ?'))return;await api.del('/admin/accounts/'+a.id,p.token);p.toast('已删除');await load();await discover(authPath.value)}
   function fmt(t){return t?new Date(t*1000).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'-'}
   function size(v){v=Number(v||0);if(v>=1024*1024)return(v/1024/1024).toFixed(1)+' MB';if(v>=1024)return(v/1024).toFixed(1)+' KB';return v+' B'}
   function credit(v){v=Number(v||0);return v.toLocaleString('zh-CN',{maximumFractionDigits:4})}
   function tok(v){v=Number(v||0);if(v>=1e9)return (v/1e9).toFixed(v>=1e10?1:2).replace(/\.?0+$/,'')+'B';if(v>=1e6)return (v/1e6).toFixed(v>=1e7?1:2).replace(/\.?0+$/,'')+'M';return v.toLocaleString()}
   function creditPct(a){return Math.max(0,Math.min(100,Number(a.credit_used_pct||0)))+'%'}
-  function claimText(r){if(r.claimed)return '已领取 '+credit(r.credit);if(r.already_claimed)return '今日已领';return r.message||'失败'}
-  function officialBalance(a){const r=a.official_resource;if(!r||!r.ok||r.unsupported)return null;if((a.provider||'workbuddy')!=='workbuddy'&&r.unit&&r.unit!=='credit')return null;const v=r.total_dosage??r.available_total??r.remaining;if(v==null||v==='')return null;return Number(v)}
-  function officialMeta(a){const r=a.official_resource;if(!r)return '未刷新';if(r.unsupported)return '无积分接口';if(!r.ok)return r.message||'加载失败';if((a.provider||'workbuddy')!=='workbuddy')return '积分';return '30 天内到期 '+credit(r.expiring_30d_total)+' · '+(r.package_count||0)+' 包'+(r.stale?' · 旧缓存':'')}
-  function cacheAge(a){const r=a.official_resource;if(!r)return '';const v=Number(r.age_seconds||0);if(v<60)return v+'s 前';if(v<3600)return Math.floor(v/60)+'m 前';return Math.floor(v/3600)+'h 前'}
-  function officialWarn(a){return Number(a.official_resource?.expiring_30d_total||0)>0}
-  function checkinOf(a){return checkins.value[a.id]||null}
-  function checkinClass(a){const r=checkinOf(a);if(!r)return 'inactive';if(!r.ok)return 'err';if(r.claimed||r.already_claimed||r.today_checked_in)return r.stale?'warn':'ok';return 'warn'}
-  function checkinText(a){const r=checkinOf(a);if(!r)return checkinLoading.value?'读取中':'未知';if(r.claimed)return '刚领 '+credit(r.credit);if(r.already_claimed||r.today_checked_in)return '今日已领';if(!r.ok)return '失败';return '可领取'}
   function tokenLife(a){if(a.token_expired)return '过期';const h=Number(a.remaining_hours||0);if(h>=72)return '约 '+Math.floor(h/24)+' 天';if(h>=24)return Math.floor(h/24)+' 天 '+(h%24)+'h';return h+'h'}
   const visibleAccounts=computed(()=>{
     const q=filters.q.trim().toLowerCase();
@@ -651,25 +574,16 @@ createApp({
       const hay=[a.nickname,a.name,a.uid,a.domain,a.status].join(' ').toLowerCase();
       if(q&&!hay.includes(q))return false;
       if(filters.status!=='all'&&a.status!==filters.status)return false;
-      const ck=checkinOf(a);
-      if(filters.claim==='claimed'&&!(ck&&(ck.claimed||ck.already_claimed||ck.today_checked_in)))return false;
-      if(filters.claim==='available'&&!(ck&&ck.ok&&!ck.claimed&&!ck.already_claimed&&!ck.today_checked_in))return false;
-      if(filters.claim==='failed'&&!(ck&&!ck.ok))return false;
       return true;
     });
     rows=[...rows];
     rows.sort((a,b)=>{
-      if(filters.sort==='balance')return (officialBalance(b)??-1)-(officialBalance(a)??-1);
       if(filters.sort==='used')return Number(b.total_credits||0)-Number(a.total_credits||0);
       if(filters.sort==='requests')return Number(b.total_requests||0)-Number(a.total_requests||0);
-      if(filters.sort==='expire')return Number(a.official_resource?.next_expire_ts||9999999999)-Number(b.official_resource?.next_expire_ts||9999999999);
       return Number(b.priority||0)-Number(a.priority||0)||Number(b.weight||1)-Number(a.weight||1)||Number(a.total_requests||0)/Math.max(1,Number(a.weight||1))-Number(b.total_requests||0)/Math.max(1,Number(b.weight||1));
     });
     return rows;
   })
-  function shortTime(v){if(!v)return '-';return String(v).replace(/:00$/,'').slice(5,16)}
-  function expireText(x){if(x.expired)return '已过期';if(x.days_to_expire===null||x.days_to_expire===undefined)return x.expire_time||'长期';if(x.days_to_expire<0)return '已过期';if(x.days_to_expire<=7)return x.days_to_expire+' 天内';return shortTime(x.expire_time)}
-  function pkgBadge(x){if(x.expired)return 'err';if(Number(x.days_to_expire)>=0&&Number(x.days_to_expire)<=7)return 'inactive';return 'ok'}
   function clearPath(){authPath.value='';discover('')}
   function stopSoloPoll(){if(soloTimer){clearTimeout(soloTimer);soloTimer=null}}
   async function startSoloLogin(){if(soloBusy.value)return;stopSoloPoll();soloGen++;const gen=soloGen;soloBusy.value=true;try{const r=await api.post('/admin/traesolo/login/start',{},p.token);if(gen!==soloGen)return;solo.pending=true;solo.url=r.login_url||'';solo.pendingId=r.pending_id||'';solo.callbackUrl=r.callback_url||'';solo.state='pending';solo.uid='';solo.error='';window.open(r.login_url,'_blank');pollSolo(gen)}catch(e){if(gen===soloGen){solo.pending=false;solo.error=''}p.toast(apiErr(e,'发起 SOLO 登录失败'),'err')}soloBusy.value=false}
@@ -677,10 +591,10 @@ createApp({
   async function cancelSolo(){if(!solo.pendingId)return;stopSoloPoll();soloGen++;try{await api.post('/admin/traesolo/login/cancel',{pending_id:solo.pendingId},p.token);solo.pending=false;solo.state='canceled';solo.error=''}catch(e){}}
   async function completeSolo(){const u=solo.manual.trim();if(!u){p.toast('请先粘贴完整回调 URL','err');return}soloBusy.value=true;try{const r=await api.post('/admin/traesolo/login/complete',{callback:u},p.token);if(r.ok){p.toast('SOLO 账号已添加'+(r.uid?'（'+r.uid+'）':''),'ok');solo.manual='';await load();await discover()}else{p.toast(r.error||'导入失败','err')}}catch(e){p.toast(apiErr(e,'导入失败'),'err')}soloBusy.value=false}
 
-  onMounted(()=>{loadChannels();load(true);discover()});return{l,visibleAccounts,filters,ld,sa,ai,nm,disc,dl,scanning,adding,authPath,test,claim,pkg,tl,claimingAll,officialRefreshing,checkins,checkinSummary,checkinLoading,busyKey,dirty,load,loadCheckins,discover,scan,scanCustom,add,ref2,saveMeta,toggle,testOne,claimOne,claimAll,refreshAllResources,openPackages,refreshPackages,del,fmt,size,credit,tok,creditPct,claimText,officialBalance,officialMeta,cacheAge,officialWarn,checkinClass,checkinText,tokenLife,shortTime,expireText,pkgBadge,clearPath,I,discChannel,channels,solo,soloBusy,startSoloLogin,cancelSolo,completeSolo}
+  onMounted(()=>{loadChannels();load();discover()});return{l,visibleAccounts,filters,ld,sa,ai,nm,disc,dl,scanning,adding,authPath,test,tl,busyKey,dirty,load,discover,scan,scanCustom,add,ref2,saveMeta,toggle,testOne,del,fmt,size,credit,tok,creditPct,tokenLife,clearPath,I,discChannel,channels,solo,soloBusy,startSoloLogin,cancelSolo,completeSolo}
 },template:`
 <div>
-  <div class="phead"><h1>账号管理</h1><p>粘性主账号 · 失败自动切换</p></div>
+  <div class="phead"><h1>账号管理</h1><p>账号导入 · 调度权重与优先级 · 连通性测试（官方额度与积分领取在「额度与积分」页）</p></div>
   <div class="card">
     <div class="card-h">本机登录检测<span class="sub">只显示文件信息，不显示 token</span></div>
     <div class="card-p">
@@ -747,20 +661,93 @@ createApp({
       </template>
     </div>
   </div>
-  <div class="tbar"><button class="btn s" @click="load(true)" :disabled="ld||officialRefreshing"><span v-html="I.refresh"></span>{{ld?'刷新中':'刷新列表'}}</button><button class="btn s" @click="refreshAllResources()" :disabled="officialRefreshing||!l.some(a=>a.status==='active')">{{officialRefreshing?'刷新中':'刷新官方额度'}}</button><button class="btn s" @click="loadCheckins(true)" :disabled="checkinLoading">{{checkinLoading?'读取中':'刷新领取状态'}}</button><button class="btn s pri" @click="claimAll" :disabled="claimingAll||!l.some(a=>a.status==='active')">{{claimingAll?'领取中':'一键领取今日积分'}}</button><button class="btn s" @click="sa=true"><span v-html="I.plus"></span>高级手动添加</button><div class="spacer"></div><span class="tag" v-if="checkinSummary">可领 {{checkinSummary.available}} · 已领 {{checkinSummary.already_claimed}}</span><span class="tag" v-if="l.length">{{visibleAccounts.length}}/{{l.length}}个 · {{l.filter(a=>a.status==='active').length}}活跃</span></div>
+  <div class="tbar"><button class="btn s" @click="load()" :disabled="ld"><span v-html="I.refresh"></span>{{ld?'刷新中':'刷新列表'}}</button><button class="btn s" @click="sa=true"><span v-html="I.plus"></span>高级手动添加</button><div class="spacer"></div><span class="tag" v-if="l.length">{{visibleAccounts.length}}/{{l.length}}个 · {{l.filter(a=>a.status==='active').length}}活跃</span></div>
   <div v-if="ld" class="load"><div class="spin"></div></div>
-  <div class="card" v-else-if="l.length"><div class="card-h">账号列表<span class="sub">官方额度来自 Work Buddy 资源接口；每日领取的 150 按官方返回的约 1 个月到期时间展示</span></div><div class="card-p" style="padding-bottom:0"><div class="control-row"><input class="searchbox" v-model="filters.q" placeholder="搜索账号 / UID / 域名"/><select class="selectctl" v-model="filters.status"><option value="all">全部状态</option><option value="active">active</option><option value="inactive">inactive</option><option value="expired">expired</option></select><select class="selectctl" v-model="filters.claim"><option value="all">全部领取状态</option><option value="available">可领取</option><option value="claimed">今日已领</option><option value="failed">领取失败</option></select><select class="selectctl" v-model="filters.sort"><option value="priority">优先级 / 权重</option><option value="balance">官方余额高到低</option><option value="expire">最近到期优先</option><option value="requests">请求数高到低</option><option value="used">累计已用高到低</option></select><div class="spacer"></div><span class="tag">当前 {{visibleAccounts.length}} 条</span></div></div><div class="table-scroll"><table><thead><tr><th>账号</th><th>通道</th><th>UID</th><th>状态</th><th>今日领取</th><th>权重</th><th>优先级</th><th>官方余额</th><th>即将到期</th><th>本地估算</th><th>本地快照</th><th>Token 有效期</th><th>请求</th><th>Token</th><th>累计已用</th><th></th></tr></thead><tbody>
-    <tr v-for="a in visibleAccounts" :key="a.id"><td style="font-weight:600">{{a.nickname||a.name}} <span class="tag warn" v-if="dirty(a)">未保存</span></td><td><span class="tag">{{a.provider||'workbuddy'}}</span></td><td class="mono">{{a.uid?.slice(0,8)}}…</td><td><span class="badge" :class="a.status">{{a.status}}</span></td><td><span class="badge" :class="checkinClass(a)">{{checkinText(a)}}</span><div class="cache-note" v-if="checkins[a.id]?.stale">旧缓存</div></td><td><input class="numctl" v-model.number="a._weight" type="number" min="1" max="100"/></td><td><input class="numctl" v-model.number="a._priority" type="number" min="-100" max="100"/></td><td class="official-cell"><div class="official-main"><span class="official-val" v-if="officialBalance(a)!==null">{{credit(officialBalance(a))}}</span><span class="official-val unset" v-else>{{busyKey(a.id,'resource')?'读取中':(a.official_resource?.unsupported?'无积分':(a.official_resource&&!a.official_resource.ok?'失败':'未刷新'))}}</span><button class="btn s" @click="openPackages(a)" :disabled="busyKey(a.id,'resource')">明细</button></div><div class="official-meta" :class="{'pkg-warn':officialWarn(a)}">{{officialMeta(a)}}</div><div class="cache-note" v-if="a.official_resource">缓存 {{cacheAge(a)}}</div></td><td class="official-cell"><div class="official-main"><span class="official-val" :class="{'pkg-warn':officialWarn(a)}">{{credit(a.official_resource?.expiring_30d_total)}}</span><span class="tag" v-if="a.official_resource?.next_expire_time">{{shortTime(a.official_resource.next_expire_time)}}</span></div><div class="official-meta">最近到期 {{credit(a.official_resource?.next_expire_amount)}} · {{a.official_resource?.next_expire_days??'-'}} 天</div></td><td class="credit-cell"><div class="credit-main"><span class="credit-rem" v-if="a.credit_snapshot>0">{{credit(a.credit_remaining)}}</span><span class="credit-rem unset" v-else>未设置</span><span class="tag">{{a.credit_snapshot>0?credit(a.credit_used_pct)+'%':'备用'}}</span></div><div class="credit-meta" v-if="a.credit_snapshot<=0&&a.total_credits>0">累计消耗(估算) {{credit(a.total_credits)}}</div><div class="progress" :class="{err:a.credit_snapshot>0&&a.credit_used_pct>=90,ok:a.credit_snapshot>0&&a.credit_used_pct<70}"><span :style="{width:creditPct(a)}"></span></div><div class="credit-meta">{{a.credit_snapshot>0?'快照后已用 '+credit(a.credit_since_snapshot):'官方失败时可手动校准'}}</div></td><td><input class="numctl credit" v-model.number="a._creditSnapshot" type="number" min="0" step="0.01" placeholder="0"/></td><td>{{tokenLife(a)}}</td><td>{{a.total_requests}}</td><td>{{tok(a.total_tokens)}}</td><td>{{credit(a.total_credits)}}</td><td><div class="ops"><button class="btn s" @click="saveMeta(a)" :disabled="!dirty(a)||busyKey(a.id,'save')">{{busyKey(a.id,'save')?'保存中':'保存'}}</button><button class="btn s" @click="refreshResource(a,false,true)" :disabled="busyKey(a.id,'resource')||a.status!=='active'">{{busyKey(a.id,'resource')?'刷新中':'额度'}}</button><button class="btn s" @click="claimOne(a)" :disabled="busyKey(a.id,'claim')||a.status!=='active'">{{busyKey(a.id,'claim')?'领取中':'领取'}}</button><button class="btn s" @click="toggle(a)" :disabled="busyKey(a.id,'toggle')">{{busyKey(a.id,'toggle')?'处理中':(a.status==='active'?'禁用':'启用')}}</button><button class="btn s" @click="testOne(a)" :disabled="tl===a.id">{{tl===a.id?'测试中':'测试'}}</button><button class="btn s" @click="ref2(a)" :disabled="busyKey(a.id,'refresh')">{{busyKey(a.id,'refresh')?'刷新中':'刷新'}}</button><button class="btn s danger" @click="del(a)">删除</button></div></td></tr>
-    <tr v-if="!visibleAccounts.length"><td colspan="16" class="empty">没有匹配的账号</td></tr>
+  <div class="card" v-else-if="l.length"><div class="card-h">账号列表<span class="sub">调度权重 / 优先级 / 余额快照 · 官方额度与每日积分在「额度与积分」页</span></div><div class="card-p" style="padding-bottom:0"><div class="control-row"><input class="searchbox" v-model="filters.q" placeholder="搜索账号 / UID / 域名"/><select class="selectctl" v-model="filters.status"><option value="all">全部状态</option><option value="active">active</option><option value="inactive">inactive</option><option value="expired">expired</option></select><select class="selectctl" v-model="filters.sort"><option value="priority">优先级 / 权重</option><option value="requests">请求数高到低</option><option value="used">累计已用高到低</option></select><div class="spacer"></div><span class="tag">当前 {{visibleAccounts.length}} 条</span></div></div><div class="table-scroll"><table><thead><tr><th>账号</th><th>通道</th><th>UID</th><th>状态</th><th>权重</th><th>优先级</th><th>余额快照</th><th>Token 有效期</th><th>请求</th><th>Token</th><th>累计已用</th><th></th></tr></thead><tbody>
+    <tr v-for="a in visibleAccounts" :key="a.id"><td style="font-weight:600">{{a.nickname||a.name}} <span class="tag warn" v-if="dirty(a)">未保存</span></td><td><span class="tag">{{a.provider||'workbuddy'}}</span></td><td class="mono">{{a.uid?.slice(0,8)}}…</td><td><span class="badge" :class="a.status">{{a.status}}</span></td><td><input class="numctl" v-model.number="a._weight" type="number" min="1" max="100"/></td><td><input class="numctl" v-model.number="a._priority" type="number" min="-100" max="100"/></td><td class="credit-cell"><input class="numctl credit" v-model.number="a._creditSnapshot" type="number" min="0" step="0.01" placeholder="0"/><div class="credit-meta" v-if="a.credit_snapshot>0">余 {{credit(a.credit_remaining)}} · 已用 {{creditPct(a)}}</div><div class="credit-meta" v-else-if="a.total_credits>0">累计消耗(估算) {{credit(a.total_credits)}}</div><div class="credit-meta" v-else>官方失败时可手动校准</div></td><td>{{tokenLife(a)}}</td><td>{{a.total_requests}}</td><td>{{tok(a.total_tokens)}}</td><td>{{credit(a.total_credits)}}</td><td><div class="ops"><button class="btn s" @click="saveMeta(a)" :disabled="!dirty(a)||busyKey(a.id,'save')">{{busyKey(a.id,'save')?'保存中':'保存'}}</button><button class="btn s" @click="toggle(a)" :disabled="busyKey(a.id,'toggle')">{{busyKey(a.id,'toggle')?'处理中':(a.status==='active'?'禁用':'启用')}}</button><button class="btn s" @click="testOne(a)" :disabled="tl===a.id">{{tl===a.id?'测试中':'测试'}}</button><button class="btn s" @click="ref2(a)" :disabled="busyKey(a.id,'refresh')">{{busyKey(a.id,'refresh')?'刷新中':'刷新'}}</button><button class="btn s danger" @click="del(a)">删除</button></div></td></tr>
+    <tr v-if="!visibleAccounts.length"><td colspan="12" class="empty">没有匹配的账号</td></tr>
   </tbody></table></div></div>
   <div class="card card-p empty" v-else><div class="em">🔌</div><p>暂无账号 · 先使用上方本机登录检测导入</p></div>
-  <div class="ov" v-if="pkg" @click.self="pkg=null"><div class="modal wide"><div class="modal-h"><h3>官方额度明细 · {{pkg.account.nickname||pkg.account.name}}</h3><button class="x" @click="pkg=null">&times;</button></div><div class="modal-b"><div class="pkg-grid"><div class="pkg-kpi"><div class="k">官方余额</div><div class="v">{{credit(pkg.resource.total_dosage)}}</div></div><div class="pkg-kpi"><div class="k">30 天内到期</div><div class="v" :class="{'pkg-warn':Number(pkg.resource.expiring_30d_total||0)>0}">{{credit(pkg.resource.expiring_30d_total)}}</div></div><div class="pkg-kpi"><div class="k">额度包</div><div class="v">{{pkg.resource.package_count||0}}</div></div></div><div class="testbox" v-if="!pkg.resource.ok"><div class="row"><span>状态</span><span><span class="badge err">失败</span></span></div><div class="msg">{{pkg.resource.message||'官方额度读取失败'}}</div></div><table class="mini-table" v-else-if="pkg.resource.packages?.length"><thead><tr><th>额度包</th><th>剩余</th><th>已用</th><th>大小</th><th>周期</th><th>到期</th><th>状态</th></tr></thead><tbody><tr v-for="(x,i) in pkg.resource.packages" :key="i"><td><div class="pkg-name" :title="x.package_name">{{x.package_name}}</div><div class="hint">{{x.product_name||x.package_type||x.resource_type}}</div></td><td class="mono">{{credit(x.remaining_precise)}}</td><td class="mono">{{credit(x.cycle_used||x.used)}}</td><td class="mono">{{credit(x.cycle_size||x.size)}}</td><td class="pkg-time">{{shortTime(x.cycle_start)}} → {{shortTime(x.cycle_end)}}</td><td class="pkg-time" :class="{'pkg-warn':Number(x.days_to_expire)>=0&&Number(x.days_to_expire)<=30}">{{x.expire_time||'-'}}<div class="hint">{{expireText(x)}}</div></td><td><span class="badge" :class="pkgBadge(x)">{{x.expired?'已过期':'可用'}}</span></td></tr></tbody></table><div class="empty" v-else>暂无额度包明细</div><div class="hint" style="margin-top:10px">每日领取的 150 会作为独立额度资源进入这里；实际到期时间以官方返回的 CycleEndTime / DeductionEndTime 为准。</div></div><div class="modal-f"><button class="btn" @click="refreshPackages" :disabled="busyKey(pkg.account.id,'resource')">{{busyKey(pkg.account.id,'resource')?'刷新中':'刷新'}}</button><button class="btn pri" @click="pkg=null">关闭</button></div></div></div>
-  <div class="ov" v-if="claim" @click.self="claim=null"><div class="modal"><div class="modal-h"><h3>{{claim.title}}</h3><button class="x" @click="claim=null">&times;</button></div><div class="modal-b"><div class="testbox" v-if="claim.summary"><div class="row"><span>账号</span><span>{{claim.summary.total}}</span></div><div class="row"><span>本次领取</span><span>{{claim.summary.claimed}} · {{credit(claim.summary.credit)}} credit</span></div><div class="row"><span>今日已领</span><span>{{claim.summary.already_claimed}}</span></div><div class="row"><span>失败</span><span>{{claim.summary.failed}}</span></div></div><table class="mini-table" style="margin-top:10px" v-if="claim.results?.length"><thead><tr><th>账号</th><th>结果</th><th>连续</th><th>HTTP</th></tr></thead><tbody><tr v-for="r in claim.results" :key="r.account_id"><td>{{r.account_name}}</td><td><span class="badge" :class="r.ok?'ok':'err'">{{claimText(r)}}</span></td><td>{{r.streak_days??'-'}}</td><td class="mono">{{r.status_code||'-'}}</td></tr></tbody></table><div class="hint" style="margin-top:8px">这是手动触发的领取动作；不会定时领取，也不会绕过验证或风控。</div></div><div class="modal-f"><button class="btn pri" @click="claim=null">关闭</button></div></div></div>
   <div class="ov" v-if="test" @click.self="test=null"><div class="modal"><div class="modal-h"><h3>账号测试 · {{test.account}}</h3><button class="x" @click="test=null">&times;</button></div><div class="modal-b"><div class="testbox"><div class="row"><span>状态</span><span><span class="badge" :class="test.result.ok?'ok':'err'">{{test.result.ok?'成功':'失败'}}</span></span></div><div class="row"><span>HTTP</span><span class="mono">{{test.result.status_code}}</span></div><div class="row"><span>耗时</span><span class="mono">{{test.result.duration_ms}}ms</span></div><div class="row" v-if="test.result.model"><span>模型</span><span class="mono">{{test.result.model}}</span></div><div class="row" v-if="test.result.usage"><span>Token</span><span class="mono">{{tok(test.result.usage.total_tokens)}}</span></div><div class="msg">{{test.result.message||'无返回内容'}}</div></div><div class="hint" style="margin-top:8px">测试会发送一次极短请求，并记录到请求日志。</div></div><div class="modal-f"><button class="btn pri" @click="test=null">关闭</button></div></div></div>
   <div class="ov" v-if="sa" @click.self="sa=false"><div class="modal"><div class="modal-h"><h3>高级手动添加</h3><button class="x" @click="sa=false">&times;</button></div><div class="modal-b"><div class="field"><label>名称</label><input v-model="nm" placeholder="可选"/></div><div class="field"><label>Auth JSON</label><textarea v-model="ai" placeholder="粘贴 .info 文件内容"></textarea><div class="hint">只有自动检测失败时才需要手动粘贴完整 JSON。</div></div></div><div class="modal-f"><button class="btn" @click="sa=false" :disabled="adding">取消</button><button class="btn pri" @click="add" :disabled="adding">{{adding?'添加中':'添加'}}</button></div></div></div>
 </div>`
+}).component('quota',{props:['token','toast'],setup(p){
+  const l=ref([]),creditSum=ref(null),ld=ref(true),cld=ref(false),checkins=ref({}),checkinSummary=ref(null),checkinLoading=ref(false),claimingAll=ref(false),officialRefreshing=ref(false),pkg=ref(null),claim=ref(null),busy=ref({});
+  function busyKey(id,k){return busy.value[id+'-'+k]}
+  function withBusy(id,k,fn){busy.value={...busy.value,[id+'-'+k]:true};try{return fn()}finally{const o={...busy.value};delete o[id+'-'+k];busy.value=o}}
+  function chName(a){return a.provider||'workbuddy'}
+  async function load(){ld.value=true;try{l.value=await api.get('/admin/accounts',p.token)}catch(e){p.toast(apiErr(e),'err')}ld.value=false;await loadCheckins(false);await loadCredit(false)}
+  async function loadCredit(force){try{creditSum.value=await api.get('/admin/credit-summary'+(force?'?force=1':''),p.token)}catch(e){if(force)p.toast(apiErr(e,'官方额度加载失败'),'err')}}
+  async function loadCheckins(force=false){checkinLoading.value=true;try{const r=await api.get('/admin/accounts/checkin-status-all'+(force?'?force=1':''),p.token);checkinSummary.value=r;const map={};(r.results||[]).forEach(x=>{map[x.account_id]=x});checkins.value=map}catch(e){if(force)p.toast(apiErr(e,'签到状态加载失败'),'err')}checkinLoading.value=false}
+  async function refreshAllResources(){if(officialRefreshing.value)return;officialRefreshing.value=true;const targets=l.value.filter(a=>a.status==='active');await Promise.all(targets.map(a=>refreshResource(a,true,true)));officialRefreshing.value=false;p.toast('官方额度已刷新 '+targets.length+' 个账号','ok')}
+  async function refreshResource(a,silent=false,force=false){return await withBusy(a.id,'resource',async()=>{try{const r=await api.get('/admin/accounts/'+a.id+'/resources'+(force?'?force=1':''),p.token);a.official_resource=r;if(!silent)p.toast(r.ok?(r.stale?'已显示旧额度缓存':'官方额度已刷新'):('官方额度失败：'+(r.message||r.status_code)),r.ok?'ok':'err');return r}catch(e){const r={ok:false,account_id:a.id,message:apiErr(e,'官方额度加载失败'),packages:[]};a.official_resource=r;if(!silent)p.toast(r.message,'err');return r}})}
+  async function openPackages(a){if(!a.official_resource&&!busyKey(a.id,'resource'))await refreshResource(a,true);pkg.value={account:a,resource:a.official_resource||{ok:false,message:'未获取官方额度',packages:[]}}}
+  async function refreshPackages(){if(!pkg.value)return;const r=await refreshResource(pkg.value.account,true);pkg.value={account:pkg.value.account,resource:r||pkg.value.account.official_resource||pkg.value.resource}}
+  async function claimOne(a){await withBusy(a.id,'claim',async()=>{try{const r=await api.post('/admin/accounts/'+a.id+'/checkin',{},p.token);checkins.value={...checkins.value,[a.id]:r};claim.value={title:'领取结果',results:[r]};p.toast(r.claimed?'领取成功':(r.already_claimed?'今日已领':'领取失败'),r.ok?'ok':'err');await loadCredit(true);await loadCheckins(true)}catch(e){p.toast(apiErr(e,'领取失败'),'err')}})}
+  async function claimAll(){if(claimingAll.value)return;claimingAll.value=true;try{const r=await api.post('/admin/accounts/checkin-all',{},p.token);claim.value={title:'一键领取结果',summary:r,results:r.results||[]};p.toast('领取 '+r.claimed+' · 已领 '+r.already_claimed+' · 失败 '+r.failed,r.failed?'err':'ok');await load();await loadCredit(true)}catch(e){p.toast(apiErr(e,'一键领取失败'),'err')}claimingAll.value=false}
+  function fmt(t){return t?new Date(t*1000).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'-'}
+  function credit(v){v=Number(v||0);return v.toLocaleString('zh-CN',{maximumFractionDigits:4})}
+  function age(v){v=Number(v||0);if(v<60)return v+'s';if(v<3600)return Math.floor(v/60)+'m';return Math.floor(v/3600)+'h'}
+  function officialBalance(a){const r=a.official_resource;if(!r||!r.ok||r.unsupported)return null;if((a.provider||'workbuddy')!=='workbuddy'&&r.unit&&r.unit!=='credit')return null;const v=r.total_dosage??r.available_total??r.remaining;if(v==null||v==='')return null;return Number(v)}
+  function officialMeta(a){const r=a.official_resource;if(!r)return '未刷新';if(r.unsupported)return '无积分接口';if(!r.ok)return r.message||'加载失败';if((a.provider||'workbuddy')!=='workbuddy')return '积分';return '30 天内到期 '+credit(r.expiring_30d_total)+' · '+(r.package_count||0)+' 包'+(r.stale?' · 旧缓存':'')}
+  function cacheAge(a){const r=a.official_resource;if(!r)return '';const v=Number(r.age_seconds||0);if(v<60)return v+'s 前';if(v<3600)return Math.floor(v/60)+'m 前';return Math.floor(v/3600)+'h 前'}
+  function officialWarn(a){return Number(a.official_resource?.expiring_30d_total||0)>0}
+  function expireMeta(a){if(a.next_expire_days===null||a.next_expire_days===undefined)return '无明确到期';return a.next_expire_days+' 天 · '+(a.next_expire_time||'-')}
+  function checkinOf(a){return checkins.value[a.id]||null}
+  function checkinClass(a){const r=checkinOf(a);if(!r)return 'inactive';if(!r.ok)return 'err';if(r.claimed||r.already_claimed||r.today_checked_in)return r.stale?'warn':'ok';return 'warn'}
+  function checkinText(a){const r=checkinOf(a);if(!r)return checkinLoading.value?'读取中':'未知';if(r.claimed)return '刚领 '+credit(r.credit);if(r.already_claimed||r.today_checked_in)return '今日已领';if(!r.ok)return '失败';return '可领取'}
+  function claimText(r){if(r.claimed)return '已领取 '+credit(r.credit);if(r.already_claimed)return '今日已领';return r.message||'失败'}
+  function shortTime(v){if(!v)return '-';return String(v).replace(/:00$/,'').slice(5,16)}
+  function expireText(x){if(x.expired)return '已过期';if(x.days_to_expire===null||x.days_to_expire===undefined)return x.expire_time||'长期';if(x.days_to_expire<0)return '已过期';if(x.days_to_expire<=7)return x.days_to_expire+' 天内';return shortTime(x.expire_time)}
+  function pkgBadge(x){if(x.expired)return 'err';if(Number(x.days_to_expire)>=0&&Number(x.days_to_expire)<=7)return 'inactive';return 'ok'}
+  const rows=computed(()=>[...l.value].sort((a,b)=>(a.status==='active'?0:1)-(b.status==='active'?0:1)||(officialBalance(b)??-1)-(officialBalance(a)??-1)));
+  const alerts=computed(()=>{const c=creditSum.value;if(!c)return[];return c.expiring_accounts?.length?c.expiring_accounts:(c.low_accounts||[])});
+  onMounted(load);return{l,ld,cld,checkins,checkinSummary,checkinLoading,claimingAll,officialRefreshing,pkg,claim,busyKey,withBusy,load,loadCredit,loadCheckins,refreshAllResources,refreshResource,openPackages,refreshPackages,claimOne,claimAll,rows,alerts,creditSum,fmt,credit,age,officialBalance,officialMeta,cacheAge,officialWarn,expireMeta,checkinOf,checkinClass,checkinText,claimText,shortTime,expireText,pkgBadge,chName,I}
+},template:`
+<div>
+  <div class="phead"><h1>额度与积分</h1><p>官方余额 · 额度包明细 · 每日积分领取（每日领取的 150 按官方返回的约 1 个月到期时间展示）</p></div>
+  <div class="tbar"><button class="btn s" @click="refreshAllResources()" :disabled="officialRefreshing||!l.some(a=>a.status==='active')">{{officialRefreshing?'刷新中':'刷新官方额度'}}</button><button class="btn s" @click="loadCheckins(true)" :disabled="checkinLoading">{{checkinLoading?'读取中':'刷新领取状态'}}</button><button class="btn s" @click="loadCredit(true)" :disabled="cld">{{cld?'刷新中':'刷新汇总缓存'}}</button><button class="btn s pri" @click="claimAll" :disabled="claimingAll||!l.some(a=>a.status==='active')">{{claimingAll?'领取中':'一键领取今日积分'}}</button><div class="spacer"></div><span class="tag" v-if="checkinSummary">可领 {{checkinSummary.available}} · 已领 {{checkinSummary.already_claimed}}</span></div>
+  <div v-if="ld" class="load"><div class="spin"></div></div>
+  <template v-else>
+    <div class="dash-grid">
+      <div class="card">
+        <div class="card-h">官方额度概览<span class="sub">{{creditSum?.ok_accounts||0}}/{{creditSum?.active_accounts||0}} 账号已读取 · 缓存 {{creditSum?.stale_accounts||0}}</span></div>
+        <div class="card-p">
+          <div class="metric-row">
+            <div class="metric" v-for="ch in (creditSum?.channels||[])" :key="ch.id"><div class="m-label">{{ch.display_name||ch.id}}</div><div class="m-value">{{ch.unit==='credit'&&ch.remaining!=null?credit(ch.remaining):'—'}}</div><div class="m-sub">积分 · {{ch.accounts||0}} 账号{{ch.unsupported?' · 无积分接口':''}}</div></div>
+            <div class="metric" v-if="!(creditSum?.channels||[]).length"><div class="m-label">官方额度</div><div class="m-value">—</div><div class="m-sub">按通道分别统计，不跨厂加总</div></div>
+            <div class="metric"><div class="m-label">7 天内到期</div><div class="m-value" :class="{'warn-text':Number(credit?.expiring_7d_total)>0}">{{credit(creditSum?.expiring_7d_total)}}</div><div class="m-sub">仅 WorkBuddy</div></div>
+            <div class="metric"><div class="m-label">30 天内到期</div><div class="m-value" :class="{'warn-text':Number(credit?.expiring_30d_total)>0}">{{credit(creditSum?.expiring_30d_total)}}</div><div class="m-sub">{{creditSum?.package_count||0}} 个额度包</div></div>
+          </div>
+          <div class="status-line" style="margin-top:12px">
+            <span class="badge" :class="credit?.failed_accounts?'warn':'ok'">失败 {{creditSum?.failed_accounts||0}}</span>
+            <span class="badge" :class="credit?.stale_accounts?'warn':'ok'">旧缓存 {{creditSum?.stale_accounts||0}}</span>
+            <span class="tag" v-if="creditSum?.updated_at">更新时间 {{fmt(creditSum.updated_at)}}</span>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-h">额度提醒<span class="sub">低余额 / 即将到期</span></div>
+        <div class="card-p rank-list" v-if="alerts.length">
+          <div class="rank-item" v-for="a in alerts" :key="a.account_id">
+            <div><div class="rank-name">{{a.account_name||a.account_id}}</div><div class="rank-meta">{{expireMeta(a)}}<span v-if="a.stale"> · 旧缓存 {{age(a.age_seconds)}}</span></div><div class="progress" :class="{err:a.expiring_30d_total>0}"><span :style="{width:Math.min(100,(a.expiring_30d_total||0)/Math.max(a.balance||1,1)*100)+'%'}"></span></div></div>
+            <div class="rank-value">{{credit(a.balance)}}</div>
+          </div>
+        </div>
+        <div class="empty" v-else>暂无低余额或即将到期提醒</div>
+      </div>
+    </div>
+    <div class="card" v-if="l.length"><div class="card-h">账号额度与积分<span class="sub">官方余额来自各通道资源接口；领取为手动触发，不会定时领取，也不会绕过验证或风控</span></div><div class="table-scroll"><table><thead><tr><th>账号</th><th>通道</th><th>状态</th><th>今日领取</th><th>官方余额</th><th>额度包到期</th><th></th></tr></thead><tbody>
+      <tr v-for="a in rows" :key="a.id"><td style="font-weight:600">{{a.nickname||a.name}}</td><td><span class="tag">{{chName(a)}}</span></td><td><span class="badge" :class="a.status">{{a.status}}</span></td><td><span class="badge" :class="checkinClass(a)">{{checkinText(a)}}</span><div class="cache-note" v-if="checkins[a.id]?.stale">旧缓存</div></td><td class="official-cell"><div class="official-main"><span class="official-val" v-if="officialBalance(a)!==null">{{credit(officialBalance(a))}}</span><span class="official-val unset" v-else>{{busyKey(a.id,'resource')?'读取中':(a.official_resource?.unsupported?'无积分':(a.official_resource&&!a.official_resource.ok?'失败':'未刷新'))}}</span></div><div class="official-meta" :class="{'pkg-warn':officialWarn(a)}">{{officialMeta(a)}}</div><div class="cache-note" v-if="a.official_resource">缓存 {{cacheAge(a)}}</div></td><td class="official-cell"><div class="official-main"><span class="official-val" :class="{'pkg-warn':officialWarn(a)}">{{credit(a.official_resource?.expiring_30d_total)}}</span><span class="tag" v-if="a.official_resource?.next_expire_time">{{shortTime(a.official_resource.next_expire_time)}}</span></div><div class="official-meta">最近到期 {{credit(a.official_resource?.next_expire_amount)}} · {{a.official_resource?.next_expire_days??'-'}} 天</div></td><td><div class="ops"><button class="btn s" @click="openPackages(a)" :disabled="busyKey(a.id,'resource')">{{busyKey(a.id,'resource')?'读取中':'额度明细'}}</button><button class="btn s" @click="claimOne(a)" :disabled="busyKey(a.id,'claim')||a.status!=='active'">{{busyKey(a.id,'claim')?'领取中':'领取'}}</button></div></td></tr>
+      <tr v-if="!rows.length"><td colspan="7" class="empty">暂无账号</td></tr>
+    </tbody></table></div></div>
+    <div class="card card-p empty" v-else><div class="em">🔌</div><p>暂无账号 · 先在「账号管理」页导入</p></div>
+  </template>
+  <div class="ov" v-if="pkg" @click.self="pkg=null"><div class="modal wide"><div class="modal-h"><h3>官方额度明细 · {{pkg.account.nickname||pkg.account.name}}</h3><button class="x" @click="pkg=null">&times;</button></div><div class="modal-b"><div class="pkg-grid"><div class="pkg-kpi"><div class="k">官方余额</div><div class="v">{{credit(pkg.resource.total_dosage)}}</div></div><div class="pkg-kpi"><div class="k">30 天内到期</div><div class="v" :class="{'pkg-warn':Number(pkg.resource.expiring_30d_total||0)>0}">{{credit(pkg.resource.expiring_30d_total)}}</div></div><div class="pkg-kpi"><div class="k">额度包</div><div class="v">{{pkg.resource.package_count||0}}</div></div></div><div class="testbox" v-if="!pkg.resource.ok"><div class="row"><span>状态</span><span><span class="badge err">失败</span></span></div><div class="msg">{{pkg.resource.message||'官方额度读取失败'}}</div></div><table class="mini-table" v-else-if="pkg.resource.packages?.length"><thead><tr><th>额度包</th><th>剩余</th><th>已用</th><th>大小</th><th>周期</th><th>到期</th><th>状态</th></tr></thead><tbody><tr v-for="(x,i) in pkg.resource.packages" :key="i"><td><div class="pkg-name" :title="x.package_name">{{x.package_name}}</div><div class="hint">{{x.product_name||x.package_type||x.resource_type}}</div></td><td class="mono">{{credit(x.remaining_precise)}}</td><td class="mono">{{credit(x.cycle_used||x.used)}}</td><td class="mono">{{credit(x.cycle_size||x.size)}}</td><td class="pkg-time">{{shortTime(x.cycle_start)}} → {{shortTime(x.cycle_end)}}</td><td class="pkg-time" :class="{'pkg-warn':Number(x.days_to_expire)>=0&&Number(x.days_to_expire)<=30}">{{x.expire_time||'-'}}<div class="hint">{{expireText(x)}}</div></td><td><span class="badge" :class="pkgBadge(x)">{{x.expired?'已过期':'可用'}}</span></td></tr></tbody></table><div class="empty" v-else>暂无额度包明细</div><div class="hint" style="margin-top:10px">每日领取的 150 会作为独立额度资源进入这里；实际到期时间以官方返回的 CycleEndTime / DeductionEndTime 为准。</div></div><div class="modal-f"><button class="btn" @click="refreshPackages" :disabled="busyKey(pkg.account.id,'resource')">{{busyKey(pkg.account.id,'resource')?'刷新中':'刷新'}}</button><button class="btn pri" @click="pkg=null">关闭</button></div></div></div>
+  <div class="ov" v-if="claim" @click.self="claim=null"><div class="modal"><div class="modal-h"><h3>{{claim.title}}</h3><button class="x" @click="claim=null">&times;</button></div><div class="modal-b"><div class="testbox" v-if="claim.summary"><div class="row"><span>账号</span><span>{{claim.summary.total}}</span></div><div class="row"><span>本次领取</span><span>{{claim.summary.claimed}} · {{credit(claim.summary.credit)}} credit</span></div><div class="row"><span>今日已领</span><span>{{claim.summary.already_claimed}}</span></div><div class="row"><span>失败</span><span>{{claim.summary.failed}}</span></div></div><table class="mini-table" style="margin-top:10px" v-if="claim.results?.length"><thead><tr><th>账号</th><th>结果</th><th>连续</th><th>HTTP</th></tr></thead><tbody><tr v-for="r in claim.results" :key="r.account_id"><td>{{r.account_name}}</td><td><span class="badge" :class="r.ok?'ok':'err'">{{claimText(r)}}</span></td><td>{{r.streak_days??'-'}}</td><td class="mono">{{r.status_code||'-'}}</td></tr></tbody></table><div class="hint" style="margin-top:8px">这是手动触发的领取动作；不会定时领取，也不会绕过验证或风控。</div></div><div class="modal-f"><button class="btn pri" @click="claim=null">关闭</button></div></div></div>
+</div>`
 }).component('keys',{props:['token','toast'],setup(p){
-  const l=ref([]),ld=ref(true),sa=ref(false),f=reactive({name:'',models:'',limit:null,preset:'custom',channel:'workbuddy'}),res=ref(''),saving=ref(false),copied=ref(false),busy=ref({}),shown=ref({}),codexResult=ref(null),codexBusy=ref(false),channels=ref([{id:'workbuddy',display_name:'WorkBuddy'},{id:'qclaw',display_name:'QClaw'},{id:'qwenwork',display_name:'QwenWork / 千问办公'},{id:'traework',display_name:'TraeWork'},{id:'traesolo',display_name:'Trae SOLO'}]);
+  const l=ref([]),ld=ref(true),sa=ref(false),f=reactive({name:'',models:'',limit:null,preset:'custom',channel:'workbuddy'}),res=ref(''),saving=ref(false),copied=ref(false),busy=ref({}),shown=ref({}),channels=ref([{id:'workbuddy',display_name:'WorkBuddy'},{id:'qclaw',display_name:'QClaw'},{id:'qwenwork',display_name:'QwenWork / 千问办公'},{id:'traework',display_name:'TraeWork'},{id:'traesolo',display_name:'Trae SOLO'}]);
   const clientTypes=[
     {k:'custom',name:'默认',icon:'⚙'},
     {k:'codex',name:'Codex',icon:'◉'},
@@ -769,31 +756,18 @@ createApp({
     {k:'cherry',name:'Cherry Studio',icon:'◉'},
     {k:'nextchat',name:'NextChat',icon:'◉'},
   ];
-  const presets={
-    codex:{name:'Codex',autoName:'Codex',configTpl:(key)=>`# ~/.codex/config.toml\nmodel = "auto"\nmodel_provider = "buddy2api"\n\n[model_providers.buddy2api]\nname = "Buddy2api"\nbase_url = "http://127.0.0.1:8787/v1"\nwire_api = "responses"\nenv_key = "OPENAI_API_KEY"\n\n# ~/.codex/auth.json\n{"OPENAI_API_KEY":"${key}"}`,note:'Codex 强制 wire_api="responses"，本网关已内置协议转换+内容清洗+模型别名。配置后需完全重启 Codex。',canAutoWrite:true},
-    opencode:{name:'OpenCode',autoName:'OpenCode',configTpl:(key)=>`# opencode.json\n{\n  "provider": {\n    "workbuddy": {\n      "name": "workbuddy",\n      "npm": "@ai-sdk/openai-compatible",\n      "options": {\n        "baseURL": "http://127.0.0.1:8787/v1",\n        "apiKey": "${key}"\n      },\n      "models": {\n        "auto": { "name": "Auto", "limit": { "context": 200000, "output": 32000 } }\n      }\n    }\n  }\n}`,note:'运行 opencode run -m workbuddy/auto "你好" 测试。',canAutoWrite:false},
-    openclaw:{name:'OpenClaw',autoName:'OpenClaw',configTpl:(key)=>`# 环境变量\nexport OPENAI_BASE_URL=http://127.0.0.1:8787/v1\nexport OPENAI_API_KEY=${key}\nexport OPENAI_MODEL=auto`,note:'OpenClaw 通过环境变量配置，写入 shell profile 后 source 即可。',canAutoWrite:false},
-    cherry:{name:'Cherry Studio',autoName:'Cherry Studio',configTpl:(key)=>`Base URL: http://127.0.0.1:8787/v1\nAPI Key: ${key}\nModel: auto\n供应商类型: OpenAI Compatible`,note:'Cherry Studio 设置 → 模型服务 → 添加自定义供应商。',canAutoWrite:false},
-    nextchat:{name:'NextChat',autoName:'NextChat',configTpl:(key)=>`接口地址: http://127.0.0.1:8787\nAPI Key: ${key}\n模型: auto`,note:'NextChat 自定义接口地址填到 /v1 上一级。',canAutoWrite:false},
-    custom:{name:'默认',autoName:'',configTpl:(key)=>`Base URL: http://127.0.0.1:8787/v1\nAPI Key: ${key}\nModel: auto\nEndpoint: /v1/chat/completions`,note:'',canAutoWrite:false},
-  };
   function busyKey(id,k){return busy.value[id+'-'+k]}
   async function withBusy(k,id,fn){busy.value={...busy.value,[id+'-'+k]:true};try{return await fn()}finally{const o={...busy.value};delete o[id+'-'+k];busy.value=o}}
   async function load(){ld.value=true;try{l.value=await api.get('/admin/api-keys',p.token);try{const ch=await api.get('/admin/channels',p.token);if(ch.channels?.length)channels.value=ch.channels}catch(e){}}catch(e){p.toast(apiErr(e,'加载失败'),'err')}ld.value=false}
-  async function create(){if(saving.value)return;if(!f.channel){p.toast('请选择通道','err');return}saving.value=true;try{const b={name:f.name||presets[f.preset].autoName||'Key',client_type:f.preset==='codex'?'codex':'custom',default_channel:f.channel};if(f.models)b.allowed_models=f.models.split(',').map(s=>s.trim()).filter(Boolean);if(f.limit)b.daily_limit=parseInt(f.limit);const r=await api.post('/admin/api-keys',b,p.token);res.value=r.key;p.toast('创建成功');await load()}catch(e){p.toast(apiErr(e,'创建失败'),'err')}saving.value=false}
+  async function create(){if(saving.value)return;if(!f.channel){p.toast('请选择通道','err');return}saving.value=true;try{const b={name:f.name||'Key',client_type:f.preset==='codex'?'codex':'custom',default_channel:f.channel};if(f.models)b.allowed_models=f.models.split(',').map(s=>s.trim()).filter(Boolean);if(f.limit)b.daily_limit=parseInt(f.limit);const r=await api.post('/admin/api-keys',b,p.token);res.value=r.key;p.toast('创建成功');await load()}catch(e){p.toast(apiErr(e,'创建失败'),'err')}saving.value=false}
   async function setChannel(k,channel){await withBusy('ch',k.id,async()=>{try{await api.put('/admin/api-keys/'+k.id,{default_channel:channel},p.token);p.toast('已切换通道');await load()}catch(e){p.toast(apiErr(e,'切换失败'),'err')}})}
   async function toggle(k){await withBusy('toggle',k.id,async()=>{try{await api.put('/admin/api-keys/'+k.id,{status:k.status==='active'?'inactive':'active'},p.token);p.toast(k.status==='active'?'已禁用':'已启用');await load()}catch(e){p.toast(apiErr(e,'操作失败'),'err')}})}
   async function del(k){if(!confirm('删除 API Key '+(k.name||k.key_prefix||k.id)+' ?'))return;await withBusy('del',k.id,async()=>{try{await api.del('/admin/api-keys/'+k.id,p.token);p.toast('已删除');await load()}catch(e){p.toast(apiErr(e,'删除失败'),'err')}})}
   function cp(v){navigator.clipboard.writeText(v);copied.value=true;p.toast('已复制','info');setTimeout(()=>copied.value=false,1500)}
   function toggleKey(k){shown.value={...shown.value,[k.id]:!shown.value[k.id]}}
   function tok(v){v=Number(v||0);if(v>=1e9)return (v/1e9).toFixed(v>=1e10?1:2).replace(/\.?0+$/,'')+'B';if(v>=1e6)return (v/1e6).toFixed(v>=1e7?1:2).replace(/\.?0+$/,'')+'M';return v.toLocaleString()}
-  function close(){sa.value=false;res.value='';f.name='';f.models='';f.limit=null;f.preset='custom';f.channel='workbuddy';codexResult.value=null}
-  async function codexAutoWrite(){
-    if(codexBusy.value||!res.value)return;codexBusy.value=true;codexResult.value=null;
-    try{const r=await api.post('/admin/codex/setup',{api_key:res.value},p.token);codexResult.value=r;if(r.status==='ok')p.toast('Codex 配置已写入','ok');else p.toast('写入失败','err')}catch(e){p.toast(apiErr(e,'写入失败'),'err');codexResult.value={status:'error',message:String(e)}}
-    codexBusy.value=false;
-  }
-  onMounted(load);return{l,ld,sa,f,res,saving,copied,busyKey,shown,clientTypes,presets,channels,load,create,setChannel,toggle,del,cp,toggleKey,tok,close,I,codexResult,codexBusy,codexAutoWrite}
+  function close(){sa.value=false;res.value='';f.name='';f.models='';f.limit=null;f.preset='custom';f.channel='workbuddy'}
+  onMounted(load);return{l,ld,sa,f,res,saving,copied,busyKey,shown,clientTypes,channels,load,create,setChannel,toggle,del,cp,toggleKey,tok,close,I}
 },template:`
 <div>
   <div class="phead"><h1>API Keys</h1><p>客户端访问密钥</p></div>
@@ -805,23 +779,9 @@ createApp({
   <div class="card card-p empty" v-else><div class="em">🔑</div><p>暂无 Key</p></div>
   <div class="ov" v-if="sa" @click.self="close"><div class="modal" style="max-width:560px"><div class="modal-h"><h3>创建 Key</h3><button class="x" @click="close">&times;</button></div><div class="modal-b">
     <template v-if="res">
-      <div class="field"><label>新 Key</label><div class="keybox">{{res}}</div><button class="btn s pri" style="margin-top:8px" @click="cp(res)">{{copied?'已复制':'复制 Key'}}</button><div class="hint" style="margin-top:6px">关闭后仍可在 API Keys 列表中查看和复制。</div></div>
-      <div v-if="f.preset!=='custom'" style="margin-top:16px">
-        <div style="font-weight:600;font-size:13px;margin-bottom:8px">{{presets[f.preset].name}} 接入配置</div>
-        <div v-if="f.preset==='codex'" class="callout" style="margin-bottom:10px;font-size:12px;background:var(--green-bg);border-color:#c3e6cc;color:#006633">
-          <strong>已为该 Key 自动启用 Codex 专用处理</strong> — 内容清洗（sandbox/filesystem/execute 等敏感词替换）、模型别名映射（gpt-5.5→glm-5.2 等）、工具过滤、Responses API 协议转换均自动生效，无需额外配置。
-        </div>
-        <div v-if="presets[f.preset].note" class="callout" style="margin-bottom:10px;font-size:12px">{{presets[f.preset].note}}</div>
-        <div class="codeblk" style="font-size:11px;line-height:1.6;white-space:pre-wrap;word-break:break-all">{{presets[f.preset].configTpl(res)}}</div>
-        <div style="display:flex;gap:8px;margin-top:10px">
-          <button class="btn s" @click="cp(presets[f.preset].configTpl(res))">复制配置</button>
-          <button v-if="presets[f.preset].canAutoWrite" class="btn s pri" @click="codexAutoWrite" :disabled="codexBusy">{{codexBusy?'写入中...':'一键写入 Codex 配置文件'}}</button>
-        </div>
-        <div v-if="codexResult" style="margin-top:10px;padding:10px;border-radius:var(--r);border:1px solid var(--border);font-size:12px" :style="{color:codexResult.status==='ok'?'var(--green)':'var(--red)'}">
-          <strong>{{codexResult.status==='ok'?'写入成功':'写入失败'}}</strong>
-          <div v-if="codexResult.status==='ok'" style="color:var(--fg2);margin-top:4px">已写入 config.toml + auth.json，请重启 Codex。</div>
-          <div v-else style="margin-top:4px">{{codexResult.message}}</div>
-        </div>
+      <div class="field"><label>新 Key</label><div class="keybox">{{res}}</div><button class="btn s pri" style="margin-top:8px" @click="cp(res)">{{copied?'已复制':'复制 Key'}}</button><div class="hint" style="margin-top:6px">关闭后仍可在 API Keys 列表中查看和复制。各客户端（Codex / OpenCode / Cherry Studio 等）的接入配置见「接入指南」页。</div></div>
+      <div v-if="f.preset==='codex'" class="callout" style="margin-top:12px;font-size:12px;background:var(--green-bg);border-color:#c3e6cc;color:#006633">
+        <strong>已为该 Key 自动启用 Codex 专用处理</strong> — 内容清洗（sandbox/filesystem/execute 等敏感词替换）、模型别名映射（gpt-5.5→glm-5.2 等）、工具过滤、Responses API 协议转换均自动生效，无需额外配置。一键写入 Codex 配置文件见「接入指南」页。
       </div>
     </template>
     <template v-else>
@@ -832,13 +792,13 @@ createApp({
         <div class="hint" style="margin-top:4px">选择目标客户端，创建后自动展示对应配置。选"默认"仅创建 Key（无任何改写，原样透传）。Codex 类型会对请求做敏感词清洗；其余类型仅展示对应客户端的接入配置模板，行为与"默认"完全一致。</div>
       </div>
       <div class="field"><label>通道</label><select class="selectctl" v-model="f.channel"><option v-for="c in channels" :key="c.id" :value="c.id">{{c.display_name||c.id}}</option></select><div class="hint">默认三个通道都能选。这把 Key 只会打到所选通道，不会静默切到另一家。可在列表里随时切换；进行中的请求不会改绑。</div></div>
-      <div class="field"><label>名称</label><input v-model="f.name" :placeholder="presets[f.preset].autoName||'Key 名称'"/></div>
+      <div class="field"><label>名称</label><input v-model="f.name" placeholder="Key 名称"/></div>
       <div class="field"><label>允许模型</label><input v-model="f.models" placeholder="auto,glm-5.2（留空=全部）"/></div>
       <div class="field"><label>每日请求限额</label><input v-model="f.limit" type="number" placeholder="不限"/></div>
     </template>
   </div><div class="modal-f"><button class="btn" @click="close">{{res?'关闭':'取消'}}</button><button class="btn pri" @click="create" v-if="!res" :disabled="saving">{{saving?'创建中':'创建'}}</button></div></div></div>
 </div>`
-}).component('mdls',{props:['token','toast'],setup(p){
+}).component('chns',{props:['token','toast'],setup(p){
   // 统一模型（跨平台翻译层）
   const um=ref([]),umLd=ref(true),umBusy=ref(false),umErr=ref(''),channels=ref([]);
   // 各平台设置（可切换列表）
@@ -929,7 +889,7 @@ createApp({
   onMounted(loadAll);return{um,umLd,umErr,umBusy,channels,addUM,rmUM,umCell,umSet,umWarn,saveUM,chs,chLoaded,chErr,activeCh,chOf,chBusyOf,addRow,rmRow,addModelRow,rmModelRow,chDefaultText,saveChActive,resetChActive,I}
 },template:`
 <div>
-  <div class="phead"><h1>模型配置</h1><p>统一模型翻译 · 各平台白名单与别名 · 改动即时生效</p></div>
+  <div class="phead"><h1>通道与模型</h1><p>通道视角集中管理：统一模型翻译 · 各通道白名单与别名 · 改动即时生效</p></div>
   <div class="card"><div class="card-h">统一模型<span class="sub">统一名以 WorkBuddy 命名为准 · 纯翻译层 · 各平台白名单仍是最终闸门</span><div style="margin-left:auto;display:flex;gap:6px"><button class="btn s" @click="addUM"><span v-html="I.plus"></span>添加统一模型</button><button class="btn s pri" @click="saveUM" :disabled="umBusy">{{umBusy?'保存中…':'保存统一模型'}}</button></div></div>
     <div v-if="umLd" class="load"><div class="spin"></div></div>
     <div v-else-if="umErr" style="padding:16px;color:var(--red);font-size:12px">{{umErr}}</div>
@@ -1097,19 +1057,9 @@ createApp({
   <div class="card card-p empty" v-else><div class="em">📋</div><p>暂无记录</p></div>
 </div>`
 }).component('stgs',{props:['token','toast','saveToken'],setup(p){
-  const defaults={backend_url:'https://copilot.tencent.com',default_domain:'www.codebuddy.cn',timeout:300,base_url:'http://127.0.0.1:8787/v1',admin_auth:'本机 Cookie 自动验证',data_file:'codebuddy_gateway.db'};
-  const s=ref({...defaults}),stats=ref(null),ld=ref(true),saving=ref(false),copied=ref(''),setupTab=ref('codex'),adminToken=ref(p.token||'');
-  const keysList=ref([]),codexKeyInput=ref(''),codexStatus=ref(null),codexBusy=ref(false),codexResult=ref(null);
-  const presets={
-    codex:{name:'Codex (OpenAI)',base:'http://127.0.0.1:8787/v1',model:'auto',note:'Codex 强制使用 Responses API (wire_api="responses")。本网关已内置协议转换层，自动将 /v1/responses 映射到后端 Chat Completions。模型别名、内容清洗均自动启用。'},
-    opencode:{name:'OpenCode / OpenClaw',base:'http://127.0.0.1:8787/v1',model:'auto',note:'运行在宿主机上的客户端直接使用 127.0.0.1。'},
-    sub2api:{name:'sub2api Docker',base:'http://host.docker.internal:8787/v1',model:'auto',note:'sub2api 在 Docker 容器内访问宿主机时使用 host.docker.internal，不要填 localhost。'},
-    cherry:{name:'Cherry Studio',base:'http://127.0.0.1:8787/v1',model:'auto',note:'供应商类型选择 OpenAI Compatible，Key 使用 API Keys 页面创建的 sk-cb。'},
-    nextchat:{name:'NextChat',base:'http://127.0.0.1:8787/v1',model:'auto',note:'自定义接口地址填写到 /v1，模型填 auto 或模型配置页中的别名。'},
-    generic:{name:'通用 OpenAI Compatible',base:'http://127.0.0.1:8787/v1',model:'auto',note:'支持 /v1/chat/completions、/v1/responses 和 /v1/models；Base URL 填写到 /v1。'},
-    curl:{name:'curl',base:'http://127.0.0.1:8787/v1',model:'auto',note:'用于快速验证服务、Key 和模型映射是否正常。'},
-  };
-  async function load(){ld.value=true;try{const cfg=await api.get('/admin/settings',p.token);s.value={...defaults,...cfg};stats.value=await api.get('/admin/stats',p.token);keysList.value=await api.get('/admin/api-keys',p.token);if(keysList.value.length&&!codexKeyInput.value)codexKeyInput.value=keysList.value.find(k=>k.key)?.key||'';try{codexStatus.value=await api.get('/admin/codex/status',p.token)}catch(e){}}catch(e){p.toast(apiErr(e,'加载失败'),'err')}ld.value=false}
+  const defaults={backend_url:'https://copilot.tencent.com',default_domain:'www.codebuddy.cn',timeout:300};
+  const s=ref({...defaults,base_url:'http://127.0.0.1:8787/v1',admin_auth:'本机 Cookie 自动验证'}),ld=ref(true),saving=ref(false),adminToken=ref(p.token||'');
+  async function load(){ld.value=true;try{const cfg=await api.get('/admin/settings',p.token);s.value={...s.value,...cfg}}catch(e){p.toast(apiErr(e,'加载失败'),'err')}ld.value=false}
   async function save(){if(saving.value)return;saving.value=true;try{await api.put('/admin/settings',{backend_url:s.value.backend_url,default_domain:s.value.default_domain,timeout:Number(s.value.timeout)||300},p.token);p.toast('已保存')}catch(e){p.toast(apiErr(e,'保存失败'),'err')}saving.value=false}
   function resetDefaults(){s.value={...s.value,backend_url:defaults.backend_url,default_domain:defaults.default_domain,timeout:defaults.timeout};p.toast('已恢复默认','info')}
   async function saveAdminToken(){
@@ -1120,6 +1070,48 @@ createApp({
     }catch(e){p.toast('登录请求失败：'+e.message,'err')}
   }
   async function clearAdminToken(){adminToken.value='';p.saveToken('');try{await fetch('/admin/logout',{method:'POST',credentials:'same-origin'})}catch(e){}p.toast('已清除','info')}
+  onMounted(load);return{s,ld,saving,adminToken,load,save,resetDefaults,saveAdminToken,clearAdminToken}
+},template:`
+<div>
+  <div class="phead"><h1>设置</h1><p>运行配置与管理鉴权（客户端接入请前往「接入指南」页）</p></div>
+  <div class="tbar"><button class="btn s pri" @click="save" :disabled="saving||ld">{{saving?'保存中':'保存配置'}}</button><button class="btn s" @click="resetDefaults" :disabled="saving||ld">恢复默认</button><button class="btn s" @click="load" :disabled="ld"><span v-html="I.refresh"></span>{{ld?'刷新中':'刷新'}}</button></div>
+  <div v-if="ld" class="load"><div class="spin"></div></div>
+  <template v-else>
+    <div class="card">
+      <div class="card-h">后端参数<span class="sub">保存后对后续请求生效</span></div>
+      <div class="card-p form-grid">
+        <div class="field"><label>后端地址</label><input v-model="s.backend_url" placeholder="https://copilot.tencent.com"/><div class="hint">上游 Work Buddy 服务地址。</div></div>
+        <div class="field"><label>默认域名</label><input v-model="s.default_domain" placeholder="www.codebuddy.cn"/><div class="hint">账号 auth 中没有 domain 时使用。</div></div>
+        <div class="field"><label>请求超时（秒）</label><input v-model="s.timeout" type="number" min="30" max="900" placeholder="300"/><div class="hint">长上下文或慢模型建议保持 300。</div></div>
+        <div class="field"><label>管理鉴权</label><input v-model="s.admin_auth" disabled/><div class="hint">本机 Web UI 自动使用 HttpOnly Cookie。</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h">管理页登录<span class="sub">粘贴启动日志中的 Admin Token 登录</span></div>
+      <div class="card-p">
+        <div class="field">
+          <label>Admin Token</label>
+          <input v-model="adminToken" type="password" placeholder="粘贴启动日志中的 Admin Token"/>
+          <div class="hint">保存后会调用 /admin/login 下发 HttpOnly Cookie；同时保留在当前浏览器中作为备用。</div>
+        </div>
+        <div class="status-line" style="margin-top:10px"><button class="btn s pri" @click="saveAdminToken">保存凭证</button><button class="btn s" @click="clearAdminToken" :disabled="!adminToken&&!token">清除</button></div>
+      </div>
+    </div>
+  </template>
+</div>`
+}).component('setup',{props:['token','toast'],setup(p){
+  const s=ref({base_url:'http://127.0.0.1:8787/v1',data_file:'codebuddy_gateway.db'}),ld=ref(true),copied=ref(''),setupTab=ref('codex');
+  const keysList=ref([]),codexKeyInput=ref(''),codexStatus=ref(null),codexBusy=ref(false),codexResult=ref(null);
+  const presets={
+    codex:{name:'Codex (OpenAI)',base:'http://127.0.0.1:8787/v1',model:'auto',note:'Codex 强制使用 Responses API (wire_api="responses")。本网关已内置协议转换层，自动将 /v1/responses 映射到后端 Chat Completions。模型别名、内容清洗均自动启用。'},
+    opencode:{name:'OpenCode / OpenClaw',base:'http://127.0.0.1:8787/v1',model:'auto',note:'运行在宿主机上的客户端直接使用 127.0.0.1。'},
+    sub2api:{name:'sub2api Docker',base:'http://host.docker.internal:8787/v1',model:'auto',note:'sub2api 在 Docker 容器内访问宿主机时使用 host.docker.internal，不要填 localhost。'},
+    cherry:{name:'Cherry Studio',base:'http://127.0.0.1:8787/v1',model:'auto',note:'供应商类型选择 OpenAI Compatible，Key 使用 API Keys 页面创建的 sk-cb。'},
+    nextchat:{name:'NextChat',base:'http://127.0.0.1:8787/v1',model:'auto',note:'自定义接口地址填写到 /v1，模型填 auto 或「通道与模型」页中的别名。'},
+    generic:{name:'通用 OpenAI Compatible',base:'http://127.0.0.1:8787/v1',model:'auto',note:'支持 /v1/chat/completions、/v1/responses 和 /v1/models；Base URL 填写到 /v1。'},
+    curl:{name:'curl',base:'http://127.0.0.1:8787/v1',model:'auto',note:'用于快速验证服务、Key 和模型映射是否正常。'},
+  };
+  async function load(){ld.value=true;try{const cfg=await api.get('/admin/settings',p.token);s.value={...s.value,...cfg};keysList.value=await api.get('/admin/api-keys',p.token);if(keysList.value.length&&!codexKeyInput.value)codexKeyInput.value=keysList.value.find(k=>k.key)?.key||'';try{codexStatus.value=await api.get('/admin/codex/status',p.token)}catch(e){}}catch(e){p.toast(apiErr(e,'加载失败'),'err')}ld.value=false}
   async function codexSetup(){
     if(codexBusy.value)return;
     if(!codexKeyInput.value||!codexKeyInput.value.startsWith('sk-cb-')){p.toast('请输入有效的 sk-cb- 开头的 API Key','err');return}
@@ -1133,7 +1125,6 @@ createApp({
     codexBusy.value=false;
   }
   function copy(v,name){navigator.clipboard.writeText(v);copied.value=name;p.toast('已复制','info');setTimeout(()=>copied.value='',1200)}
-  function n(v){return Number(v||0).toLocaleString()}
   const currentPreset=computed(()=>presets[setupTab.value]||presets.codex)
   function envBlock(){
     if(setupTab.value==='codex'){
@@ -1147,48 +1138,12 @@ createApp({
     }
     const x=currentPreset.value;return `curl ${x.base}/chat/completions \\\n  -H "Authorization: Bearer YOUR_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"${x.model}","messages":[{"role":"user","content":"hi"}]}'`
   }
-  onMounted(load);return{s,stats,ld,saving,copied,setupTab,adminToken,presets,currentPreset,envBlock,curlBlock,load,save,resetDefaults,saveAdminToken,clearAdminToken,copy,n,I,keysList,codexKeyInput,codexStatus,codexBusy,codexResult,codexSetup}
+  onMounted(load);return{s,ld,copied,setupTab,presets,currentPreset,envBlock,curlBlock,load,copy,codexSetup,keysList,codexKeyInput,codexStatus,codexBusy,codexResult}
 },template:`
 <div>
-  <div class="phead"><h1>设置</h1><p>运行配置、接入信息和本机维护</p></div>
-  <div class="tbar"><button class="btn s pri" @click="save" :disabled="saving||ld">{{saving?'保存中':'保存配置'}}</button><button class="btn s" @click="resetDefaults" :disabled="saving||ld">恢复默认</button><button class="btn s" @click="load" :disabled="ld"><span v-html="I.refresh"></span>{{ld?'刷新中':'刷新'}}</button></div>
+  <div class="phead"><h1>接入指南</h1><p>客户端接入唯一参考 · Base URL / 模型 / 各客户端配置模板 / Codex 一键配置</p></div>
   <div v-if="ld" class="load"><div class="spin"></div></div>
   <template v-else>
-    <div class="dash-grid">
-      <div class="card">
-        <div class="card-h">后端参数<span class="sub">保存后对后续请求生效</span></div>
-        <div class="card-p form-grid">
-          <div class="field"><label>后端地址</label><input v-model="s.backend_url" placeholder="https://copilot.tencent.com"/><div class="hint">上游 Work Buddy 服务地址。</div></div>
-          <div class="field"><label>默认域名</label><input v-model="s.default_domain" placeholder="www.codebuddy.cn"/><div class="hint">账号 auth 中没有 domain 时使用。</div></div>
-          <div class="field"><label>请求超时（秒）</label><input v-model="s.timeout" type="number" min="30" max="900" placeholder="300"/><div class="hint">长上下文或慢模型建议保持 300。</div></div>
-          <div class="field"><label>管理鉴权</label><input v-model="s.admin_auth" disabled/><div class="hint">本机 Web UI 自动使用 HttpOnly Cookie。</div></div>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-h">运行状态<span class="sub">当前实例</span></div>
-        <div class="card-p">
-          <div class="metric-row">
-            <div class="metric"><div class="m-label">账号</div><div class="m-value">{{stats?.active_accounts||0}}/{{stats?.total_accounts||0}}</div><div class="m-sub">active / total</div></div>
-            <div class="metric"><div class="m-label">API Keys</div><div class="m-value">{{stats?.active_keys||0}}/{{stats?.total_keys||0}}</div><div class="m-sub">active / total</div></div>
-            <div class="metric"><div class="m-label">请求</div><div class="m-value">{{n(stats?.total_requests)}}</div><div class="m-sub">all time</div></div>
-          </div>
-          <div class="status-line" style="margin-top:12px"><span class="badge" :class="stats?.active_accounts?'ok':'err'">Accounts</span><span class="badge" :class="stats?.active_keys?'ok':'err'">Keys</span><span class="tag">Timeout {{s.timeout}}s</span></div>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-h">管理页登录<span class="sub">粘贴启动日志中的 Admin Token 登录</span></div>
-      <div class="card-p">
-        <div class="field">
-          <label>Admin Token</label>
-          <input v-model="adminToken" type="password" placeholder="粘贴启动日志中的 Admin Token"/>
-          <div class="hint">保存后会调用 /admin/login 下发 HttpOnly Cookie；同时保留在当前浏览器中作为备用。</div>
-        </div>
-        <div class="status-line" style="margin-top:10px"><button class="btn s pri" @click="saveAdminToken">保存凭证</button><button class="btn s" @click="clearAdminToken" :disabled="!adminToken&&!token">清除</button></div>
-      </div>
-    </div>
-
     <div class="card">
       <div class="card-h">接入信息<span class="sub">OpenAI Compatible</span></div>
       <div class="card-p info-list">
@@ -1230,7 +1185,7 @@ createApp({
         <div v-if="setupTab==='codex'" style="margin-top:16px;border:1px solid var(--blue-border);border-radius:var(--r);padding:16px;background:var(--blue-soft)">
           <div style="font-weight:600;font-size:14px;margin-bottom:4px">一键配置 Codex</div>
           <div style="font-size:12px;color:var(--fg2);margin-bottom:16px">选择一个 API Key，自动写入 <span class="mono">~/.codex/config.toml</span> 和 <span class="mono">~/.codex/auth.json</span>（原文件备份为 .bak），并设置 <span class="mono">OPENAI_API_KEY</span> 环境变量。配置后需完全关闭 Codex 重新打开。</div>
-          
+
           <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px">
             <div class="field" style="flex:1;min-width:280px;margin:0">
               <label>API Key（sk-cb- 开头）</label>
