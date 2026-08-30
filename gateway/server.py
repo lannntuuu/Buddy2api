@@ -28,6 +28,7 @@ import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from storage import database as db
@@ -79,6 +80,8 @@ app.add_middleware(
 )
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+# Web UI 静态资源（css/js 模块）；页面本体仍由 GET / 返回
+app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
 # ============================================================

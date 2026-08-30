@@ -1,0 +1,58 @@
+import {I} from './icons.js';
+import dash from './pages/dashboard.js';
+import accs from './pages/accounts.js';
+import quota from './pages/quota.js';
+import keys from './pages/keys.js';
+import chns from './pages/channels.js';
+import usg from './pages/usage.js';
+import lgs from './pages/logs.js';
+import setup from './pages/setup.js';
+import stgs from './pages/settings.js';
+
+const{createApp,ref}=Vue;
+
+createApp({
+  setup(){
+    const validPages=['dashboard','accounts','quota','keys','channels','usage','logs','setup','settings'];
+    const savedPage=localStorage.getItem('cb_gw_page');
+    const page=ref(validPages.includes(savedPage)?savedPage:'dashboard'),token=ref(localStorage.getItem('cb_gw_token')||''),toasts=ref([]);
+    function tf(m,t='ok'){const id=Date.now()+Math.random();toasts.value=[...toasts.value,{id,m,t}].slice(-4);setTimeout(()=>toasts.value=toasts.value.filter(x=>x.id!==id),2500)}
+    function go(k){page.value=k;localStorage.setItem('cb_gw_page',k)}
+    function saveToken(value){token.value=value.trim();if(token.value)localStorage.setItem('cb_gw_token',token.value);else localStorage.removeItem('cb_gw_token');tf(token.value?'备用 Admin Token 已保存':'备用 Admin Token 已清除')}
+    function hardRefresh(){window.location.reload()}
+    const nav=[{k:'dashboard',l:'运行总览',i:I.dash},{k:'accounts',l:'账号管理',i:I.users},{k:'quota',l:'额度与积分',i:I.wallet},{k:'keys',l:'API Keys',i:I.key},{k:'channels',l:'通道与模型',i:I.cpu},{k:'usage',l:'用量统计',i:I.tokens},{k:'logs',l:'请求日志',i:I.log},{k:'setup',l:'接入指南',i:I.scan},{k:'settings',l:'设置',i:I.gear}];
+    return{page,token,toasts,tf,go,saveToken,hardRefresh,nav,I}
+  },
+  template:`
+  <div class="layout">
+    <header class="topbar">
+      <div class="brand-block"><div class="brand-symbol">B2</div><div class="brand-copy"><div class="brand-title">Buddy 2 API</div><div class="brand-meta">Local model gateway · v2.1.0</div></div></div>
+      <nav class="topnav"><div v-for="n in nav" :key="n.k" class="nav-item" :class="{on:page===n.k}" @click="go(n.k)" v-html="n.i+'<span>'+n.l+'</span>'"></div></nav>
+      <div class="top-actions">
+        <button class="refresh-cta" @click="hardRefresh"><span v-html="I.refresh"></span><span>刷新</span></button>
+      </div>
+    </header>
+    <div class="main">
+      <div class="content" v-if="page==='dashboard'"><dash :token="token" :toast="tf"/></div>
+      <div class="content" v-if="page==='accounts'"><accs :token="token" :toast="tf"/></div>
+      <div class="content" v-if="page==='quota'"><quota :token="token" :toast="tf"/></div>
+      <div class="content" v-if="page==='keys'"><keys :token="token" :toast="tf"/></div>
+      <div class="content" v-if="page==='channels'"><chns :token="token" :toast="tf"/></div>
+      <div class="content" v-if="page==='usage'"><usg :token="token" :toast="tf"/></div>
+      <div class="content" v-if="page==='logs'"><lgs :token="token"/></div>
+      <div class="content" v-if="page==='setup'"><setup :token="token" :toast="tf"/></div>
+      <div class="content" v-if="page==='settings'"><stgs :token="token" :toast="tf" :save-token="saveToken"/></div>
+    </div>
+    <div class="toasts"><div class="toast" :class="x.t" v-for="x in toasts" :key="x.id">{{x.m}}</div></div>
+  </div>`
+})
+.component('dash',dash)
+.component('accs',accs)
+.component('quota',quota)
+.component('keys',keys)
+.component('chns',chns)
+.component('usg',usg)
+.component('lgs',lgs)
+.component('stgs',stgs)
+.component('setup',setup)
+.mount('#app');
