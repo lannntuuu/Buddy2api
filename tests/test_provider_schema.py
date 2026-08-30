@@ -1,28 +1,15 @@
 import asyncio
 
-import pytest
 
-import credential_crypto
-import database as db
-import auth_manager
-
-
-@pytest.fixture()
-def isolated_db(tmp_path, monkeypatch):
-    path = tmp_path / "gateway.db"
-    monkeypatch.setattr(db, "DB_PATH", path)
-    monkeypatch.setenv("CB_GATEWAY_MASTER_KEY", "pytest-master-key")
-    credential_crypto.reset_cache()
-    db.init_db()
-    yield path
-    credential_crypto.reset_cache()
+from storage import database as db
+from accounts import auth_manager
 
 
 def test_default_registry_enables_wave1_channels(monkeypatch):
     import providers
 
     monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
-    assert providers.enabled_provider_ids() == ["workbuddy", "qclaw", "qwenwork", "traework"]
+    assert providers.enabled_provider_ids() == ["workbuddy", "qclaw", "qwenwork", "traework", "traesolo"]
     monkeypatch.setenv("CB_GATEWAY_PROVIDERS", "workbuddy")
     assert providers.enabled_provider_ids() == ["workbuddy"]
     assert providers.get_provider("qclaw") is None

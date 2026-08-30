@@ -1,7 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-cd "$(dirname "$0")"
+# 脚本在 ops/，项目根是 ops/ 的父目录
+cd "$(dirname "$0")/.."
 mkdir -p data
 
 echo ""
@@ -28,10 +29,10 @@ if [ -z "$auth_dir" ] || [ ! -d "$auth_dir" ]; then
     auth_dir="$(find /mnt/c/Users -path '*/AppData/Local/CodeBuddyExtension/Data/Public/auth' -type d 2>/dev/null | head -n 1 || true)"
 fi
 
-compose_files=(-f docker-compose.yml)
+compose_files=(-f ops/docker-compose.yml)
 if [ -n "$auth_dir" ] && [ -d "$auth_dir" ]; then
     export CB_HOST_AUTH_DIR="$auth_dir"
-    compose_files+=(-f docker-compose.windows.yml)
+    compose_files+=(-f ops/docker-compose.windows.yml)
     echo "  [auth] $auth_dir"
     echo "  [挂载] $auth_dir -> /auth:ro"
 else
@@ -52,4 +53,4 @@ docker compose "${compose_files[@]}" up -d --build
 
 echo ""
 echo "  已启动。打开 http://127.0.0.1:8787，账号页先选通道再检测导入。"
-echo "  QClaw / 千问办公的 Windows 登录文件在 Linux 容器里解不开，这两家请用 python server.py。"
+echo "  QClaw / 千问办公的 Windows 登录文件在 Linux 容器里解不开，这两家请用 python -m gateway.server。"

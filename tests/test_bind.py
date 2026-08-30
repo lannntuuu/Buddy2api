@@ -4,7 +4,7 @@ import pytest
 from fastapi import HTTPException
 
 import providers
-import router
+from gateway import router
 from providers.protocol import (
     InvalidModel,
     KeyChannelMismatch,

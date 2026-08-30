@@ -17,12 +17,15 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+import logging
 from typing import Optional
 
 import httpx
 
-import database as db
-import fingerprint
+from storage import database as db
+from storage import fingerprint
+
+logger = logging.getLogger("buddy2api.auth_manager")
 
 BACKEND = "https://copilot.tencent.com"
 DEFAULT_DOMAIN = "www.codebuddy.cn"
@@ -49,8 +52,7 @@ def _get_token_lock(aid: int) -> asyncio.Lock:
 
 
 def backend_url() -> str:
-    value = str(db.get_setting("backend_url", BACKEND) or BACKEND).strip().rstrip("/")
-    return value if value.startswith("https://") else BACKEND
+    return (str(db.get_setting("backend_url") or "").strip().rstrip("/") or BACKEND)
 
 
 def request_timeout(default: int) -> int:
@@ -369,22 +371,26 @@ async def refresh_token(account: dict) -> bool:
                 r = await c.post(url, headers=headers, json={})
             data = r.json()
         except (httpx.HTTPError, ValueError) as e:
-            print(f"[auth_manager] 刷新 token 网络失败 (account={aid}): {e}", file=sys.stderr)
+            logger.warning("刷新 token 网络失败 (account=%s): %s", aid, e)
             return False
 
         if not isinstance(data, dict) or data.get("code") != 0 or not data.get("data"):
             message = data.get("msg", "upstream rejected refresh") if isinstance(data, dict) else "invalid response"
-            print(f"[auth_manager] 刷新 token 失败 (account={aid}): {str(message)[:240]}", file=sys.stderr)
+            logger.warning("刷新 token 失败 (account=%s): %s", aid, str(message)[:240])
             # 标记账号为过期
             db.update_account(aid, {"status": "expired"})
             return False
 
         new_auth = data["data"]
+        # 上游返回成功但没带新 token 时不能拿空值覆写库里现存的有效凭据
+        if not str(new_auth.get("accessToken") or ""):
+            logger.warning("刷新 token 响应缺少 accessToken (account=%s)，保留现有凭据", aid)
+            return False
         now_ms = int(time.time() * 1000)
         next_status = "inactive" if account.get("status") == "inactive" else "active"
         update_data = {
             "access_token": new_auth.get("accessToken", ""),
-            "refresh_token": new_auth.get("refreshToken", ""),
+            "refresh_token": new_auth.get("refreshToken", "") or account.get("refresh_token") or "",
             "expires_at": new_auth.get("expiresAt") or (
                 now_ms + new_auth.get("expiresIn", 0) * 1000
             ),

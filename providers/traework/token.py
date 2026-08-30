@@ -104,7 +104,7 @@ def _parse_exchange(result: dict) -> dict:
 
 
 async def refresh_account(account: dict) -> dict:
-    import database as db
+    from storage import database as db
 
     refresh = str(account.get("refresh_token") or "")
     extra = extra_of(account)

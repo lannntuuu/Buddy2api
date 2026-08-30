@@ -4,26 +4,14 @@ from pathlib import Path
 
 import pytest
 
-import credential_crypto
-import database as db
+from storage import database as db
 import providers
-import router
+from gateway import router
 from providers.protocol import KeyChannelMismatch, UnknownChannel, UnknownModel
 from providers.qclaw.constants import JPRX_SIGNATURE_KEY, STATIC_MODELS
 from providers.qclaw.chat import fill_empty_content
 from providers.qclaw.sign import aizone_headers, jprx_ctx
 from providers.qclaw.store import parse_credentials, qclaw_auth_dirs
-
-
-@pytest.fixture()
-def isolated_db(tmp_path, monkeypatch):
-    path = tmp_path / "gateway.db"
-    monkeypatch.setattr(db, "DB_PATH", path)
-    monkeypatch.setenv("CB_GATEWAY_MASTER_KEY", "pytest-master-key")
-    credential_crypto.reset_cache()
-    db.init_db()
-    yield path
-    credential_crypto.reset_cache()
 
 
 @pytest.fixture()
@@ -42,7 +30,7 @@ def test_qclaw_quota_is_credit_not_token_cap(qclaw_enabled):
 
 def test_qclaw_in_default_registry(monkeypatch):
     monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
-    assert providers.enabled_provider_ids() == ["workbuddy", "qclaw", "qwenwork", "traework"]
+    assert providers.enabled_provider_ids() == ["workbuddy", "qclaw", "qwenwork", "traework", "traesolo"]
     assert providers.get_provider("qclaw") is not None
     assert "qclaw" in providers._LOADED
 

@@ -6,22 +6,23 @@ Hosts, client id, and app version were read from the official
 
 from __future__ import annotations
 
+from providers.trae_shared import (
+    AGENT_HOST as AGENT_API,
+    APP_ID,
+    CHECKIN_CLAIM_PATH,
+    CHECKIN_STATUS_PATH,
+    CLIENT_ID,
+    ENT_USAGE_PATH as USAGE_PATH,
+    UG_HOST as UG_API,
+)
+
 CHANNEL_ID = "traework"
 DISPLAY_NAME = "TraeWork"
 
 IDE_VERSION = "0.1.56"
-CLIENT_ID = "en1oxy7wnw8j9n"
 PLATFORM_CODE = "SOLO_PC"
 PRODUCT_CODE = "SOLO_Lite"
 REQ_SOURCE = 2
-APP_ID = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"
-
-UG_API = "https://api.trae.cn"
-AGENT_API = "https://trae-api-cn.mchost.guru"
-
-CHECKIN_STATUS_PATH = "/trae/api/v2/ug/checkin_credits/status"
-CHECKIN_CLAIM_PATH = "/trae/api/v2/ug/checkin_credits/claim"
-USAGE_PATH = "/trae/api/v2/pay/ide_user_ent_usage"
 EXCHANGE_PATH = "/trae/api/v3/oauth/ExchangeToken"
 GET_USER_PATH = "/cloudide/api/v3/trae/GetUserInfo"
 MODELS_PATH = "/api/remote/v1/models"

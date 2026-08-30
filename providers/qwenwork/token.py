@@ -45,7 +45,7 @@ def is_token_expired(account: dict, skew_ms: int = 300_000) -> bool:
 
 
 async def refresh_account(account: dict) -> dict:
-    import database as db
+    from storage import database as db
 
     refresh = str(account.get("refresh_token") or "")
     if not refresh:

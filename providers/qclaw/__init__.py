@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-import auth_manager
-import database as db
+from accounts import auth_manager
+from storage import database as db
+from providers.model_config import channel_aliases, channel_model_ids
 from providers.protocol import ChannelId, QuotaSnapshot
 from providers.qclaw import chat, jprx, oauth, store
 from providers.qclaw.constants import (
@@ -22,16 +23,26 @@ class QClawProvider:
     checkin_supported = False
 
     def list_models(self) -> list[dict]:
-        return [{"id": item} for item in STATIC_MODELS]
+        return [{"id": item} for item in channel_model_ids(CHANNEL_ID, STATIC_MODELS)]
 
     def alias_map(self) -> dict[str, str]:
-        return dict(ALIASES)
+        return channel_aliases(CHANNEL_ID, ALIASES)
 
     def accepts_model(self, inner: str) -> bool:
         value = (inner or "").strip()
-        if value in STATIC_MODELS or value in ALIASES:
+        if value in channel_model_ids(CHANNEL_ID, STATIC_MODELS):
             return True
-        return value.startswith("pool-")
+        if value in channel_aliases(CHANNEL_ID, ALIASES):
+            return True
+        # pool-* 前缀仅在默认配置下放行（上游 pool 模型名更新快于静态表）；
+        # 管理员一旦自定义白名单，就以自定义为准，前缀不再旁路闸门。
+        if value.startswith("pool-"):
+            try:
+                return db.get_setting(f"{CHANNEL_ID}.models", None) is None
+            except Exception:
+                # 与 model_config 的同类调用一致：DB 不可用时按默认配置处理
+                return True
+        return False
 
     def translate_model(self, model: str) -> str:
         return chat.translate_model(model)
@@ -100,7 +111,7 @@ class QClawProvider:
 
     async def refresh(self, account: dict) -> dict:
         await jprx.refresh_channel(account)
-        import database as db
+        from storage import database as db
 
         fresh = db.get_account(account["id"])
         if fresh:

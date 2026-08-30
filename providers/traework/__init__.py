@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-import auth_manager
-import database as db
+from accounts import auth_manager
+from storage import database as db
+from providers.model_config import channel_aliases, channel_model_ids
 from providers.protocol import ChannelId, QuotaSnapshot
 from providers.traework import chat, quota, store
 from providers.traework.constants import ALIASES, CHANNEL_ID, DISPLAY_NAME, STATIC_MODELS
@@ -18,10 +19,10 @@ class TraeWorkProvider:
     checkin_supported = True
 
     def list_models(self) -> list[dict]:
-        return [{"id": item} for item in STATIC_MODELS]
+        return [{"id": item} for item in channel_model_ids(CHANNEL_ID, STATIC_MODELS)]
 
     def alias_map(self) -> dict[str, str]:
-        return dict(ALIASES)
+        return channel_aliases(CHANNEL_ID, ALIASES)
 
     def accepts_model(self, inner: str) -> bool:
         return chat.accepts_model(inner)
@@ -41,7 +42,7 @@ class TraeWorkProvider:
             if is_token_expired(account):
                 try:
                     return await refresh_account(account)
-                except TraeWorkAuthError:
+                except Exception:
                     pass
             else:
                 return account
@@ -53,7 +54,7 @@ class TraeWorkProvider:
         for row in expired:
             try:
                 return await refresh_account(row)
-            except TraeWorkAuthError:
+            except Exception:
                 continue
         return None
 

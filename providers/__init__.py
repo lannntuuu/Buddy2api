@@ -13,15 +13,17 @@ from providers.protocol import (
 from providers.qclaw import PROVIDER as QCLAW_PROVIDER
 from providers.qwenwork import PROVIDER as QWENWORK_PROVIDER
 from providers.traework import PROVIDER as TRAEWORK_PROVIDER
+from providers.traesolo import PROVIDER as TRAESOLO_PROVIDER
 from providers.workbuddy import PROVIDER as WORKBUDDY_PROVIDER
 
-DEFAULT_PROVIDER_IDS: tuple[str, ...] = ("workbuddy", "qclaw", "qwenwork", "traework")
+DEFAULT_PROVIDER_IDS: tuple[str, ...] = ("workbuddy", "qclaw", "qwenwork", "traework", "traesolo")
 
 _LOADED: dict[str, Provider] = {
     "workbuddy": WORKBUDDY_PROVIDER,
     "qclaw": QCLAW_PROVIDER,
     "qwenwork": QWENWORK_PROVIDER,
     "traework": TRAEWORK_PROVIDER,
+    "traesolo": TRAESOLO_PROVIDER,
 }
 
 

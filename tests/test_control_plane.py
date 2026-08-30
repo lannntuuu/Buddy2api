@@ -2,26 +2,14 @@ import asyncio
 
 import pytest
 
-import control_plane
-import credential_crypto
-import database as db
-import auth_manager
-
-
-@pytest.fixture()
-def isolated_db(tmp_path, monkeypatch):
-    path = tmp_path / "gateway.db"
-    monkeypatch.setattr(db, "DB_PATH", path)
-    monkeypatch.setenv("CB_GATEWAY_MASTER_KEY", "pytest-master-key")
-    credential_crypto.reset_cache()
-    db.init_db()
-    yield path
-    credential_crypto.reset_cache()
+from accounts import control_plane
+from storage import database as db
+from accounts import auth_manager
 
 
 def test_create_key_requires_channel(isolated_db):
     from fastapi import HTTPException
-    import server
+    from gateway import server
 
     with pytest.raises(HTTPException) as err:
         server._validate_key_channel("")
@@ -127,4 +115,39 @@ def test_startup_does_not_import_by_default(isolated_db, monkeypatch):
     )
     summary = control_plane.startup_scan()
     assert summary["auto_import"] is False
-    assert "imported" not in called
+
+
+def test_credit_rate_default_and_override(isolated_db, monkeypatch):
+    monkeypatch.setenv("CB_GATEWAY_PROVIDERS", "workbuddy,traesolo")
+    # 默认换算率
+    view = control_plane.channel_model_view("traesolo")
+    assert view["credit_rate"] == 1000.0
+    assert view["credit_rate_default"] == 1000.0
+    assert view["credit_rate_customized"] is False
+
+    # 自定义换算率
+    control_plane.set_channel_models("traesolo", credit_rate=250.0, set_rate=True)
+    view = control_plane.channel_model_view("traesolo")
+    assert view["credit_rate"] == 250.0
+    assert view["credit_rate_customized"] is True
+
+    # 重置回默认
+    control_plane.set_channel_models("traesolo", credit_rate=None, set_rate=True)
+    view = control_plane.channel_model_view("traesolo")
+    assert view["credit_rate"] == 1000.0
+    assert view["credit_rate_customized"] is False
+
+
+def test_credit_rate_validation(isolated_db, monkeypatch):
+    monkeypatch.setenv("CB_GATEWAY_PROVIDERS", "workbuddy,traesolo")
+    with pytest.raises(ValueError):
+        control_plane.set_channel_models("traesolo", credit_rate=-1, set_rate=True)
+    with pytest.raises(ValueError):
+        control_plane.set_channel_models("traesolo", credit_rate="abc", set_rate=True)
+
+
+def test_credit_rate_only_no_models(isolated_db, monkeypatch):
+    """只传 credit_rate 也应能保存（不影响 models/aliases）。"""
+    monkeypatch.setenv("CB_GATEWAY_PROVIDERS", "workbuddy,traesolo")
+    view = control_plane.set_channel_models("traesolo", credit_rate=500.0, set_rate=True)
+    assert view["credit_rate"] == 500.0

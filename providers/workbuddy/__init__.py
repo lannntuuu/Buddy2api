@@ -5,9 +5,9 @@ from __future__ import annotations
 import sqlite3
 from typing import Optional
 
-import auth_manager
-import database as db
-import proxy
+from accounts import auth_manager
+from storage import database as db
+from upstream import proxy
 from providers.protocol import ChannelId
 
 
@@ -17,22 +17,19 @@ class WorkBuddyProvider:
     checkin_supported = True
 
     def list_models(self) -> list[dict]:
+        """未设置 `models` → 内置默认；已设置（哪怕空列表）→ 以自定义为准。"""
         try:
-            models = db.get_setting("models", proxy.DEFAULT_MODELS)
+            models = db.get_setting("models", None)
         except sqlite3.OperationalError:
+            models = None
+        if models is None:
             return list(proxy.DEFAULT_MODELS)
-        if isinstance(models, list) and models:
+        if isinstance(models, list):
             return models
-        return list(proxy.DEFAULT_MODELS)
+        return []
 
     def alias_map(self) -> dict[str, str]:
-        try:
-            aliases = db.get_setting("model_aliases", {}) or {}
-        except sqlite3.OperationalError:
-            aliases = {}
-        if not isinstance(aliases, dict):
-            aliases = {}
-        return {**proxy._BUILTIN_ALIASES, **aliases}
+        return proxy.effective_builtin_aliases()
 
     def accepts_model(self, inner: str) -> bool:
         ids = {str(item.get("id")) for item in self.list_models() if isinstance(item, dict)}

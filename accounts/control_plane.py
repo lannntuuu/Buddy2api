@@ -9,9 +9,21 @@ import secrets
 import time
 from pathlib import Path
 
-import database as db
+from storage import database as db
+from upstream import proxy
 import providers
-import auth_manager
+from accounts import auth_manager
+import providers.model_config as model_config
+from providers.model_config import _channel_keys, _ids_from_raw, is_customized, unified_models
+from providers.protocol import KNOWN_CHANNEL_SET
+from providers.qclaw.constants import ALIASES as _QCLAW_DEFAULT_ALIASES
+from providers.qclaw.constants import STATIC_MODELS as _QCLAW_DEFAULT_MODELS
+from providers.qwenwork.constants import ALIASES as _QWENWORK_DEFAULT_ALIASES
+from providers.qwenwork.constants import STATIC_MODELS as _QWENWORK_DEFAULT_MODELS
+from providers.traework.constants import ALIASES as _TRAEWORK_DEFAULT_ALIASES
+from providers.traework.constants import STATIC_MODELS as _TRAEWORK_DEFAULT_MODELS
+from providers.traesolo.constants import ALIASES as _TRAESOLO_DEFAULT_ALIASES
+from providers.traesolo.constants import STATIC_MODELS as _TRAESOLO_DEFAULT_MODELS
 
 
 async def _gather_limited(accounts: list[dict], operation, limit: int = 2) -> list[dict]:
@@ -271,6 +283,183 @@ def startup_scan() -> dict:
             entry["import"] = imported
         summary["channels"].append(entry)
     return summary
+
+
+# ============================================================
+# 每通道模型列表 / 别名配置（可按平台配置）
+#
+# 统一存储键（settings 表，JSON）：
+#   <channel>.models   -> ["id1", "id2", ...]
+#   <channel>.aliases  -> {"alias": "id", ...}
+# 未配置时回退各通道内置默认。WorkBuddy 兼容历史键：
+#   models（[{"id":...}]）与 model_aliases（叠加在内置别名上）。
+# ============================================================
+
+_CHANNEL_DEFAULTS: dict[str, tuple[list[str], dict[str, str]]] = {
+    "workbuddy": (
+        [str(item["id"]) for item in proxy.DEFAULT_MODELS],
+        dict(proxy._BUILTIN_ALIASES),
+    ),
+    "qclaw": (list(_QCLAW_DEFAULT_MODELS), dict(_QCLAW_DEFAULT_ALIASES)),
+    "qwenwork": (list(_QWENWORK_DEFAULT_MODELS), dict(_QWENWORK_DEFAULT_ALIASES)),
+    "traework": (list(_TRAEWORK_DEFAULT_MODELS), dict(_TRAEWORK_DEFAULT_ALIASES)),
+    "traesolo": (list(_TRAESOLO_DEFAULT_MODELS), dict(_TRAESOLO_DEFAULT_ALIASES)),
+}
+
+
+def _validate_models(models) -> list[str]:
+    """整体替换白名单。[] = 自定义空白名单（该平台所有模型 400）。"""
+    if not isinstance(models, list):
+        raise ValueError("models must be a list of model ids")
+    for item in models:
+        if isinstance(item, dict):
+            if not str(item.get("id") or "").strip():
+                raise ValueError("each models entry must be a non-empty string or {'id': ...}")
+        elif not str(item).strip():
+            raise ValueError("each models entry must be a non-empty string or {'id': ...}")
+    return _ids_from_raw(models)
+
+
+def _validate_aliases(aliases) -> dict[str, str]:
+    """整体替换别名表。{} = 自定义空（该平台无任何别名）。"""
+    if not isinstance(aliases, dict):
+        raise ValueError("aliases must be an object mapping alias -> model id")
+    result: dict[str, str] = {}
+    for key, value in aliases.items():
+        key_s, value_s = str(key).strip(), str(value).strip()
+        if not key_s or not value_s:
+            raise ValueError("aliases keys and values must be non-empty strings")
+        result[key_s] = value_s
+    return result
+
+
+def channel_model_view(channel: str) -> dict:
+    """通道当前生效的模型列表 / 别名，附内置默认与自定义标记。"""
+    channel = str(channel or "").strip()
+    if channel not in KNOWN_CHANNEL_SET:
+        raise ValueError(f"Unknown channel '{channel}'")
+    provider = providers.get_provider(channel)
+    if provider is None:
+        raise ValueError(f"Channel '{channel}' is not enabled")
+    effective_ids = [
+        str(item["id"]) if isinstance(item, dict) else str(item)
+        for item in provider.list_models()
+    ]
+    default_ids, default_aliases = _CHANNEL_DEFAULTS[channel]
+    return {
+        "channel": channel,
+        "models": effective_ids,
+        "aliases": provider.alias_map(),
+        "defaults": {"models": default_ids, "aliases": default_aliases},
+        "customized": is_customized(channel),
+        "credit_rate": model_config.channel_credit_rate(channel),
+        "credit_rate_default": model_config.DEFAULT_CREDIT_RATE,
+        "credit_rate_customized": db.get_setting(f"{channel}.credit_rate") is not None,
+    }
+
+
+def set_channel_models(
+    channel: str,
+    *,
+    models=None,
+    aliases=None,
+    credit_rate=None,
+    set_models: bool = False,
+    set_aliases: bool = False,
+    set_rate: bool = False,
+) -> dict:
+    """设置或重置通道模型列表 / 别名 / credit 换算率。None 表示重置为默认。返回最新视图。"""
+    channel = str(channel or "").strip()
+    if channel not in KNOWN_CHANNEL_SET:
+        raise ValueError(f"Unknown channel '{channel}'")
+    if providers.get_provider(channel) is None:
+        raise ValueError(f"Channel '{channel}' is not enabled")
+    if not (set_models or set_aliases or set_rate):
+        raise ValueError("Provide 'models' and/or 'aliases' and/or 'credit_rate' (null resets)")
+
+    models_key, aliases_key = _channel_keys(channel)
+    if set_models:
+        if models is None:
+            db.delete_setting(models_key)
+        else:
+            ids = _validate_models(models)
+            if channel == "workbuddy":
+                db.set_setting(models_key, [{"id": mid} for mid in ids])
+            else:
+                db.set_setting(models_key, ids)
+    if set_aliases:
+        if aliases is None:
+            db.delete_setting(aliases_key)
+        else:
+            mapping = _validate_aliases(aliases)
+            db.set_setting(aliases_key, mapping)
+    if set_rate:
+        if credit_rate is None:
+            db.delete_setting(f"{channel}.credit_rate")
+        else:
+            try:
+                rate = float(credit_rate)
+            except (TypeError, ValueError):
+                raise ValueError("credit_rate must be a number")
+            if rate < 0:
+                raise ValueError("credit_rate must be >= 0")
+            db.set_setting(f"{channel}.credit_rate", rate)
+    return channel_model_view(channel)
+
+
+# ------------------------------------------------------------
+# 统一模型（跨平台翻译层）：统一名 -> {通道: 内部模型名}
+# 纯翻译层，白名单仍是各通道的最终闸门。
+# ------------------------------------------------------------
+
+def unified_model_view() -> dict:
+    """统一模型当前配置 + 可选通道列表（管理页宽表用）。"""
+    return {
+        "models": [
+            {"name": name, "mappings": dict(mapping)}
+            for name, mapping in unified_models().items()
+        ],
+        "channels": providers.enabled_provider_ids(),
+    }
+
+
+def _validate_unified_models(models) -> list[dict]:
+    if not isinstance(models, list):
+        raise ValueError("models must be a list of {name, mappings}")
+    seen: set[str] = set()
+    result: list[dict] = []
+    for entry in models:
+        if not isinstance(entry, dict):
+            raise ValueError("each unified model must be an object with name and mappings")
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            raise ValueError("unified model name must be a non-empty string")
+        if name in seen:
+            raise ValueError(f"duplicate unified model '{name}'")
+        seen.add(name)
+        mappings = entry.get("mappings")
+        if not isinstance(mappings, dict):
+            raise ValueError(f"unified model '{name}' needs a mappings object")
+        cleaned: dict[str, str] = {}
+        for channel, inner in mappings.items():
+            channel_s = str(channel).strip()
+            inner_s = str(inner).strip()
+            if not channel_s or not inner_s:
+                raise ValueError(f"unified model '{name}' has an empty channel or inner id")
+            if channel_s not in KNOWN_CHANNEL_SET:
+                raise ValueError(f"unified model '{name}' references unknown channel '{channel_s}'")
+            cleaned[channel_s] = inner_s
+        if not cleaned:
+            raise ValueError(f"unified model '{name}' has no mappings")
+        result.append({"name": name, "mappings": cleaned})
+    return result
+
+
+def set_unified_models(models) -> dict:
+    """整体替换统一模型表；[] = 清空。返回最新视图。"""
+    cleaned = _validate_unified_models(models)
+    db.set_setting("unified_models", cleaned)
+    return unified_model_view()
 
 
 async def _channel_accounts(channel: str, status: str = "active") -> list[dict]:

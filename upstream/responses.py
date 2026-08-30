@@ -7,14 +7,17 @@ Codex 从 2026.2 起强制要求 wire_api="responses"，不再支持 chat/comple
 """
 
 import json
+import logging
 import os
 import re
-import sys
 import time
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
-import proxy
+logger = logging.getLogger("buddy2api.responses")
+
+from upstream import proxy
+import providers
 
 
 _DEBUG_SECRET_KEYS = {
@@ -200,11 +203,10 @@ def responses_to_chat(resp_payload: dict) -> dict:
         else:
             # web_search, file_search, code_interpreter 等后端不支持：跳过，
             # 但记录日志，便于诊断"模型因缺少工具而用文字代替"的退化（issue #31）。
-            print(
-                "[responses] dropping unsupported tool type "
-                f"{t.get('type')!r}"
-                + (f" name={t.get('name')!r}" if t.get('name') else ""),
-                file=sys.stderr,
+            logger.info(
+                "[responses] dropping unsupported tool type %r%s",
+                t.get("type"),
+                f" name={t.get('name')!r}" if t.get('name') else "",
             )
 
     # tool_choice
@@ -554,9 +556,9 @@ def chat_response_to_responses(chat_resp: dict, model: str) -> dict:
 
 
 async def _iter_chat_sse_data(
-    chat_stream: AsyncGenerator[bytes, None],
+    chat_stream: AsyncGenerator[object, None],
 ) -> AsyncGenerator[str, None]:
-    """Yield complete SSE data events from arbitrary HTTP byte chunks."""
+    """Yield complete SSE data events from arbitrary upstream chunks (bytes/str)."""
     buffer = b""
     data_lines: list[bytes] = []
     event_bytes = 0
@@ -606,9 +608,14 @@ async def _iter_chat_sse_data(
     async for chunk in chat_stream:
         if not chunk:
             continue
-        if not isinstance(chunk, (bytes, bytearray)):
-            raise TypeError("upstream stream chunks must be bytes")
-        buffer += bytes(chunk)
+        # 不同 provider 的流可能吐 bytes（workbuddy 原始上游）或 str
+        # （traework 等适配层拼好的 SSE 行），统一转成 bytes 再解析。
+        if isinstance(chunk, str):
+            buffer += chunk.encode("utf-8")
+        elif isinstance(chunk, (bytes, bytearray)):
+            buffer += bytes(chunk)
+        else:
+            raise TypeError("upstream stream chunks must be bytes or str")
         if len(buffer) > max_event_bytes and b"\n" not in buffer and b"\r" not in buffer:
             raise ValueError("upstream SSE line exceeds the size limit")
 
@@ -632,10 +639,10 @@ async def _iter_chat_sse_data(
 
 
 async def chat_stream_to_responses_stream(
-    chat_stream: AsyncGenerator[bytes, None],
+    chat_stream: AsyncGenerator[object, None],
     model: str,
 ) -> AsyncGenerator[str, None]:
-    """Convert a Chat Completions SSE stream into Responses API events."""
+    """Convert a Chat Completions SSE stream (bytes or str chunks) into Responses API events."""
     resp_id = "resp_" + os.urandom(12).hex()
     created_at = int(time.time())
     response_model = model
@@ -1007,10 +1014,11 @@ def _gen_item_id(prefix: str) -> str:
 async def proxy_responses(
     resp_payload: dict,
     api_key_info: Optional[dict] = None,
+    channel: str = "workbuddy",
 ) -> tuple:
     """
     主代理函数 — Responses API 版本。
-    
+
     返回:
       - ("stream", async_generator)  流式响应
       - ("json", dict)               非流式响应
@@ -1021,9 +1029,15 @@ async def proxy_responses(
     _maybe_dump("responses_request_raw", resp_payload)
     _maybe_dump("responses_request_chat", chat_payload)
 
-    # 2. 调用现有 proxy
-    result = await proxy.proxy_chat_completions(chat_payload, api_key_info)
-    
+    # 2. 按绑定通道执行（workbuddy=原 proxy；其他通道=对应 provider）
+    if channel == "workbuddy":
+        result = await proxy.proxy_chat_completions(chat_payload, api_key_info)
+    else:
+        provider = providers.get_provider(channel)
+        if provider is None:
+            raise ValueError(f"Unknown or disabled channel '{channel}'")
+        result = await provider.chat_completions(chat_payload, api_key_info)
+
     if result[0] == "error":
         return result
     

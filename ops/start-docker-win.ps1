@@ -1,6 +1,8 @@
 $ErrorActionPreference = "Stop"
 
-$ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+# 脚本在 ops/，项目根是 ops/ 的父目录
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ProjectRoot = Split-Path -Parent $ScriptDir
 Set-Location $ProjectRoot
 New-Item -ItemType Directory -Force -Path (Join-Path $ProjectRoot "data") | Out-Null
 
@@ -23,11 +25,11 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 $defaultAuthDir = Join-Path $env:LOCALAPPDATA "CodeBuddyExtension\Data\Public\auth"
 $authDir = if ($env:CB_HOST_AUTH_DIR) { $env:CB_HOST_AUTH_DIR } else { $defaultAuthDir }
 
-$composeFiles = @("-f", "docker-compose.yml")
+$composeFiles = @("-f", "ops/docker-compose.yml")
 if (Test-Path -LiteralPath $authDir -PathType Container) {
     $dockerAuthDir = Convert-ToDockerPath $authDir
     $env:CB_HOST_AUTH_DIR = $dockerAuthDir
-    $composeFiles += @("-f", "docker-compose.windows.yml")
+    $composeFiles += @("-f", "ops/docker-compose.windows.yml")
     Write-Host "  [auth] $authDir"
     Write-Host "  [mount] $dockerAuthDir -> /auth:ro"
 } else {
@@ -47,4 +49,4 @@ docker compose @composeFiles up -d --build
 
 Write-Host ""
 Write-Host "  Started. Open http://127.0.0.1:8787, pick a channel on Accounts, then detect/import."
-Write-Host "  QClaw / QwenWork Windows logins cannot be read inside Linux Docker; use python server.py for those."
+Write-Host "  QClaw / QwenWork Windows logins cannot be read inside Linux Docker; use python -m gateway.server for those."

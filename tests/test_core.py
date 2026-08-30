@@ -7,14 +7,12 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-import credential_crypto
-import database as db
-import proxy
-import responses
-import server
-import auth_manager
-
-
+from storage import credential_crypto
+from storage import database as db
+from upstream import proxy
+from upstream import responses
+from gateway import server
+from accounts import auth_manager
 def _chat_sse(payload: dict) -> bytes:
     data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return f"data: {data}\n\n".encode("utf-8")
@@ -289,17 +287,6 @@ def _install_chat_account_stream_fakes(
     return calls
 
 
-@pytest.fixture()
-def isolated_db(tmp_path, monkeypatch):
-    path = tmp_path / "gateway.db"
-    monkeypatch.setattr(db, "DB_PATH", path)
-    monkeypatch.setenv("CB_GATEWAY_MASTER_KEY", "pytest-master-key")
-    credential_crypto.reset_cache()
-    db.init_db()
-    yield path
-    credential_crypto.reset_cache()
-
-
 def test_encrypt_without_master_key_uses_fernet_key_file(tmp_path, monkeypatch):
     path = tmp_path / "gateway.db"
     monkeypatch.setattr(db, "DB_PATH", path)
@@ -437,12 +424,13 @@ def test_plaintext_legacy_api_key_is_migrated_to_encrypted_storage(
 
 
 def test_windows_start_script_bootstraps_portable_buddy2api_environment():
-    script = (Path(__file__).parents[1] / "start.bat").read_bytes().decode("ascii")
+    script = (Path(__file__).parents[1] / "ops" / "start.bat").read_bytes().decode("utf-8")
 
     assert "create -n buddy2api python=3.12 -y" in script
-    assert "run -n buddy2api python -m pip install -r requirements.txt" in script
-    assert "run --no-capture-output -n buddy2api python server.py" in script
+    assert "run -n buddy2api python -m pip install -r ops/requirements/base.txt" in script
+    assert "run --no-capture-output -n buddy2api python -m gateway.server" in script
     assert "-m venv .venv" in script
+    assert "cd /d \"%~dp0\\..\"" in script  # 切到项目根
 
 
 def test_record_request_updates_log_and_counters_once(isolated_db):
@@ -935,6 +923,110 @@ def test_non_stream_chat_conversion_rejects_empty_completed_response():
     assert converted["status"] == "failed"
     assert converted["output"] == []
     assert converted["error"]["code"] == "empty_upstream_response"
+
+
+def test_proxy_responses_dispatches_non_workbuddy_channel_to_provider(monkeypatch):
+    # /v1/responses 必须按绑定通道分发：非 workbuddy 通道走对应
+    # provider.chat_completions，而不是永远打向 WorkBuddy 后端。
+    calls = []
+
+    class FakeProvider:
+        async def chat_completions(self, payload, api_key_info):
+            calls.append((payload, api_key_info))
+            return ("json", {
+                "id": "traework-123",
+                "model": "qwen-3.7-plus",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "pong"},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            })
+
+    monkeypatch.setattr(
+        "providers.get_provider",
+        lambda channel: FakeProvider() if channel == "traework" else None,
+    )
+
+    def fail_if_workbuddy_proxy(*_args, **_kwargs):
+        raise AssertionError("workbuddy proxy must not be called for the traework channel")
+
+    monkeypatch.setattr(proxy, "proxy_chat_completions", fail_if_workbuddy_proxy)
+
+    async def run():
+        return await responses.proxy_responses(
+            {"model": "qwen-3.7-plus", "input": "ping", "stream": False},
+            {"id": 2, "name": "Trae", "default_channel": "traework"},
+            channel="traework",
+        )
+
+    result = asyncio.run(run())
+    assert result[0] == "json"
+    body = result[1]
+    assert body["status"] == "completed"
+    assert body["output"][0]["content"][0]["text"] == "pong"
+    assert len(calls) == 1
+    assert calls[0][0]["model"] == "qwen-3.7-plus"
+    assert calls[0][0]["messages"] == [{"role": "user", "content": "ping"}]
+
+
+def test_proxy_responses_default_channel_still_uses_workbuddy_proxy(monkeypatch):
+    seen = {}
+
+    async def fake_proxy(chat_payload, api_key_info):
+        seen["payload"] = chat_payload
+        return ("json", {
+            "id": "chatcmpl-1",
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop",
+            }],
+            "usage": {},
+        })
+
+    monkeypatch.setattr(proxy, "proxy_chat_completions", fake_proxy)
+
+    async def run():
+        return await responses.proxy_responses(
+            {"model": "auto", "input": "hi", "stream": False},
+            None,
+            channel="workbuddy",
+        )
+
+    result = asyncio.run(run())
+    assert result[0] == "json"
+    assert result[1]["output"][0]["content"][0]["text"] == "hi"
+    assert seen["payload"]["model"] == "auto"
+
+
+def test_chat_stream_to_responses_accepts_str_chunks():
+    # traework 等适配层的流吐的是 str 型 SSE 行，而不是原始 bytes，
+    # 转换层必须能处理，否则会变成 response.failed。
+    async def chat_stream():
+        yield 'data: {"id":"c1","object":"chat.completion.chunk","created":1,' \
+              '"model":"qwen-3.7-plus","choices":[{"index":0,' \
+              '"delta":{"role":"assistant","content":"pong"},"finish_reason":null}]}\n\n'
+        yield 'data: {"id":"c1","object":"chat.completion.chunk","created":1,' \
+              '"model":"qwen-3.7-plus","choices":[{"index":0,' \
+              '"delta":{},"finish_reason":"stop"}]}\n\n'
+        yield "data: [DONE]\n\n"
+
+    async def collect():
+        return [
+            event
+            async for event in responses.chat_stream_to_responses_stream(
+                chat_stream(), "qwen-3.7-plus"
+            )
+        ]
+
+    events = asyncio.run(collect())
+    joined = "".join(events)
+    assert "response.completed" in joined
+    assert "pong" in joined
+    assert "response.failed" not in joined
 
 
 @pytest.mark.parametrize("delta", [{}, {"reasoning_content": "internal only"}])
@@ -2121,7 +2213,7 @@ def test_valid_headers_is_async_and_uses_decrypted_token(isolated_db):
         }
     )
     account = db.get_account(account_id)
-    headers = asyncio.run(__import__("auth_manager").get_valid_headers(account))
+    headers = asyncio.run(auth_manager.get_valid_headers(account))
     assert headers["Authorization"] == "Bearer access-secret"
 
 

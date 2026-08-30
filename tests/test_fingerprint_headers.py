@@ -1,6 +1,4 @@
-import fingerprint
-
-
+from storage import fingerprint
 def test_chat_headers_include_cli_fingerprint_not_cosy_or_refresh():
     headers = fingerprint.chat_headers(
         {

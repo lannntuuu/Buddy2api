@@ -9,6 +9,7 @@ from typing import Optional
 from fastapi import HTTPException
 
 import providers
+from providers.model_config import translate_unified
 from providers.protocol import (
     BindResult,
     InvalidModel,
@@ -54,6 +55,7 @@ def bind(payload: dict, api_key_info: dict | None) -> BindResult:
         if not providers.is_channel_enabled(channel) or providers.get_provider(channel) is None:
             raise UnknownChannel(channel)
         provider = providers.get_provider(channel)
+        inner = translate_unified(channel, inner)
         if not provider.accepts_model(inner):
             raise InvalidModel(original)
         if key_channel != channel:
@@ -65,9 +67,15 @@ def bind(payload: dict, api_key_info: dict | None) -> BindResult:
     if not providers.is_channel_enabled(channel) or providers.get_provider(channel) is None:
         raise UnknownChannel(channel)
     provider = providers.get_provider(channel)
-    inner = original
+    inner = translate_unified(channel, original)
     if inner == "auto" or provider.accepts_model(inner):
         return BindResult(channel=channel, inner=inner, original=original)
+    if inner != original:
+        raise InvalidModel(
+            original,
+            f"Unified model '{original}' maps to '{inner}' on {channel}, "
+            f"but '{inner}' is not in that channel's model list",
+        )
     if _other_channel_ids(inner, channel):
         raise UnknownModel(
             original,

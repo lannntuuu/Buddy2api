@@ -91,7 +91,7 @@ def _dpapi_encrypt(data: bytes) -> bytes:
     source_buffer = ctypes.create_string_buffer(data)
     source = DataBlob(len(data), ctypes.cast(source_buffer, ctypes.POINTER(ctypes.c_char)))
     output = DataBlob()
-    crypt32 = ctypes.windll.crypt32
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
     crypt32.CryptProtectData.argtypes = [
         ctypes.POINTER(DataBlob), ctypes.c_wchar_p, ctypes.POINTER(DataBlob),
         ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(DataBlob),
@@ -114,7 +114,7 @@ def _dpapi_decrypt(data: bytes) -> bytes:
     source_buffer = ctypes.create_string_buffer(data)
     source = DataBlob(len(data), ctypes.cast(source_buffer, ctypes.POINTER(ctypes.c_char)))
     output = DataBlob()
-    crypt32 = ctypes.windll.crypt32
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
     crypt32.CryptUnprotectData.argtypes = [
         ctypes.POINTER(DataBlob), ctypes.POINTER(ctypes.c_wchar_p), ctypes.POINTER(DataBlob),
         ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(DataBlob),

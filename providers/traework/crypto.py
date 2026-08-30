@@ -12,7 +12,7 @@ import hashlib
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.padding import PKCS7
 
-from credential_crypto import CredentialCryptoError
+from storage.credential_crypto import CredentialCryptoError
 
 _MAGIC = b"tc\x05\x10\x00\x00"
 _HEADER = 6

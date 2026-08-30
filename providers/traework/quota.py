@@ -5,6 +5,7 @@ from __future__ import annotations
 import httpx
 
 from providers.protocol import QuotaSnapshot
+from providers.store_common import checkin_row
 from providers.traework.constants import (
     CHANNEL_ID,
     CHECKIN_CLAIM_PATH,
@@ -21,33 +22,8 @@ def _host(account: dict) -> str:
     return str(extra.get("host") or UG_API).rstrip("/") or UG_API
 
 
-def _checkin_row(
-    account: dict,
-    *,
-    ok: bool,
-    status_code: int = 0,
-    message: str = "",
-    claimed: bool = False,
-    already_claimed: bool = False,
-    credit: float = 0,
-    today_checked_in: bool | None = None,
-    extra: dict | None = None,
-) -> dict:
-    return {
-        "account_id": account.get("id"),
-        "account_name": account.get("nickname") or account.get("name") or str(account.get("id")),
-        "ok": ok,
-        "claimed": claimed,
-        "already_claimed": already_claimed,
-        "status_code": status_code,
-        "message": message,
-        "credit": credit,
-        "active": True,
-        "today_checked_in": already_claimed if today_checked_in is None else today_checked_in,
-        "today_credit": credit,
-        "channel": CHANNEL_ID,
-        **(extra or {}),
-    }
+def _checkin_row(account: dict, **kwargs) -> dict:
+    return checkin_row(account, CHANNEL_ID, **kwargs)
 
 
 async def fetch_checkin(account: dict, force: bool = False) -> dict:

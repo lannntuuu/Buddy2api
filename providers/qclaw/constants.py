@@ -53,4 +53,4 @@ ALIASES = {
     "modelroute": "default",
 }
 
-RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+from providers.retry import RETRYABLE_STATUS  # noqa: E402  (统一重试常量)

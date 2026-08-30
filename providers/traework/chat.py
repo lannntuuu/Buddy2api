@@ -10,8 +10,9 @@ from typing import AsyncGenerator
 
 import httpx
 
-import auth_manager
-import database as db
+from accounts import auth_manager
+from storage import database as db
+from providers.model_config import channel_aliases, channel_model_ids
 from providers.traework.constants import (
     AGENT_API,
     AGENT_ID,
@@ -23,15 +24,21 @@ from providers.traework.constants import (
 )
 from providers.traework.token import TraeWorkAuthError, auth_headers, is_token_expired, refresh_account
 
+# 持有最近一次后台清理（删会话 / 关连接）的任务引用，避免被 GC 提前回收。
+_bg_close: asyncio.Task | None = None
+
 
 def translate_model(model: str) -> str:
     inner = (model or "auto").strip() or "auto"
-    return ALIASES.get(inner, inner)
+    return channel_aliases(CHANNEL_ID, ALIASES).get(inner, inner)
 
 
 def accepts_model(inner: str) -> bool:
     value = (inner or "").strip()
-    return value in STATIC_MODELS or value in ALIASES
+    return (
+        value in channel_model_ids(CHANNEL_ID, STATIC_MODELS)
+        or value in channel_aliases(CHANNEL_ID, ALIASES)
+    )
 
 
 def _last_user_text(payload: dict) -> str:
@@ -54,12 +61,37 @@ def _last_user_text(payload: dict) -> str:
     return ""
 
 
-def _walk_text(value, bucket: list[str]) -> None:
+def _finish_answer(tool_call_info, bucket: list[str]) -> None:
+    """SOLO agent 的最终回答由 finish 工具调用携带（params.summary 等）。"""
+    if not isinstance(tool_call_info, dict):
+        return
+    if str(tool_call_info.get("name") or "") != "finish":
+        return
+    params = tool_call_info.get("params")
+    if not isinstance(params, dict):
+        return
+    for key in ("summary", "content", "text"):
+        item = params.get(key)
+        if isinstance(item, str) and item.strip():
+            bucket.append(item.strip())
+            return
+    for item in params.values():
+        if isinstance(item, str) and item.strip():
+            bucket.append(item.strip())
+            return
+
+
+def _walk_text(value, answer: list[str], thinking: list[str]) -> None:
+    """收集回答文本（answer）与思考文本（thinking），两者分开存放。
+
+    回答来源：finish 工具的 params、text_content/text/markdown/plain_text、
+    普通 content 字符串。思考来源：reasoning_content、thought。
+    """
     if isinstance(value, str):
         text = value.strip()
         if text.startswith("{") or text.startswith("["):
             try:
-                _walk_text(json.loads(text), bucket)
+                _walk_text(json.loads(text), answer, thinking)
             except json.JSONDecodeError:
                 pass
         return
@@ -67,61 +99,90 @@ def _walk_text(value, bucket: list[str]) -> None:
         kind = str(value.get("type") or "")
         if kind in {"status", "tool", "tool_call"}:
             return
-        for key in ("text_content", "text", "markdown", "plain_text", "reasoning_content"):
+        _finish_answer(value.get("tool_call_info"), answer)
+        for key in ("text_content", "text", "markdown", "plain_text"):
             item = value.get(key)
             if isinstance(item, str) and item.strip():
-                bucket.append(item.strip())
+                answer.append(item.strip())
+        for key in ("reasoning_content", "thought"):
+            item = value.get(key)
+            if isinstance(item, str) and item.strip():
+                thinking.append(item.strip())
         content = value.get("content")
         if isinstance(content, str) and content.strip():
             if content.startswith("{") or content.startswith("["):
-                _walk_text(content, bucket)
-            elif content.strip() not in bucket:
-                bucket.append(content.strip())
+                _walk_text(content, answer, thinking)
+            elif content.strip() not in answer:
+                answer.append(content.strip())
         elif isinstance(content, (dict, list)):
-            _walk_text(content, bucket)
+            _walk_text(content, answer, thinking)
+        # 最终消息里 plan_item 还套了一层对象（type=plan_item 的消息体）。
+        plan_item = value.get("plan_item")
+        if isinstance(plan_item, (dict, list)):
+            _walk_text(plan_item, answer, thinking)
         messages = value.get("messages")
         if isinstance(messages, list):
-            _walk_text(messages, bucket)
+            _walk_text(messages, answer, thinking)
         return
     if isinstance(value, list):
         for item in value:
-            _walk_text(item, bucket)
+            _walk_text(item, answer, thinking)
+
+
+def _join(bucket: list[str]) -> str:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for chunk in bucket:
+        if chunk not in seen:
+            seen.add(chunk)
+            ordered.append(chunk)
+    return "\n".join(ordered).strip()
+
+
+_SKIP_EVENTS = {
+    "heartbeat",
+    "status_changed",
+    "platform_timing",
+    "timing_events",
+    "token_usage",
+    "model_config",
+    "project_name_message",
+    "session_title_message",
+    "session_icon_message",
+    "metadata",
+}
+
+
+def _split_event(event: str, payload: dict) -> tuple[str, list[str]]:
+    """拆出一个事件的（回答文本, 思考片段列表）。
+
+    思考片段来自 reasoning_content / thought（如 plan_item 事件），
+    供流式请求提前转发；回答文本只用于事件兜底拼接。
+    """
+    if event in _SKIP_EVENTS:
+        return "", []
+    answer: list[str] = []
+    thinking: list[str] = []
+    _walk_text(payload, answer, thinking)
+    return _join(answer), thinking
 
 
 def _text_from_event(event: str, payload: dict) -> str:
-    if event in {
-        "heartbeat",
-        "status_changed",
-        "platform_timing",
-        "timing_events",
-        "token_usage",
-        "model_config",
-        "project_name_message",
-        "session_title_message",
-        "session_icon_message",
-        "metadata",
-    }:
-        return ""
-    bucket: list[str] = []
-    _walk_text(payload, bucket)
-    return "\n".join(dict.fromkeys(bucket)).strip()
+    answer, _thinking = _split_event(event, payload)
+    return answer
 
 
 def extract_assistant_text(items: list) -> str:
-    chunks: list[str] = []
+    answer: list[str] = []
+    thinking: list[str] = []
     for item in items:
         if not isinstance(item, dict):
             continue
         if item.get("role") not in {"assistant", "system"} and item.get("message_type") != "task":
             continue
-        _walk_text(item.get("content"), chunks)
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for chunk in chunks:
-        if chunk not in seen:
-            seen.add(chunk)
-            ordered.append(chunk)
-    return "\n".join(ordered).strip()
+        _walk_text(item.get("content"), answer, thinking)
+    # 有正文用正文；只有思考时退回思考文本（保持旧的兜底行为）。
+    return _join(answer) or _join(thinking)
 
 
 def _openai_json(model: str, text: str, finish: str = "stop") -> dict:
@@ -147,7 +208,7 @@ async def _pick(tried: set[int]) -> dict | None:
         if is_token_expired(account):
             try:
                 return await refresh_account(account)
-            except TraeWorkAuthError:
+            except Exception:
                 pass
         else:
             return account
@@ -159,7 +220,7 @@ async def _pick(tried: set[int]) -> dict | None:
     for row in expired:
         try:
             return await refresh_account(row)
-        except TraeWorkAuthError:
+        except Exception:
             continue
     return None
 
@@ -190,11 +251,42 @@ def _log(api_key_info, account, model_name, stream, finish, status, error, t0):
         pass
 
 
-async def _turn(account: dict, prompt: str, model: str, timeout: float = 90.0) -> str:
+async def _turn(
+    account: dict,
+    prompt: str,
+    model: str,
+    timeout: float = 90.0,
+    on_thinking=None,
+) -> str:
+    """跑完一个上游 agent 回合，返回最终回答文本。
+
+    on_thinking: 可选 async 回调，上游事件流里的思考文本（plan_item 的
+    thought/reasoning_content）到达时逐片段调用，供流式请求提前转发。
+    """
     headers = auth_headers(account)
     session_url = f"{AGENT_API}{SESSIONS_PATH}"
     sid = ""
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    client = httpx.AsyncClient(timeout=timeout)
+    task: asyncio.Task | None = None
+    closed = False
+
+    async def _close_session() -> None:
+        if sid:
+            try:
+                await client.delete(f"{session_url}/{sid}", headers=headers)
+            except Exception:
+                pass
+
+    async def _close_client() -> None:
+        # 幂等：成功/失败/外层兜底可能多次触达，只真正执行一次。
+        nonlocal closed
+        if closed:
+            return
+        closed = True
+        await _close_session()
+        await client.aclose()
+
+    try:
         created = await client.post(
             session_url,
             headers=headers,
@@ -213,6 +305,7 @@ async def _turn(account: dict, prompt: str, model: str, timeout: float = 90.0) -
 
         async def read_events() -> None:
             event_name = "message"
+            seen_thinking: set[str] = set()
             try:
                 async with client.stream(
                     "GET",
@@ -233,9 +326,17 @@ async def _turn(account: dict, prompt: str, model: str, timeout: float = 90.0) -
                             event_payload = json.loads(raw)
                         except json.JSONDecodeError:
                             continue
-                        text = _text_from_event(event_name, event_payload if isinstance(event_payload, dict) else {})
-                        if text:
-                            pieces.append(text)
+                        answer_text, thinking_frags = _split_event(
+                            event_name,
+                            event_payload if isinstance(event_payload, dict) else {},
+                        )
+                        if answer_text:
+                            pieces.append(answer_text)
+                        if on_thinking is not None:
+                            for frag in thinking_frags:
+                                if frag and frag not in seen_thinking:
+                                    seen_thinking.add(frag)
+                                    await on_thinking(frag)
                         if event_name == "done":
                             finished.set()
                             return
@@ -244,7 +345,9 @@ async def _turn(account: dict, prompt: str, model: str, timeout: float = 90.0) -
 
         task = asyncio.create_task(read_events())
         try:
-            await asyncio.sleep(0.35)
+            # 留出 SSE 订阅建立时间；早期事件即使丢失也不影响结果
+            # （最终 GET /messages 是兜底数据源）。
+            await asyncio.sleep(0.1)
             query = json.dumps(
                 [{"type": "text", "data": {"content": prompt}}],
                 ensure_ascii=False,
@@ -274,24 +377,42 @@ async def _turn(account: dict, prompt: str, model: str, timeout: float = 90.0) -
             text = extract_assistant_text(items) or "\n".join(dict.fromkeys(pieces)).strip()
             if not text:
                 raise TraeWorkAuthError("TraeWork turn finished without assistant text")
-            return text
-        finally:
+            # 成功路径：读流任务收尾后，会话删除 + 连接关闭放到后台，
+            # 不阻塞对客户端的响应（省 ~150ms 尾延迟）。
             task.cancel()
             try:
-                await client.delete(f"{session_url}/{sid}", headers=headers)
-            except Exception:
+                await task
+            except BaseException:
                 pass
+            global _bg_close
+            _bg_close = asyncio.create_task(_close_client())
+            return text
+        except BaseException:
+            # 失败路径：同步清理，会话删除尽量做到，再抛出。
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
+            await _close_client()
+            raise
+    except BaseException:
+        if task is not None:
+            task.cancel()
+        await _close_client()
+        raise
 
 
-async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
-    model = translate_model(str(payload.get("model") or "auto"))
-    prompt = _last_user_text(payload)
-    if not prompt:
-        return (
-            "error",
-            (400, {"error": {"message": "messages must include a user turn", "type": "invalid_request_error"}}),
-        )
-    stream = bool(payload.get("stream"))
+async def _run_turn(
+    prompt: str,
+    model: str,
+    client_model: str,
+    api_key_info: dict | None,
+    stream: bool = False,
+    on_thinking=None,
+    timeout: float = 90.0,
+) -> tuple:
+    """账号重试循环。返回 ("ok", text) 或 ("error", (status, detail))。"""
     tried: set[int] = set()
     last_error = None
     for _ in range(3):
@@ -301,22 +422,22 @@ async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
         tried.add(int(account["id"]))
         t0 = time.time()
         try:
-            text = await _turn(account, prompt, model)
+            text = await _turn(account, prompt, model, timeout=timeout, on_thinking=on_thinking)
             auth_manager.mark_account_success(account["id"])
-            _log(api_key_info, account, payload.get("model") or model, stream, "stop", 200, "", t0)
-            if stream:
-                return ("stream", _stream_once(text, str(payload.get("model") or model)))
-            return ("json", _openai_json(str(payload.get("model") or model), text))
+            _log(api_key_info, account, client_model, stream, "stop", 200, "", t0)
+            return "ok", text
         except TraeWorkAuthError as exc:
             auth_manager.mark_account_failure(account["id"], 503)
             last_error = ("error", (503, {"error": {"message": str(exc)[:240], "type": "server_error"}}))
-            _log(api_key_info, account, payload.get("model") or model, stream, "error", 503, str(exc)[:240], t0)
+            _log(api_key_info, account, client_model, stream, "error", 503, str(exc)[:240], t0)
             continue
         except httpx.HTTPError as exc:
             auth_manager.mark_account_failure(account["id"], 503)
             last_error = ("error", (503, {"error": {"message": str(exc)[:240], "type": "server_error"}}))
             continue
-    return last_error or (
+    if last_error is not None:
+        return last_error
+    return (
         "error",
         (
             503,
@@ -331,24 +452,123 @@ async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
     )
 
 
-async def _stream_once(text: str, model: str) -> AsyncGenerator[str, None]:
-    chunk = {
-        "id": f"traework-{uuid.uuid4().hex[:12]}",
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None}],
-    }
-    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-    done = {
-        "id": chunk["id"],
-        "object": "chat.completion.chunk",
-        "created": chunk["created"],
-        "model": model,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-    }
-    yield f"data: {json.dumps(done, ensure_ascii=False)}\n\n"
-    yield "data: [DONE]\n\n"
+async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
+    model = translate_model(str(payload.get("model") or "auto"))
+    prompt = _last_user_text(payload)
+    if not prompt:
+        return (
+            "error",
+            (400, {"error": {"message": "messages must include a user turn", "type": "invalid_request_error"}}),
+        )
+    stream = bool(payload.get("stream"))
+    client_model = str(payload.get("model") or model)
+    if stream:
+        # 流式：立即返回生成器。首包马上发出，思考文本随事件提前转发，
+        # 回合跑完后再补最终回答，避免客户端干等十几秒。
+        return ("stream", _stream_chat(prompt, model, client_model, api_key_info))
+    status, result = await _run_turn(prompt, model, client_model, api_key_info, stream=False)
+    if status == "ok":
+        return ("json", _openai_json(client_model, result))
+    status_code, detail = result
+    return ("error", (status_code, detail))
+
+
+def _new_piece(prev: str, frag: str) -> str:
+    """上游 plan_item 常把累计思考整段重发；只转发相对上一段的新增量。"""
+    if not prev or not frag:
+        return frag
+    if frag.startswith(prev):
+        return frag[len(prev):]
+    if prev.startswith(frag):
+        return ""
+    return frag
+
+
+async def _stream_chat(
+    prompt: str, model: str, client_model: str, api_key_info: dict | None
+) -> AsyncGenerator[str, None]:
+    chunk_id = f"traework-{uuid.uuid4().hex[:12]}"
+    created = int(time.time())
+
+    def sse(delta: dict, finish: str | None = None) -> str:
+        body = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": client_model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+        }
+        return f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
+
+    # 立即首包：客户端马上有 TTFB，不再是干等 10s+ 毫无输出。
+    yield sse({"role": "assistant"})
+
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def on_thinking(fragment: str) -> None:
+        queue.put_nowait(fragment)
+
+    turn_task = asyncio.get_event_loop().create_task(
+        _run_turn(prompt, model, client_model, api_key_info, stream=True, on_thinking=on_thinking)
+    )
+    emitted: list[str] = []  # 完整片段（供最终答案去重判断）
+    last_full = ""
+    try:
+        while True:
+            if turn_task.done() and queue.empty():
+                break
+            get_task = asyncio.ensure_future(queue.get())
+            try:
+                done, _pending = await asyncio.wait(
+                    {get_task, turn_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+            except asyncio.CancelledError:
+                get_task.cancel()
+                turn_task.cancel()
+                raise
+            if get_task in done:
+                frags = [get_task.result()]
+                while not queue.empty():
+                    frags.append(queue.get_nowait())
+                for frag in frags:
+                    emitted.append(frag)
+                    piece = _new_piece(last_full, frag)
+                    last_full = frag
+                    if piece:
+                        yield sse({"content": piece})
+            else:
+                get_task.cancel()
+    finally:
+        # 客户端断连 / 生成器被关闭：取消进行中的回合，避免白跑一个上游 agent。
+        if not turn_task.done():
+            turn_task.cancel()
+
+    try:
+        status, result = turn_task.result()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        status, result = (
+            "error",
+            (500, {"error": {"message": f"internal error: {exc}"[:240], "type": "server_error"}}),
+        )
+    if status == "ok":
+        text = result
+        # 最终回答若已包含在转发过的思考文本里就不重复发，避免正文出现两遍。
+        if text and text not in "".join(emitted):
+            yield sse({"content": ("\n" if emitted else "") + text})
+        yield sse({}, "stop")
+        yield "data: [DONE]\n\n"
+    else:
+        # 流内错误：发 OpenAI 兼容的 error 对象 + [DONE]，不伪造 stop 结束的
+        # 正常回答（客户端会把错误文案当答案存下来，也无法感知失败）。
+        status_code, detail = result
+        msg = str(detail.get("error", {}).get("message", ""))[:300]
+        error_payload = {
+            "error": {"message": f"upstream failed: {msg}", "type": "server_error", "code": status_code}
+        }
+        yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
 
 
 async def test_chat(account: dict, model: str = "qwen-3.7-plus", prompt: str = "请回复：pong") -> dict:

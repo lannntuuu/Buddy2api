@@ -109,7 +109,7 @@ async def post_cmd(
 def apply_new_token(account: dict, new_token: str | None) -> dict:
     if not new_token:
         return account
-    import database as db
+    from storage import database as db
 
     aid = account.get("id")
     if aid:
@@ -165,7 +165,7 @@ async def refresh_channel(account: dict) -> dict:
         extra["openclaw_channel_token"] = channel_token
         aid = account.get("id")
         if aid:
-            import database as db
+            from storage import database as db
 
             db.update_account(int(aid), {"extra": extra})
     return data

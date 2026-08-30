@@ -18,8 +18,8 @@ from typing import AsyncGenerator, Optional
 
 import httpx
 
-import database as db
-import auth_manager
+from storage import database as db
+from accounts import auth_manager
 
 BACKEND = "https://copilot.tencent.com"
 RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -187,11 +187,27 @@ _BUILTIN_ALIASES = {
 }
 
 
+def effective_builtin_aliases() -> dict:
+    """WorkBuddy 生效别名表（整体替换语义，与其它通道一致）：
+
+    未设置 `model_aliases` → 内置默认别名；
+    已设置（哪怕空对象）  → 完全以自定义为准，内置别名全部失效。
+    """
+    raw = db.get_setting("model_aliases", None)
+    if raw is None:
+        return dict(_BUILTIN_ALIASES)
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(key).strip(): str(value).strip()
+        for key, value in raw.items()
+        if str(key).strip() and str(value).strip()
+    }
+
+
 def resolve_model_alias(model: str) -> str:
     """Resolve an alias to its real backend model ID. Returns original if no match."""
-    aliases = db.get_setting("model_aliases", {})
-    merged = {**_BUILTIN_ALIASES, **aliases}
-    return merged.get(model, model)
+    return effective_builtin_aliases().get(model, model)
 
 
 def _configured_reasoning_default(model: str) -> str | None:
@@ -230,9 +246,8 @@ def build_backend_body(payload: dict) -> dict:
 
 
 def get_all_aliases() -> dict:
-    """Return merged aliases (built-in + user-defined)."""
-    user_aliases = db.get_setting("model_aliases", {})
-    return {**_BUILTIN_ALIASES, **user_aliases}
+    """Return effective aliases (custom replaces built-ins; see effective_builtin_aliases)."""
+    return effective_builtin_aliases()
 
 
 def _safe_err(raw: bytes, status: int) -> dict:

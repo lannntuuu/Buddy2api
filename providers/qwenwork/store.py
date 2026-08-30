@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 from datetime import datetime, timezone
@@ -10,8 +9,19 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from credential_crypto import CredentialCryptoError, _dpapi_decrypt
+from storage.credential_crypto import CredentialCryptoError
 from providers.qwenwork.constants import CHANNEL_ID, IDE_VERSION
+from providers.store_common import (
+    chromium_os_crypt_key,
+    decrypt_chromium_v10,
+    discover_summary,
+    existing_uids,
+    imported_file_meta,
+    is_relative_to,
+    iso_to_ms,
+    jwt_exp_ms,
+    upsert_account as upsert_account_by_uid,
+)
 
 
 def qwenwork_user_data_dir() -> Path:
@@ -39,18 +49,11 @@ def qwenwork_auth_dirs() -> list[Path]:
 
 
 def _chromium_os_crypt_key(local_state: dict) -> bytes:
-    b64 = ((local_state.get("os_crypt") or {}).get("encrypted_key")) or ""
-    raw = base64.b64decode(b64)
-    if not raw.startswith(b"DPAPI"):
-        raise CredentialCryptoError("QwenWork Local State encrypted_key is not DPAPI")
-    return _dpapi_decrypt(raw[5:])
+    return chromium_os_crypt_key(local_state, label="QwenWork")
 
 
 def decrypt_v10_blob(blob: bytes, aes_key: bytes) -> bytes:
-    if not blob.startswith(b"v10"):
-        raise CredentialCryptoError("QwenWork auth-v2.dat is not Chromium v10")
-    nonce, rest = blob[3:15], blob[15:]
-    return AESGCM(aes_key).decrypt(nonce, rest, None)
+    return decrypt_chromium_v10(blob, aes_key, label="QwenWork auth-v2.dat")
 
 
 def encrypt_v10_blob(plain: bytes, aes_key: bytes) -> bytes:
@@ -64,26 +67,6 @@ def _os_crypt_key_for(folder: Path) -> bytes:
         raise CredentialCryptoError("QwenWork Local State is missing")
     local_state = json.loads(state_path.read_text(encoding="utf-8"))
     return _chromium_os_crypt_key(local_state)
-
-
-def iso_to_ms(value) -> int:
-    if value in (None, ""):
-        return 0
-    if isinstance(value, (int, float)):
-        number = int(value)
-        return number if number > 10_000_000_000 else number * 1000
-    text = str(value).strip()
-    if not text:
-        return 0
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return 0
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return int(parsed.timestamp() * 1000)
 
 
 def decrypt_auth_file(path: Path) -> dict:
@@ -103,17 +86,7 @@ def decrypt_auth_file(path: Path) -> dict:
 
 
 def _jwt_exp_ms(token: str) -> int:
-    try:
-        parts = token.split(".")
-        if len(parts) < 2:
-            return 0
-        payload = parts[1]
-        payload += "=" * (-len(payload) % 4)
-        data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
-        exp = data.get("exp")
-        return iso_to_ms(exp)
-    except Exception:
-        return 0
+    return jwt_exp_ms(token)
 
 
 def session_to_account(document: dict, source: str = "") -> dict:
@@ -237,15 +210,9 @@ def write_refreshed_auth(path: Path, patch: dict) -> None:
 
 
 def discover() -> dict:
-    import database as db
-
     dirs_info = []
     files: list[dict] = []
-    existing = {
-        str(row.get("uid"))
-        for row in db.list_accounts(provider=CHANNEL_ID)
-        if row.get("uid")
-    }
+    existing = existing_uids(CHANNEL_ID)
     for folder in qwenwork_auth_dirs():
         exists = folder.is_dir()
         dirs_info.append({"path": str(folder), "exists": exists, "file_count": 0})
@@ -263,50 +230,18 @@ def discover() -> dict:
             count += 1
             files.append(_file_meta(json_fallback, existing))
         dirs_info[-1]["file_count"] = count
-    return {
-        "dirs": dirs_info,
-        "files": files,
-        "file_count": len(files),
-        "valid_count": sum(1 for item in files if item.get("valid")),
-        "importable_count": sum(
-            1 for item in files if item.get("valid") and not item.get("already_imported")
-        ),
-        "channel": CHANNEL_ID,
-    }
+    return discover_summary(CHANNEL_ID, dirs_info, files)
 
 
-def _file_meta(path: Path, existing_uids: set[str]) -> dict:
-    reason = ""
-    valid = False
-    uid = ""
-    name = path.name
-    try:
-        parsed = import_discovered(str(path))
-        valid = bool(parsed.get("access_token") or parsed.get("refresh_token"))
-        uid = str(parsed.get("uid") or "")
-        name = parsed.get("nickname") or name
-        if not valid:
-            reason = "missing token"
-    except Exception as exc:
-        reason = str(exc)[:160]
-        valid = False
-    masked = (uid[:6] + "…") if len(uid) > 6 else uid
-    return {
-        "channel": CHANNEL_ID,
-        "path": str(path),
-        "valid": valid,
-        "reason": reason,
-        "account_name": name,
-        "uid_masked": masked,
-        "already_imported": bool(uid and uid in existing_uids),
-    }
+def _file_meta(path: Path, existing: set[str]) -> dict:
+    return imported_file_meta(CHANNEL_ID, path, existing, import_discovered)
 
 
 def import_discovered(path: str) -> dict:
     target = Path(path)
     allowed_roots = [folder.resolve() for folder in qwenwork_auth_dirs() if folder.exists()]
     resolved = target.resolve()
-    if allowed_roots and not any(_is_relative_to(resolved, root) for root in allowed_roots):
+    if allowed_roots and not any(is_relative_to(resolved, root) for root in allowed_roots):
         raise ValueError("path is outside CB_QWENWORK_AUTH_DIR / official QwenWork data dir")
     if target.suffix.lower() == ".json":
         payload = json.loads(target.read_text(encoding="utf-8"))
@@ -322,31 +257,4 @@ def import_discovered(path: str) -> dict:
 
 
 def upsert_account(parsed: dict) -> dict:
-    import database as db
-
-    uid = str(parsed.get("uid") or "")
-    if uid:
-        for row in db.list_accounts(provider=CHANNEL_ID):
-            if str(row.get("uid") or "") == uid:
-                patch = {
-                    "access_token": parsed.get("access_token") or "",
-                    "refresh_token": parsed.get("refresh_token") or "",
-                    "expires_at": parsed.get("expires_at") or 0,
-                    "refresh_expires_at": parsed.get("refresh_expires_at") or 0,
-                    "nickname": parsed.get("nickname") or row.get("nickname") or "",
-                    "name": parsed.get("name") or row.get("name") or "",
-                    "extra": parsed.get("extra") or row.get("extra") or {},
-                    "status": "active",
-                }
-                db.update_account(row["id"], patch)
-                return {"id": row["id"], "updated": True}
-    aid = db.add_account(parsed)
-    return {"id": aid, "updated": False}
-
-
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
+    return upsert_account_by_uid(CHANNEL_ID, parsed)

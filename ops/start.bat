@@ -1,7 +1,8 @@
 @echo off
 title Buddy 2 API
 
-cd /d "%~dp0"
+REM 切到项目根目录（ops/ 的父目录），保证 python -m gateway.server 能正确 import
+cd /d "%~dp0\.."
 
 echo.
 echo  ========================================
@@ -41,13 +42,13 @@ if errorlevel 1 (
 call "%CONDA_EXE%" run -n buddy2api python -c "import fastapi, uvicorn, httpx, cryptography" >nul 2>&1
 if errorlevel 1 (
     echo  [Setup] Installing dependencies...
-    call "%CONDA_EXE%" run -n buddy2api python -m pip install -r requirements.txt
+    call "%CONDA_EXE%" run -n buddy2api python -m pip install -r ops/requirements/base.txt
     if errorlevel 1 goto dependency_error
 )
 echo  [Start] http://127.0.0.1:8787
 echo  [Stop] Ctrl+C
 echo.
-call "%CONDA_EXE%" run --no-capture-output -n buddy2api python server.py --port 8787 %*
+call "%CONDA_EXE%" run --no-capture-output -n buddy2api python -m gateway.server --port 8787 %*
 goto end
 
 :use_venv
@@ -67,13 +68,13 @@ if not exist ".venv\Scripts\python.exe" (
 .venv\Scripts\python.exe -c "import fastapi, uvicorn, httpx, cryptography" >nul 2>&1
 if errorlevel 1 (
     echo  [Setup] Installing dependencies...
-    .venv\Scripts\python.exe -m pip install -r requirements.txt
+    .venv\Scripts\python.exe -m pip install -r ops/requirements/base.txt
     if errorlevel 1 goto dependency_error
 )
 echo  [Start] http://127.0.0.1:8787
 echo  [Stop] Ctrl+C
 echo.
-.venv\Scripts\python.exe server.py --port 8787 %*
+.venv\Scripts\python.exe -m gateway.server --port 8787 %*
 goto end
 
 :conda_error

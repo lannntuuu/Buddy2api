@@ -8,15 +8,17 @@ from typing import AsyncGenerator
 
 import httpx
 
-import auth_manager
-import database as db
+from accounts import auth_manager
+from storage import database as db
+from providers.model_config import channel_aliases, channel_credit_rate
 from providers.qclaw.constants import AIZONE_BASE, ALIASES, CHANNEL_ID, RETRYABLE_STATUS
+from providers.retry import retry_delay
 from providers.qclaw.sign import aizone_headers
 
 
 def translate_model(model: str) -> str:
     inner = (model or "default").strip() or "default"
-    return ALIASES.get(inner, inner)
+    return channel_aliases(CHANNEL_ID, ALIASES).get(inner, inner)
 
 
 def _alt_text(value) -> str:
@@ -79,6 +81,8 @@ def _ids(account: dict) -> tuple[str, str, str, str]:
 
 def _log(api_key_info, account, model_name, stream, prompt_t, completion_t, total_t,
          finish_reason, status_code, error_msg, t0, increment_usage=True):
+    rate = channel_credit_rate(CHANNEL_ID)
+    credit = round(total_t / rate, 6) if rate else 0
     try:
         db.record_request(
             {
@@ -92,7 +96,7 @@ def _log(api_key_info, account, model_name, stream, prompt_t, completion_t, tota
                 "prompt_tokens": prompt_t,
                 "completion_tokens": completion_t,
                 "total_tokens": total_t,
-                "credit": 0,
+                "credit": credit,
                 "finish_reason": finish_reason,
                 "duration_ms": int((time.time() - t0) * 1000),
                 "status_code": status_code,
@@ -146,6 +150,7 @@ async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
         except httpx.HTTPError as exc:
             auth_manager.mark_account_failure(account["id"], 503)
             last_error = ("error", (503, {"error": {"message": str(exc)[:240], "type": "server_error"}}))
+            await retry_delay(attempt)
             continue
         if response.status_code < 400:
             auth_manager.mark_account_success(account["id"])
@@ -178,6 +183,7 @@ async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
         )
         if status not in RETRYABLE_STATUS:
             return last_error
+        await retry_delay(attempt)
     return last_error or (
         "error",
         (503, {"error": {"message": "No available accounts", "type": "channel_unavailable", "code": "channel_unavailable", "channel": CHANNEL_ID}}),
@@ -188,6 +194,7 @@ async def _stream(body: dict, raw: str, api_key_info, model_name: str) -> AsyncG
     tried: set[int] = set()
     last_error = b"data: {\"error\":{\"message\":\"No available accounts\"}}\n\n"
     last_status = 503
+    t0 = time.time()
     for attempt in range(3):
         account = auth_manager.pick_account(tried, provider=CHANNEL_ID)
         if not account:
@@ -195,9 +202,10 @@ async def _stream(body: dict, raw: str, api_key_info, model_name: str) -> AsyncG
         tried.add(account["id"])
         t0 = time.time()
         output_started = False
+        usage = None
         try:
             headers = _headers_for(account)
-            async with httpx.AsyncClient(timeout=None) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10.0, read=None)) as client:
                 async with client.stream(
                     "POST",
                     f"{AIZONE_BASE}/chat/completions",
@@ -213,6 +221,7 @@ async def _stream(body: dict, raw: str, api_key_info, model_name: str) -> AsyncG
                             yield last_error
                             _log(api_key_info, account, model_name, True, 0, 0, 0, "error", response.status_code, text, t0)
                             return
+                        await retry_delay(attempt)
                         continue
                     auth_manager.mark_account_success(account["id"])
                     async for line in response.aiter_lines():
@@ -231,10 +240,23 @@ async def _stream(body: dict, raw: str, api_key_info, model_name: str) -> AsyncG
                             parsed = _normalize_completion(json.loads(data))
                             payload = json.dumps(parsed, ensure_ascii=False)
                         except (json.JSONDecodeError, TypeError):
+                            parsed = None
                             payload = data
+                        if isinstance(parsed, dict) and isinstance(parsed.get("usage"), dict):
+                            # 上游最后一个 chunk 常带 usage，用它回填统计
+                            usage = parsed["usage"]
                         output_started = True
                         yield f"data: {payload}\n\n".encode("utf-8")
-            _log(api_key_info, account, model_name, True, 0, 0, 0, "stop", 200, "", t0)
+            if isinstance(usage, dict):
+                _log(
+                    api_key_info, account, model_name, True,
+                    int(usage.get("prompt_tokens") or 0),
+                    int(usage.get("completion_tokens") or 0),
+                    int(usage.get("total_tokens") or (usage.get("prompt_tokens") or 0) + (usage.get("completion_tokens") or 0)),
+                    "stop", 200, "", t0,
+                )
+            else:
+                _log(api_key_info, account, model_name, True, 0, 0, 0, "stop", 200, "", t0)
             return
         except httpx.HTTPError as exc:
             if output_started:
@@ -242,9 +264,10 @@ async def _stream(body: dict, raw: str, api_key_info, model_name: str) -> AsyncG
             auth_manager.mark_account_failure(account["id"], 503)
             last_error = f"data: {json.dumps({'error': {'message': str(exc)[:240]}}, ensure_ascii=False)}\n\n".encode()
             last_status = 503
+            await retry_delay(attempt)
             continue
     yield last_error
-    _log(api_key_info, None, model_name, True, 0, 0, 0, "error", last_status, "stream failed", time.time())
+    _log(api_key_info, None, model_name, True, 0, 0, 0, "error", last_status, "stream failed", t0)
 
 
 async def test_chat(account: dict, model: str = "default", prompt: str = "ping") -> dict:

@@ -8,6 +8,8 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+.tmp/
+pytest-cache-files-*/
 
 # Virtual environments and local package caches
 .venv/
@@ -48,6 +50,7 @@ codebuddy_gateway.db
 data/
 logs/
 *.log
+.dsh_server.*.log
 
 # Local builds, packages, and exported artifacts
 dist/
@@ -79,6 +82,6 @@ _mimo-backup-*/
 Thumbs.db
 desktop.ini
 
-# ±¾µØÔËĞĞÊ±¼ÇÒä/²úÎï
+# è¿è¡Œæ—¶è°ƒè¯•ç›®å½•
 .workbuddy/
 .debug/

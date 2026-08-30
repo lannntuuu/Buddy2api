@@ -3,26 +3,13 @@ from pathlib import Path
 
 import pytest
 
-import credential_crypto
-import database as db
 import providers
-import router
+from gateway import router
 from providers.protocol import UnknownChannel, UnknownModel
 from providers.qwenwork import cosy
 from providers.qwenwork.chat import envelope_error, unwrap_sse_payload
 from providers.qwenwork.constants import COSY_VERSION, COSY_VERSION_FROZEN, RSA_PUBLIC_KEY_PEM, STATIC_MODELS
 from providers.qwenwork.store import parse_credentials, qwenwork_auth_dirs
-
-
-@pytest.fixture()
-def isolated_db(tmp_path, monkeypatch):
-    path = tmp_path / "gateway.db"
-    monkeypatch.setattr(db, "DB_PATH", path)
-    monkeypatch.setenv("CB_GATEWAY_MASTER_KEY", "pytest-master-key")
-    credential_crypto.reset_cache()
-    db.init_db()
-    yield path
-    credential_crypto.reset_cache()
 
 
 @pytest.fixture()
@@ -34,7 +21,7 @@ def qwen_enabled(monkeypatch):
 
 def test_qwenwork_in_default_registry(monkeypatch):
     monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
-    assert providers.enabled_provider_ids() == ["workbuddy", "qclaw", "qwenwork", "traework"]
+    assert providers.enabled_provider_ids() == ["workbuddy", "qclaw", "qwenwork", "traework", "traesolo"]
     assert providers.get_provider("qwenwork") is not None
     assert "qwenwork" in providers._LOADED
 

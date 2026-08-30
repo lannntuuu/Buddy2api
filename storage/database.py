@@ -19,9 +19,12 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
-import credential_crypto
+from storage import credential_crypto
 
-DB_PATH = Path(os.environ.get("CB_GATEWAY_DB_PATH", Path(__file__).parent / "codebuddy_gateway.db"))
+# DB file lives under data/ at the project root (not next to the module) so
+# the source layout can change without dragging the user's runtime data along.
+# data/ is .gitignored.
+DB_PATH = Path(os.environ.get("CB_GATEWAY_DB_PATH", Path(__file__).parent.parent / "data" / "codebuddy_gateway.db"))
 _lock = threading.Lock()
 _CREDENTIAL_FIELDS = ("access_token", "refresh_token", "session_state")
 
@@ -80,9 +83,18 @@ def _protect_account_data(data: dict) -> dict:
 
 def _account_dict(row: sqlite3.Row) -> dict:
     account = dict(row)
+    decrypt_errors = []
     for field in _CREDENTIAL_FIELDS:
         if field in account:
-            account[field] = credential_crypto.decrypt_secret(account.get(field), DB_PATH)
+            try:
+                account[field] = credential_crypto.decrypt_secret(account.get(field), DB_PATH)
+            except credential_crypto.CredentialCryptoError as exc:
+                # 单条记录解密失败（如 Windows DPAPI 行拿到 Linux、master key
+                # 换过）只降级该账号，不能让整个 list_accounts 崩掉。
+                decrypt_errors.append(f"{field}: {exc}")
+                account[field] = ""
+    if decrypt_errors:
+        account["credential_error"] = "; ".join(decrypt_errors)[:400]
     extra = account.get("extra")
     if isinstance(extra, str) and extra:
         try:
@@ -539,7 +551,10 @@ def get_active_accounts(provider: str = "workbuddy") -> list[dict]:
         (provider,),
     ).fetchall()
     conn.close()
-    return [_account_dict(r) for r in rows]
+    accounts = [_account_dict(r) for r in rows]
+    # 凭据解密失败的账号（credential_error）不能参与调度：拿空 token
+    # 打上游只会白吃 401，还可能阻塞通道的可用性判定。
+    return [a for a in accounts if not a.get("credential_error")]
 
 
 def account_increment_usage(aid: int, tokens: int, credit: float):
@@ -748,10 +763,16 @@ def list_api_keys(*, include_secret: bool = False) -> list[dict]:
         encrypted_key = d.pop("key_secret", None)
         d.pop("key", None)
         if include_secret:
-            d["key"] = (
-                credential_crypto.decrypt_secret(encrypted_key, DB_PATH)
-                if encrypted_key else None
-            )
+            if not encrypted_key:
+                d["key"] = None
+            else:
+                try:
+                    d["key"] = credential_crypto.decrypt_secret(encrypted_key, DB_PATH)
+                except credential_crypto.CredentialCryptoError as exc:
+                    # 单条 key 解密失败（如 master key 换过）只标记该条，
+                    # 不让 /admin/api-keys 整个 500。
+                    d["key"] = None
+                    d["key_unrecoverable"] = str(exc)[:200]
         d["allowed_models"] = _load_allowed_models(d.get("allowed_models"))
         result.append(d)
     return result
@@ -792,6 +813,25 @@ def reserve_api_key_request(kid: int, daily_limit: int) -> bool:
             )
             conn.commit()
             return True
+
+
+def release_api_key_request(kid: int) -> None:
+    """Roll back one previously reserved daily request slot.
+
+    配额在派发上游前原子预留；上游同步返回错误时调用本函数回退，
+    避免客户端对同一次失败重试被双重扣额。
+    """
+    today = date.today().isoformat()
+    with _lock:
+        with connection() as conn:
+            conn.execute(
+                """
+                UPDATE api_key_daily_usage SET request_count = request_count - 1
+                WHERE api_key_id=? AND usage_date=? AND request_count > 0
+                """,
+                (kid, today),
+            )
+            conn.commit()
 
 
 def api_key_increment_usage(kid: int, tokens: int):
@@ -986,6 +1026,122 @@ def search_logs(filters: Optional[dict] = None) -> dict:
     }
 
 
+def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
+    """按 平台 × 模型 × 自然日 聚合 token 用量（基于请求日志）。
+
+    filters:
+      provider  可选，只统计该平台
+      model     可选，只统计该模型（通常配合 provider）
+      start     可选，起始时间 unix 秒（含）
+      end       可选，结束时间 unix 秒（含）
+
+    返回嵌套结构：providers[provider][model].daily 为按日期降序的明细，
+    另附每个模型的 summary、每个平台的 summary 与全局 totals。
+    """
+    filters = filters or {}
+    where = []
+    values: list[Any] = []
+
+    provider = str(filters.get("provider") or "").strip()
+    if provider:
+        where.append("provider=?")
+        values.append(provider)
+    model = str(filters.get("model") or "").strip()
+    if model:
+        where.append("model=?")
+        values.append(model)
+    start = filters.get("start")
+    if start not in (None, "", "all"):
+        where.append("created_at>=?")
+        values.append(int(start))
+    end = filters.get("end")
+    if end not in (None, "", "all"):
+        where.append("created_at<=?")
+        values.append(int(end))
+
+    sql_where = (" WHERE " + " AND ".join(where)) if where else ""
+    conn = get_conn()
+    rows = conn.execute(
+        f"""
+        SELECT provider,
+               model,
+               date(created_at, 'unixepoch', 'localtime') AS date,
+               COUNT(*) AS requests,
+               COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+               COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+               COALESCE(SUM(total_tokens), 0) AS total_tokens,
+               COALESCE(SUM(credit), 0) AS credit,
+               COALESCE(SUM(duration_ms), 0) AS duration_ms
+        FROM logs{sql_where}
+        GROUP BY provider, model, date
+        ORDER BY date DESC, provider ASC, model ASC
+        """,
+        values,
+    ).fetchall()
+    conn.close()
+
+    def _new_summary() -> dict:
+        return {
+            "requests": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "credit": 0.0,
+            "duration_ms": 0,
+        }
+
+    def _acc(summary: dict, row: dict):
+        summary["requests"] += int(row["requests"])
+        summary["prompt_tokens"] += int(row["prompt_tokens"])
+        summary["completion_tokens"] += int(row["completion_tokens"])
+        summary["total_tokens"] += int(row["total_tokens"])
+        summary["credit"] += float(row["credit"])
+        summary["duration_ms"] += int(row["duration_ms"])
+
+    def _finalize(summary: dict) -> dict:
+        out = dict(summary)
+        out["credit"] = round(out["credit"], 4)
+        out["avg_duration_ms"] = (
+            int(out["duration_ms"] / out["requests"]) if out["requests"] else 0
+        )
+        out.pop("duration_ms", None)
+        return out
+
+    providers_out: dict[str, dict] = {}
+    totals = _new_summary()
+    for raw in rows:
+        row = dict(raw)
+        prov = row["provider"] or "unknown"
+        mdl = row["model"] or "unknown"
+        entry = {
+            "date": row["date"],
+            "requests": int(row["requests"]),
+            "prompt_tokens": int(row["prompt_tokens"]),
+            "completion_tokens": int(row["completion_tokens"]),
+            "total_tokens": int(row["total_tokens"]),
+            "credit": round(float(row["credit"]), 4),
+            "avg_duration_ms": (
+                int(row["duration_ms"] / row["requests"]) if row["requests"] else 0
+            ),
+        }
+        prov_bucket = providers_out.setdefault(prov, {"models": {}, "summary": _new_summary()})
+        mdl_bucket = prov_bucket["models"].setdefault(mdl, {"daily": [], "summary": _new_summary()})
+        mdl_bucket["daily"].append(entry)
+        _acc(mdl_bucket["summary"], row)
+        _acc(prov_bucket["summary"], row)
+        _acc(totals, row)
+
+    for prov_bucket in providers_out.values():
+        for mdl_bucket in prov_bucket["models"].values():
+            mdl_bucket["summary"] = _finalize(mdl_bucket["summary"])
+        prov_bucket["summary"] = _finalize(prov_bucket["summary"])
+
+    return {
+        "providers": providers_out,
+        "totals": _finalize(totals),
+    }
+
+
 def get_stats() -> dict:
     conn = get_conn()
     total_requests = conn.execute("SELECT COUNT(*) as c FROM logs").fetchone()["c"]
@@ -1158,6 +1314,14 @@ def set_setting(key: str, value: Any):
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, val),
         )
+        conn.commit()
+        conn.close()
+
+
+def delete_setting(key: str):
+    with _lock:
+        conn = get_conn()
+        conn.execute("DELETE FROM settings WHERE key=?", (key,))
         conn.commit()
         conn.close()
 

@@ -6,8 +6,9 @@ from typing import Optional
 
 import httpx
 
-import auth_manager
-import database as db
+from accounts import auth_manager
+from storage import database as db
+from providers.model_config import channel_aliases, channel_model_ids
 from providers.protocol import ChannelId, QuotaSnapshot
 from providers.qwenwork import chat, store
 from providers.qwenwork.constants import (
@@ -27,14 +28,17 @@ class QwenWorkProvider:
     checkin_supported = False
 
     def list_models(self) -> list[dict]:
-        return [{"id": item} for item in STATIC_MODELS]
+        return [{"id": item} for item in channel_model_ids(CHANNEL_ID, STATIC_MODELS)]
 
     def alias_map(self) -> dict[str, str]:
-        return dict(ALIASES)
+        return channel_aliases(CHANNEL_ID, ALIASES)
 
     def accepts_model(self, inner: str) -> bool:
         value = (inner or "").strip()
-        return value in STATIC_MODELS or value in ALIASES
+        return (
+            value in channel_model_ids(CHANNEL_ID, STATIC_MODELS)
+            or value in channel_aliases(CHANNEL_ID, ALIASES)
+        )
 
     def translate_model(self, model: str) -> str:
         return chat.translate_model(model)
@@ -51,7 +55,7 @@ class QwenWorkProvider:
             if is_token_expired(account):
                 try:
                     return await refresh_account(account)
-                except QwenWorkAuthError:
+                except Exception:
                     pass
             else:
                 return account
@@ -63,7 +67,7 @@ class QwenWorkProvider:
         for row in expired:
             try:
                 return await refresh_account(row)
-            except QwenWorkAuthError:
+            except Exception:
                 continue
         return None
 

@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 
-from credential_crypto import CredentialCryptoError
+from storage.credential_crypto import CredentialCryptoError
+from providers.store_common import (
+    discover_summary,
+    existing_uids,
+    imported_file_meta,
+    is_relative_to,
+    iso_to_ms,
+    jwt_exp_ms,
+    upsert_account as upsert_account_by_uid,
+)
 from providers.traework.constants import (
     AUTH_DEVICE_PREFIX,
     AUTH_STORAGE_KEY,
@@ -41,40 +49,6 @@ def traework_auth_dirs() -> list[Path]:
             seen.add(key)
             out.append(item)
     return out
-
-
-def iso_to_ms(value) -> int:
-    if value in (None, ""):
-        return 0
-    if isinstance(value, (int, float)):
-        number = int(value)
-        return number if number > 10_000_000_000 else number * 1000
-    text = str(value).strip()
-    if not text:
-        return 0
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return 0
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return int(parsed.timestamp() * 1000)
-
-
-def _jwt_exp_ms(token: str) -> int:
-    try:
-        import base64
-
-        parts = token.split(".")
-        if len(parts) < 2:
-            return 0
-        payload = parts[1] + "=" * (-len(parts[1]) % 4)
-        data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
-        return iso_to_ms(data.get("exp"))
-    except Exception:
-        return 0
 
 
 def _read_storage(path: Path) -> dict:
@@ -134,7 +108,7 @@ def session_to_account(document: dict, storage: dict | None = None, source: str 
         "nickname": name,
         "access_token": access,
         "refresh_token": refresh,
-        "expires_at": iso_to_ms(document.get("expiredAt")) or _jwt_exp_ms(access),
+        "expires_at": iso_to_ms(document.get("expiredAt")) or jwt_exp_ms(access),
         "refresh_expires_at": iso_to_ms(document.get("refreshExpiredAt")),
         "provider": CHANNEL_ID,
         "domain": host.replace("https://", "").replace("http://", ""),
@@ -176,7 +150,7 @@ def import_discovered(path: str) -> dict:
     target = Path(path)
     allowed = [folder.resolve() for folder in traework_auth_dirs() if folder.exists()]
     resolved = target.resolve()
-    if allowed and not any(_is_relative_to(resolved, root) for root in allowed):
+    if allowed and not any(is_relative_to(resolved, root) for root in allowed):
         raise ValueError("path is outside CB_TRAEWORK_AUTH_DIR / official TraeWork data dir")
     if target.suffix.lower() == ".json" and target.name != STORAGE_FILENAME:
         payload = json.loads(target.read_text(encoding="utf-8"))
@@ -198,15 +172,9 @@ def import_discovered(path: str) -> dict:
 
 
 def discover() -> dict:
-    import database as db
-
     dirs_info = []
     files: list[dict] = []
-    existing = {
-        str(row.get("uid"))
-        for row in db.list_accounts(provider=CHANNEL_ID)
-        if row.get("uid")
-    }
+    existing = existing_uids(CHANNEL_ID)
     for folder in traework_auth_dirs():
         exists = folder.is_dir()
         dirs_info.append({"path": str(folder), "exists": exists, "file_count": 0})
@@ -218,71 +186,12 @@ def discover() -> dict:
             count += 1
             files.append(_file_meta(path, existing))
         dirs_info[-1]["file_count"] = count
-    return {
-        "dirs": dirs_info,
-        "files": files,
-        "file_count": len(files),
-        "valid_count": sum(1 for item in files if item.get("valid")),
-        "importable_count": sum(
-            1 for item in files if item.get("valid") and not item.get("already_imported")
-        ),
-        "channel": CHANNEL_ID,
-    }
+    return discover_summary(CHANNEL_ID, dirs_info, files)
 
 
-def _file_meta(path: Path, existing_uids: set[str]) -> dict:
-    reason = ""
-    valid = False
-    uid = ""
-    name = path.name
-    try:
-        parsed = import_discovered(str(path))
-        valid = bool(parsed.get("access_token") or parsed.get("refresh_token"))
-        uid = str(parsed.get("uid") or "")
-        name = parsed.get("nickname") or name
-        if not valid:
-            reason = "missing token"
-    except Exception as exc:
-        reason = str(exc)[:160]
-        valid = False
-    masked = (uid[:6] + "…") if len(uid) > 6 else uid
-    return {
-        "channel": CHANNEL_ID,
-        "path": str(path),
-        "valid": valid,
-        "reason": reason,
-        "account_name": name,
-        "uid_masked": masked,
-        "already_imported": bool(uid and uid in existing_uids),
-    }
+def _file_meta(path: Path, existing: set[str]) -> dict:
+    return imported_file_meta(CHANNEL_ID, path, existing, import_discovered)
 
 
 def upsert_account(parsed: dict) -> dict:
-    import database as db
-
-    uid = str(parsed.get("uid") or "")
-    if uid:
-        for row in db.list_accounts(provider=CHANNEL_ID):
-            if str(row.get("uid") or "") == uid:
-                patch = {
-                    "access_token": parsed.get("access_token") or "",
-                    "refresh_token": parsed.get("refresh_token") or "",
-                    "expires_at": parsed.get("expires_at") or 0,
-                    "refresh_expires_at": parsed.get("refresh_expires_at") or 0,
-                    "nickname": parsed.get("nickname") or row.get("nickname") or "",
-                    "name": parsed.get("name") or row.get("name") or "",
-                    "extra": parsed.get("extra") or row.get("extra") or {},
-                    "status": "active",
-                }
-                db.update_account(row["id"], patch)
-                return {"id": row["id"], "updated": True}
-    aid = db.add_account(parsed)
-    return {"id": aid, "updated": False}
-
-
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
+    return upsert_account_by_uid(CHANNEL_ID, parsed)
