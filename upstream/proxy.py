@@ -1,13 +1,20 @@
 """
 proxy.py — 请求代理转发
 
-功能：
-  - 转发到 copilot.tencent.com/v2/chat/completions
-  - 流式 SSE 原样转发
-  - 非流式 SSE 聚合为单个 JSON
-  - tool_calls 分片合并
-  - usage 统计
-  - 账号故障自动切换
+P3 split: this module keeps the request pipeline (proxy_chat_completions,
+the streaming + collector, log_request, the SSE observer/decoder) and
+re-exports a stable surface for everything that was extracted.
+
+Pipeline layers (each lives in its own module under upstream/):
+  - aliases.py      — model alias table, default model list, reasoning defaults
+  - moderation.py   — content-audit and tool-stall detection helpers
+  - compaction.py   — request-body compaction policy and 11128 self-heal state
+
+The aliases / moderation / compaction helpers are imported here under
+their original private names so existing call sites in this file
+(e.g. `if _is_tool_stall(...)`) keep working without further edits.
+External code that imports from `upstream.proxy` also keeps working
+because of the re-exports below.
 """
 
 import asyncio
@@ -23,187 +30,44 @@ import httpx
 
 logger = logging.getLogger("buddy2api.proxy")
 
-
-def _body_size_profile(body: dict) -> dict:
-    """诊断：请求体的构成特征（触发 11128 时定位用）。
-
-    会遍历每条消息，记录单条最大字段（含 content、tool_calls 等）与各类字段总字节，
-    用来分辨 11128 是"单条超深"还是"整体超宽"。
-    """
-    import json as _json
-    messages = body.get("messages")
-    if not isinstance(messages, list):
-        return {"messages": 0, "tool_msgs": 0, "max_content": 0, "max_content_role": None,
-                "msg_bytes": 0, "assistant_args_bytes": 0, "tool_content_bytes": 0,
-                "tools_len": 0, "body_bytes": 0}
-    max_content = 0
-    max_content_role = None
-    max_field_desc = None
-    tool_msgs = 0
-    msg_bytes = 0
-    assistant_args_bytes = 0
-    tool_content_bytes = 0
-
-    def _scan_biggest(value, prefix: str):
-        """递归找出 value 里最长的字符串字段并更新 max_content*。"""
-        nonlocal max_content, max_content_role, max_field_desc
-        if isinstance(value, dict):
-            for k, v in value.items():
-                child = f"{prefix}.{k}"
-                if isinstance(v, str):
-                    if len(v) > max_content:
-                        max_content = len(v)
-                        max_content_role = prefix
-                        max_field_desc = child
-                else:
-                    _scan_biggest(v, child)
-        elif isinstance(value, list):
-            for i, item in enumerate(value):
-                _scan_biggest(item, f"{prefix}[{i}]")
-
-    for m in messages:
-        if not isinstance(m, dict):
-            continue
-        role = m.get("role")
-        msg_raw = _json.dumps(m, ensure_ascii=False)
-        msg_bytes += len(msg_raw)
-        content = m.get("content")
-        field_prefix = f"m[{role}]"
-        _scan_biggest(m, field_prefix)
-        if role == "tool":
-            tool_msgs += 1
-            if isinstance(content, str):
-                tool_content_bytes += len(content)
-            elif isinstance(content, list):
-                tool_content_bytes += len(_json.dumps(content, ensure_ascii=False))
-        # assistant 的工具调用参数
-        if role == "assistant":
-            for tc in m.get("tool_calls") or []:
-                fn = tc.get("function") if isinstance(tc, dict) else None
-                if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
-                    assistant_args_bytes += len(fn["arguments"])
-    bt = _json.dumps(body, ensure_ascii=False)
-    return {
-        "messages": len(messages),
-        "tool_msgs": tool_msgs,
-        "max_content": max_content,
-        "max_content_role": max_content_role,
-        "max_field": max_field_desc,
-        "msg_bytes": msg_bytes,
-        "assistant_args_bytes": assistant_args_bytes,
-        "tool_content_bytes": tool_content_bytes,
-        "tools_len": len(_json.dumps(body.get("tools"), ensure_ascii=False)),
-        "body_bytes": len(bt),
-    }
-
-def _dump_11128_body(body: dict, channel: str, model: str) -> str:
-    """11128 自愈精简后仍失败时，把实际出站 body 写到文件供排查。
-
-    返回文件路径（写失败返回空串）。文件含完整请求体，注意可能含敏感内容，
-    排查完记得删除。
-    """
-    import json as _json
-    try:
-        d = Path(__file__).parent / ".debug"
-        d.mkdir(exist_ok=True)
-        ts = int(time.time() * 1000)
-        target = d / f"11128_{channel}_{ts}.json"
-        target.write_text(
-            _json.dumps(body, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        return str(target)
-    except Exception:
-        return ""
+# ---- Backwards-compatible re-exports ----
+# These modules are the canonical home for each name; we re-export
+# here so callers (`from upstream import proxy; proxy._is_tool_stall(...)`,
+# `proxy.DEFAULT_MODELS`, etc.) keep working after the split.
+from upstream.aliases import (  # noqa: E402,F401
+    DEFAULT_MODELS,
+    _BUILTIN_ALIASES,
+    effective_builtin_aliases,
+    resolve_model_alias,
+    _configured_reasoning_default,
+    _env_int,
+)
+from upstream.moderation import (  # noqa: E402,F401
+    _body_size_profile,
+    _dump_11128_body,
+    _looks_like_audit_block,
+    _request_has_tool_loop,
+    _looks_like_stall_text,
+    _is_tool_stall,
+    TOOL_STALL_RETRY,
+    TOOL_STALL_FAIL_STREAM,
+)
+from upstream.compaction import (  # noqa: E402,F401
+    compaction_stats,
+    _is_11128_error,
+    _arm_channel,
+    _channel_armed,
+    _smart_compact_messages,
+    _compact_text,
+    _compact_tools,
+    _compact_schema_descriptions,
+)
 
 from storage import database as db
 from accounts import auth_manager
 
 BACKEND = "https://copilot.tencent.com"
 RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
-
-# 腾讯内容审核拦截时返回的固定话术特征（HTTP 200 + 正文是这段话）。
-# 仅匹配短拒答，避免正常回答引用审查文案时被误标。
-_AUDIT_PHRASE_GROUPS = (
-    ("系统检测到", "敏感内容", "无法响应"),
-    ("无法响应您的请求", "请检查后重新输入"),
-    ("内容违规", "请检查后重新输入"),
-    ("违规内容", "不能提供相关"),
-)
-_AUDIT_PREFIXES = (
-    "系统检测到",
-    "无法响应您的请求",
-    "内容违规",
-    "违规内容",
-    "抱歉，系统检测到",
-    "抱歉，无法响应",
-)
-
-
-def _looks_like_audit_block(text: str) -> bool:
-    text = " ".join((text or "").split())
-    if not text or len(text) > 240:
-        return False
-    if not text.startswith(_AUDIT_PREFIXES):
-        return False
-    return any(all(phrase in text for phrase in group) for group in _AUDIT_PHRASE_GROUPS)
-
-
-# 工具停转（tool stall）检测与修复开关。
-# 场景：agent 工具循环回合（请求带 tools 且历史含 role=tool），上游模型却以
-# finish_reason=stop + 纯文本（"好的，马上继续跑流程"式确认话术）结束且未调用
-# 任何工具 —— 工作流卡死成纯聊天（issue #31）。
-TOOL_STALL_RETRY = (
-    os.environ.get("CB_GATEWAY_TOOL_STALL_RETRY", "1").strip().lower()
-    not in {"0", "false", "no", "off"}
-)
-TOOL_STALL_FAIL_STREAM = (
-    os.environ.get("CB_GATEWAY_TOOL_STALL_FAIL_STREAM", "0").strip().lower()
-    in {"1", "true", "yes", "on"}
-)
-
-_STALL_POSITIVE_MARKERS = (
-    "马上继续", "继续跑", "接下来需要", "请问您接下来",
-    "这就去", "马上开始", "我现在就", "这就开始", "稍等",
-)
-_STALL_NEGATIVE_MARKERS = (
-    "总结", "已完成", "结果如下", "以下是", "以上就是", "完成情况",
-)
-
-
-def _request_has_tool_loop(body: dict) -> bool:
-    """是否为 agent 工具循环回合：声明了 tools 且历史里存在工具结果。"""
-    if not isinstance(body.get("tools"), list) or not body["tools"]:
-        return False
-    return any(
-        isinstance(msg, dict) and msg.get("role") == "tool"
-        for msg in (body.get("messages") or [])
-    )
-
-
-def _looks_like_stall_text(text: str) -> bool:
-    """空内容视为 stall；否则要求短文本且像'知道了，马上继续'式话术，
-    排除总结性回答。"""
-    text = (text or "").strip()
-    if not text:
-        return True
-    if len(text) > 160:
-        return False
-    if any(marker in text for marker in _STALL_NEGATIVE_MARKERS):
-        return False
-    return any(marker in text for marker in _STALL_POSITIVE_MARKERS)
-
-
-def _is_tool_stall(body: dict, finish_reason, tool_calls: bool, text: str) -> bool:
-    """判定一次上游完成是否属于工具停转（stall）。"""
-    if not _request_has_tool_loop(body):
-        return False
-    if tool_calls:
-        return False
-    if (finish_reason or "stop") not in {"stop", None}:
-        return False
-    return _looks_like_stall_text(text)
-
 
 def _is_retryable_status(status: int) -> bool:
     return status in RETRYABLE_STATUS_CODES or status in {401, 403}
@@ -223,293 +87,6 @@ PASSTHROUGH_BODY_KEYS = {
 _BACKEND_ROLE_ALIASES = {
     "developer": "system",
 }
-
-DEFAULT_MODELS = [
-    {"id": "glm-5.2", "name": "GLM-5.2"},
-    {"id": "glm-5.1", "name": "GLM-5.1"},
-    {"id": "glm-5v-turbo", "name": "GLM-5V Turbo"},
-    {"id": "kimi-k2.7", "name": "Kimi K2.7"},
-    {"id": "kimi-k2.6", "name": "Kimi K2.6"},
-    {"id": "kimi-k2.5", "name": "Kimi K2.5"},
-    {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro"},
-    {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash"},
-    {"id": "minimax-m3-pay", "name": "MiniMax M3"},
-    {"id": "hy3-preview-agent", "name": "HY3 Preview Agent"},
-    {"id": "auto", "name": "Auto (auto routing)"},
-]
-
-# Built-in model aliases: alias_id -> backend_model_id
-# Extended by user-defined aliases from database settings "model_aliases".
-_BUILTIN_ALIASES = {
-    # GPT-5.x 系列 → 映射到后端可用模型
-    "gpt-5.5": "glm-5.2",
-    "gpt-5.5-mini": "glm-5.1",
-    "gpt-5.4": "glm-5.2",
-    "gpt-5.4-mini": "glm-5.1",
-    "gpt-5.4-codex": "glm-5.2",
-    "gpt-5.1": "glm-5.2",
-    "gpt-5.1-codex": "glm-5.2",
-    "gpt-5": "glm-5.2",
-    "gpt-5-mini": "glm-5.1",
-    # GPT-4.x 系列
-    "gpt-4o": "glm-5.2",
-    "gpt-4o-mini": "glm-5.1",
-    "gpt-4-turbo": "glm-5.2",
-    "gpt-4": "glm-5.2",
-    "gpt-4.1": "glm-5.2",
-    "gpt-4.1-mini": "glm-5.1",
-    "gpt-3.5-turbo": "glm-5.1",
-    # o 系列推理模型
-    "o3": "deepseek-v4-pro",
-    "o3-mini": "deepseek-v4-flash",
-    "o4-mini": "deepseek-v4-pro",
-    "o1": "deepseek-v4-pro",
-    "o1-mini": "deepseek-v4-flash",
-    # Claude 系列
-    "claude-3.5-sonnet": "deepseek-v4-pro",
-    "claude-3-haiku": "deepseek-v4-flash",
-    "claude-sonnet-4": "deepseek-v4-pro",
-    "claude-opus-4": "deepseek-v4-pro",
-    # DeepSeek
-    "deepseek-chat": "deepseek-v4-pro",
-    "deepseek-coder": "deepseek-v4-pro",
-    "deepseek-r1": "deepseek-v4-pro",
-    # Moonshot
-    "moonshot-v1-128k": "kimi-k2.7",
-    "moonshot-v1-32k": "kimi-k2.6",
-}
-
-
-def effective_builtin_aliases() -> dict:
-    """WorkBuddy 生效别名表（整体替换语义，与其它通道一致）：
-
-    未设置 `model_aliases` → 内置默认别名；
-    已设置（哪怕空对象）  → 完全以自定义为准，内置别名全部失效。
-    """
-    raw = db.get_setting("model_aliases", None)
-    if raw is None:
-        return dict(_BUILTIN_ALIASES)
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        str(key).strip(): str(value).strip()
-        for key, value in raw.items()
-        if str(key).strip() and str(value).strip()
-    }
-
-
-def resolve_model_alias(model: str) -> str:
-    """Resolve an alias to its real backend model ID. Returns original if no match."""
-    return effective_builtin_aliases().get(model, model)
-
-
-def _configured_reasoning_default(model: str) -> str | None:
-    """按模型解析生效的思考档位（取代旧环境变量机制）。
-
-    优先级：客户端显式参数 > 按模型配置 > 通道默认 > 不注入。
-    仅 WorkBuddy 通道上游确认支持 reasoning_effort（见 docs/design/...）。
-    """
-    from providers.model_config import reasoning_for_model
-
-    return reasoning_for_model("workbuddy", model)
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except (TypeError, ValueError):
-        return default
-
-
-# ---- content 精简（避免上游 11128 拦截）：按通道+客户端记账的自愈机制 ----
-# 只对 ZCode Client 出的请求生效：只有 ZCode 触发过一次 11128 后才精简（armed），
-# 或显式设 CB_GATEWAY_COMPACT_CHARS 强制启用；DSH 及其它 agent 一律不精简，
-# 即使同一 workbuddy 通道命中过 11128。默认不精简，避免无谓地丢失信息。
-_COMPACTION_LOCK = threading.Lock()
-_ARMRED_KEYS: set[tuple] = set()
-_COMPACTION_STATS = {"armed_triggers": 0, "compacted_messages": 0, "retried_11128": 0}
-_COMPACT_11128_MARKERS = ("11128", "Illegal API invocation")
-_COMPACT_ENABLED_CLIENTS = ("zcode",)
-
-
-def _compaction_key(channel: Optional[str], client_tag) -> tuple:
-    return (channel or "", client_tag or "")
-
-
-def _client_allows_compact(client_tag) -> bool:
-    """只允许 ZCode Client 参与精简，其它客户端（dsh/curl/python/空）一概不精简。"""
-    return client_tag in _COMPACT_ENABLED_CLIENTS
-
-
-def _channel_armed(channel: Optional[str], client_tag) -> bool:
-    if not _client_allows_compact(client_tag):
-        return False
-    with _COMPACTION_LOCK:
-        return _compaction_key(channel, client_tag) in _ARMRED_KEYS
-
-
-def _arm_channel(channel: Optional[str], client_tag) -> None:
-    if not _client_allows_compact(client_tag):
-        return
-    with _COMPACTION_LOCK:
-        _ARMRED_KEYS.add(_compaction_key(channel, client_tag))
-        _COMPACTION_STATS["armed_triggers"] += 1
-
-
-def compaction_stats() -> dict:
-    """暴露给 /admin/stats：精简触发/生效的计数，便于判断阈值松紧。"""
-    return {
-        "compacted_messages": _COMPACTION_STATS["compacted_messages"],
-        "armed_keys": len(_ARMRED_KEYS),
-        "armed_triggers": _COMPACTION_STATS["armed_triggers"],
-        "retried_11128": _COMPACTION_STATS["retried_11128"],
-        "enabled_clients": list(_COMPACT_ENABLED_CLIENTS),
-    }
-
-
-def _is_11128_error(status: int, payload, body: dict) -> bool:
-    """判定一次上游返回是否 11128 大内容拦截。payload 为 raw bytes 或已解析 dict。"""
-    if status != 400:
-        return False
-    text = ""
-    if isinstance(payload, bytes):
-        text = payload.decode("utf-8", "replace")
-    elif isinstance(payload, dict):
-        text = str(payload)
-    elif isinstance(payload, str):
-        text = payload
-    if not any(marker in text for marker in _COMPACT_11128_MARKERS):
-        return False
-    # 已深度精简后仍 11128 不值得再自愈，避免空转
-    if body.get("_compacted_11128"):
-        return False
-    return True
-
-
-def _compact_text(text: str, cap: int):
-    """单条文本截短到 cap，保留头部+尾部：tool 结果的报错/summary 常在末尾。"""
-    n = len(text)
-    if n <= cap:
-        return text, False
-    tail_budget = max(8, cap // 5)  # 尾部保留 ~20%，最少 8 字符（报错/summary 常在末尾）
-    head = cap - tail_budget
-    out = text[:head] + f"\n...[省略 {n-head-tail_budget} 字符]..." + (text[-tail_budget:] if tail_budget > 0 else "")
-    return out, True
-
-
-def _compact_tools(tools, description_cap: int):
-    """精简 tools 定义里的超大文本字段，压低请求体量（11128 常见触发源）。
-
-    只截短描述性字符串（description / schema 里的 description），
-    绝不触碰结构键（name、type、property 名、required、enum 值本身），
-    保证工具调用契约不被破坏。返回 (new_tools, changed)。
-    """
-    if not isinstance(tools, list):
-        return tools, False
-    new_tools = []
-    changed = False
-    for tool in tools:
-        new_tool = tool
-        if isinstance(tool, dict):
-            new_tool = dict(tool)
-            fn = new_tool.get("function")
-            if isinstance(fn, dict):
-                new_fn = dict(fn)
-                desc = new_fn.get("description")
-                if isinstance(desc, str):
-                    compacted, dc = _compact_text(desc, description_cap)
-                    if dc:
-                        new_fn["description"] = compacted
-                        changed = True
-                params = new_fn.get("parameters")
-                if isinstance(params, dict):
-                    new_fn["parameters"] = _compact_schema_descriptions(params, description_cap)
-                new_tool["function"] = new_fn
-        new_tools.append(new_tool)
-    return (new_tools, changed)
-
-
-def _compact_schema_descriptions(node, cap):
-    """递归精简 JSON Schema 里的 description 字符串，保留结构键。"""
-    if isinstance(node, dict):
-        out = {}
-        for k, v in node.items():
-            if k == "description" and isinstance(v, str):
-                compacted, c = _compact_text(v, cap)
-                out[k] = compacted if c else v
-            else:
-                out[k] = _compact_schema_descriptions(v, cap)
-        return out
-    if isinstance(node, list):
-        return [_compact_schema_descriptions(item, cap) for item in node]
-    return node
-
-
-def _smart_compact_messages(body: dict, *, channel: Optional[str] = None,
-                            client_tag=None) -> bool:
-    """按需精简超大请求体，避免上游 11128 拦截。返回是否动过请求。
-
-    实测确认（见 docs/workbuddy-11128-troubleshoot.md）：
-      - 11128 由「内容特征」触发，不是总量：system 里的 git/commit 块、
-        超大 content 里的特定内容。只要把这些字段纯头部截短到安全阈值，
-        即使 body 仍有 700KB 也能通过（真实上游验证 200）。
-      - 因此这里只做单字段纯头切，**不做总量兜底**——总量兜底会把
-        content 无脑压成碎片（曾把 system 压到 137 字符），既破坏语义
-        又降不到预算，反而制造问题。
-
-    只精简纯文本字段（不破坏名称/结构/参数契约）。system 指令用单独的宽松阈值
-    截短。启用条件二选一：
-      - 该 (通道, 客户端) 已触发过 11128（armed），用激进阈值自愈；仅 ZCode 生效；
-      - 显式设 CB_GATEWAY_COMPACT_CHARS>0 强制启用（全局，作用于该通道；
-        仍只对 ZCode Client 生效）。
-    """
-    if not _client_allows_compact(client_tag):
-        return False
-    forced_cap = _env_int("CB_GATEWAY_COMPACT_CHARS", 0)
-    if not _channel_armed(channel, client_tag) and forced_cap <= 0:
-        return False
-    base_cap = forced_cap if forced_cap > 0 else _env_int("CB_GATEWAY_COMPACT_ARMED_CHARS", 3000)
-    if base_cap <= 0:
-        return False
-    # system 指令单独阈值：默认 5000 字符（实测 4000~5000 都能解除 11128，
-    # 6000 仍会触发；比普通消息宽松，尽量保留系统提示语义）。
-    system_cap = _env_int("CB_GATEWAY_COMPACT_SYSTEM_CHARS", 5000)
-    messages = body.get("messages")
-    any_changed = False
-    if isinstance(messages, list):
-        for m in messages:
-            if not isinstance(m, dict):
-                continue
-            if m.get("role") == "system":
-                # system 用纯头部截断：实测其尾部（如 git status / commit 历史块）
-                # 是 11128 触发源，头尾保留反而把触发内容留在体内。
-                content = m.get("content")
-                if isinstance(content, str) and len(content) > system_cap:
-                    m["content"] = content[:system_cap]
-                    any_changed = True
-                continue
-            content = m.get("content")
-            if isinstance(content, str) and len(content) > base_cap:
-                # 普通消息 content 也纯头切：11128 是内容特征触发，
-                # 头尾保留可能把触发块留在尾部。
-                m["content"] = content[:base_cap]
-                any_changed = True
-            # reasoning_content 是纯思维链文本，截断安全且常为超大单点（11128 高发）
-            rc = m.get("reasoning_content")
-            if isinstance(rc, str) and len(rc) > base_cap:
-                m["reasoning_content"] = rc[:base_cap]
-                any_changed = True
-    # tools 定义里的超大描述文本也是 11128 常见触发源，一并精简
-    tools = body.get("tools")
-    if isinstance(tools, list) and tools:
-        new_tools, tools_changed = _compact_tools(tools, base_cap)
-        if tools_changed:
-            any_changed = True
-            body["tools"] = new_tools
-    if any_changed:
-        with _COMPACTION_LOCK:
-            _COMPACTION_STATS["compacted_messages"] += 1
-    return any_changed
 
 
 def build_backend_body(payload: dict) -> dict:
