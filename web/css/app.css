@@ -504,9 +504,11 @@ tr:hover td{background:var(--accent-soft)}
 .toasts{position:fixed;top:72px;right:var(--sp-4);z-index:2000;
   display:flex;flex-direction:column;gap:6px}
 .toast{padding:8px var(--sp-3);border-radius:var(--r-m);
-  font-size:var(--fs-m);color:#fff;
+  font-size:var(--fs-m);color:#fff;cursor:pointer;
   box-shadow:0 10px 30px rgba(0,0,0,.14);
-  animation:tin var(--dur-base) var(--ease)}
+  animation:tin var(--dur-base) var(--ease);
+  transition:transform var(--dur-fast) var(--ease),opacity var(--dur-fast) var(--ease)}
+.toast:hover{transform:translateY(-1px)}
 @keyframes tin{from{transform:translateX(120%);opacity:0}to{transform:translateX(0);opacity:1}}
 .toast.ok{background:var(--ok)}
 .toast.err{background:var(--err)}
