@@ -36,14 +36,14 @@ export default {props:['token','toast'],setup(p){
     const elapsed=rows.filter(row=>Number(row.hour)<=currentHour),max=Math.max(...elapsed.map(row=>row.value),0);
     return{...config,kind,currentHour,max,maxLabel:heatValue(kind,max),activeHours:elapsed.filter(row=>row.value>0).length,rows}
   });
-  function heatStyle(v,max){const r=Math.max(0,Math.min(1,Number(v||0)/Math.max(Number(max||1),1)));if(!v)return{background:'#e8e9e6',color:'#777872'};if(r<.25)return{background:'#fff0ce',color:'#8a5d22'};if(r<.5)return{background:'#ffc98f',color:'#734217'};if(r<.75)return{background:'#ff9855',color:'#592b0e'};if(r<.9)return{background:'#f15f14',color:'#fff'};return{background:'#3f403e',color:'#fff'}}
+  function heatClass(v,max){if(!v)return'heat-0';const r=Math.max(0,Math.min(1,Number(v||0)/Math.max(Number(max||1),1));if(r<.25)return'heat-1';if(r<.5)return'heat-2';if(r<.75)return'heat-3';if(r<.9)return'heat-4';return'heat-5'}
   function heatValue(kind,v){return kind==='tokens'?tok(v):(kind==='credit'||kind==='tw'?money(v):n(v))}
   function cacheStatusLabel(s){return ({accurate:'含 cache 实测',partial:'部分实测+反推',approx:'cache 反推',empty:'无数据'})[s]||'未知'}
-  function cacheStatusColor(s){return ({accurate:'#0a8a4a',partial:'#c47f00',approx:'#b04040',empty:'#999'})[s]||'#999'}
+  function cacheStatusClass(s){return ({accurate:'cache-ok',partial:'cache-partial',approx:'cache-approx',empty:'cache-empty'})[s]||'cache-empty'}
   function sparkHeight(card,v){v=Number(v||0);return(v?Math.max(7,Math.round(v/Math.max(card.max,1)*36)):4)+'px'}
   function hourBarHeight(v,max){v=Number(v||0);return(v?Math.max(6,Math.round(v/Math.max(max,1)*156)):3)+'px'}
   onMounted(load);
-  return{s,credit,overview,ld,cld,err,updatedAt,todayLabel,todayUsage,todayChartMetric,todayChart,load,refreshCredit,n,tok,pct,money,ms,fmt,healthClass,healthText,rateWidth,age,expireMeta,mx,heatRows,heatStyle,heatValue,cacheStatusLabel,cacheStatusColor,sparkHeight,hourBarHeight,I}
+  return{s,credit,overview,ld,cld,err,updatedAt,todayLabel,todayUsage,todayChartMetric,todayChart,load,refreshCredit,n,tok,pct,money,ms,fmt,healthClass,healthText,rateWidth,age,expireMeta,mx,heatRows,heatClass,heatValue,cacheStatusLabel,cacheStatusClass,sparkHeight,hourBarHeight,I}
 },template:`
 <div>
   <div class="phead"><h1>运行总览</h1><p>网关状态、额度和调用强度</p></div>
@@ -132,14 +132,14 @@ export default {props:['token','toast'],setup(p){
     <div>
       <div class="card">
         <div class="card-h">7 天调用强度<span class="sub">Credit=官方标价估算（含 cache 实测/反推，见角标） · Work真值=TraeWork 官方实扣</span>
-        <div class="status-line" style="margin-top:6px"><span class="tag" v-for="d in s.daily" :key="'cs-'+d.date" :style="{color:cacheStatusColor(d.cache_status), borderColor:cacheStatusColor(d.cache_status)}">{{d.date.slice(5)}}: {{cacheStatusLabel(d.cache_status)}}</span></div>
+        <div class="status-line" style="margin-top:6px"><span class="tag" :class="cacheStatusClass(d.cache_status)" v-for="d in s.daily" :key="'cs-'+d.date">{{d.date.slice(5)}}: {{cacheStatusLabel(d.cache_status)}}</span></div>
         </div>
         <div class="chart-box" v-if="s.daily?.length">
           <div class="activity-scroll"><div class="activity-map">
             <div class="activity-corner">指标</div><div class="activity-head" v-for="d in s.daily" :key="'h-'+d.date">{{d.date.slice(5)}}</div>
-            <template v-for="row in heatRows" :key="row.kind"><div class="activity-label">{{row.name}}</div><div class="activity-cell" v-for="(v,i) in row.values" :key="row.kind+'-'+i" :style="heatStyle(v,row.max)"><strong>{{heatValue(row.kind,v)}}</strong></div></template>
+            <template v-for="row in heatRows" :key="row.kind"><div class="activity-label">{{row.name}}</div><div class="activity-cell" :class="heatClass(v,row.max)" v-for="(v,i) in row.values" :key="row.kind+'-'+i"><strong>{{heatValue(row.kind,v)}}</strong></div></template>
           </div></div>
-          <div class="heat-legend"><span>低</span><span class="heat-swatch" style="background:#fff0ce"></span><span class="heat-swatch" style="background:#ffc98f"></span><span class="heat-swatch" style="background:#ff9855"></span><span class="heat-swatch" style="background:#f15f14"></span><span class="heat-swatch" style="background:#3f403e"></span><span>高</span></div>
+          <div class="heat-legend"><span>低</span><span class="heat-swatch heat-1"></span><span class="heat-swatch heat-2"></span><span class="heat-swatch heat-3"></span><span class="heat-swatch heat-4"></span><span class="heat-swatch heat-5"></span><span>高</span></div>
         </div>
         <div class="empty" v-else>暂无趋势数据</div>
       </div>

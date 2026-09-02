@@ -338,6 +338,12 @@ tr:hover td{background:var(--accent-soft)}
 .activity-cell.heat-4{background:var(--heat-4);color:#fff}
 .activity-cell.heat-5{background:var(--heat-5);color:#fff}
 
+/* cache status legend tags (tokenized) */
+.tag.cache-ok{color:var(--cache-ok);border-color:var(--cache-ok);background:var(--ok-bg)}
+.tag.cache-partial{color:var(--cache-partial);border-color:var(--cache-partial);background:var(--warn-bg)}
+.tag.cache-approx{color:var(--cache-approx);border-color:var(--cache-approx);background:var(--err-bg)}
+.tag.cache-empty{color:var(--cache-empty);border-color:var(--cache-empty);background:var(--bg-sunken)}
+
 /* ---- form & inputs ----------------------------------------- */
 .field{margin-bottom:var(--sp-4)}
 .field label{display:block;font-size:var(--fs-b);font-weight:600;margin-bottom:4px;color:var(--fg)}
