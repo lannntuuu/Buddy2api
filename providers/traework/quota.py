@@ -15,6 +15,7 @@ from providers.traework.constants import (
     USAGE_PATH,
 )
 from providers.traework.token import auth_headers, extra_of
+from storage.http_pool import get_client
 
 
 def _host(account: dict) -> str:
@@ -29,8 +30,8 @@ def _checkin_row(account: dict, **kwargs) -> dict:
 async def fetch_checkin(account: dict, force: bool = False) -> dict:
     url = f"{_host(account)}{CHECKIN_STATUS_PATH}"
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            response = await client.post(url, headers=auth_headers(account), json={})
+        client = get_client()
+        response = await client.post(url, headers=auth_headers(account), json={}, timeout=20.0)
     except httpx.HTTPError as exc:
         return _checkin_row(account, ok=False, message=str(exc)[:240])
     try:
@@ -68,8 +69,8 @@ async def claim_checkin(account: dict) -> dict:
         return status
     url = f"{_host(account)}{CHECKIN_CLAIM_PATH}"
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(url, headers=auth_headers(account), json={})
+        client = get_client()
+        response = await client.post(url, headers=auth_headers(account), json={}, timeout=30.0)
     except httpx.HTTPError as exc:
         return _checkin_row(account, ok=False, message=str(exc)[:240])
     try:
@@ -98,8 +99,8 @@ async def fetch_quota(account: dict) -> QuotaSnapshot:
     url = f"{_host(account)}{USAGE_PATH}"
     body = {"require_usage": True, "req_source": REQ_SOURCE}
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(url, headers=auth_headers(account), json=body)
+        client = get_client()
+        response = await client.post(url, headers=auth_headers(account), json=body, timeout=30.0)
     except httpx.HTTPError as exc:
         return QuotaSnapshot(
             ok=False,
@@ -138,3 +139,59 @@ async def fetch_quota(account: dict) -> QuotaSnapshot:
         unsupported=remaining is None,
         message="" if remaining is not None else "quota unit unknown",
     )
+
+
+# --- 官方消耗真值（按 session 明细，usage_type=7 = TraeWork 专属）---
+# 与 logs.credit（估算）无关：这里直接拉官方 session 接口的 credits_float 真值。
+SESSION_USAGE_PATH = "/trae/api/v1/pay/query_user_usage_group_by_session"
+
+
+async def fetch_session_usage(
+    account: dict, *, days: int = 90, usage_type: int = 7
+) -> list[dict]:
+    """拉取 TraeWork 按 session 的真实消耗明细。
+
+    返回每条 session 的 {session_id, model_name, credits_float, usage_time, usage_source}。
+    page_size 不能 > 50（实测 100 返回空），需翻页。usage_type=7 为 TraeWork 专属真值。
+    """
+    from providers.traesolo.constants import UG_HOST  # 复用共享积分 host
+    import time as _time
+
+    now = int(_time.time())
+    start = now - days * 86400
+    headers = auth_headers(account)
+    out: list[dict] = []
+    page = 1
+    while True:
+        body = {
+            "start_time": start,
+            "end_time": now,
+            "page_size": 50,
+            "page_num": page,
+            "usage_type": [usage_type],
+        }
+        try:
+            client = get_client()
+            resp = await client.post(
+                f"{UG_HOST}{SESSION_USAGE_PATH}", headers=headers, json=body, timeout=30.0
+            )
+        except httpx.HTTPError as exc:
+            break
+        try:
+            data = resp.json()
+        except ValueError:
+            break
+        sessions = data.get("user_usage_group_by_sessions") or []
+        if not sessions:
+            break
+        for s in sessions:
+            out.append({
+                "session_id": s.get("session_id"),
+                "model_name": s.get("model_name") or "",
+                "credits_float": float(s.get("credits_float") or 0),
+                "usage_time": int(s.get("usage_time") or 0),
+            })
+        if len(sessions) < 50:
+            break
+        page += 1
+    return out

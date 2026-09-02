@@ -245,6 +245,8 @@ def _log(api_key_info, account, model_name, stream, finish, status, error, t0):
                 "status_code": status,
                 "error_msg": error,
                 "increment_usage": True,
+                "client": (api_key_info or {}).get("_client_tag"),
+                "client_version": (api_key_info or {}).get("_client_version"),
             }
         )
     except Exception:

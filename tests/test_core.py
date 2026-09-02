@@ -48,8 +48,14 @@ def _events_of_type(events: list[tuple[str, dict]], event_name: str) -> list[dic
     return [payload for name, payload in events if name == event_name]
 
 
-def test_build_backend_body_adds_configured_reasoning_default_for_deepseek(monkeypatch):
-    monkeypatch.setenv("CB_GATEWAY_DEFAULT_REASONING_EFFORT", "high")
+def _patch_settings(monkeypatch, store):
+    """内存版 settings 存储，供 build_backend_body 读取按模型思考档位。"""
+    monkeypatch.setattr(db, "get_setting", lambda key, default=None: store.get(key, default))
+    monkeypatch.setattr(db, "set_setting", lambda key, value: store.__setitem__(key, value))
+
+
+def test_build_backend_body_injects_per_model_reasoning(monkeypatch):
+    _patch_settings(monkeypatch, {"workbuddy.reasoning": {"deepseek-v4-pro": "low"}})
     monkeypatch.setattr(proxy, "resolve_model_alias", lambda model: model)
 
     body = proxy.build_backend_body({
@@ -57,7 +63,7 @@ def test_build_backend_body_adds_configured_reasoning_default_for_deepseek(monke
         "messages": [{"role": "user", "content": "hello"}],
     })
 
-    assert body["reasoning_effort"] == "high"
+    assert body["reasoning_effort"] == "low"
 
 
 def test_build_backend_body_maps_developer_messages_to_system(monkeypatch):
@@ -88,8 +94,8 @@ def test_audit_detector_requires_a_short_refusal_response():
 
 
 @pytest.mark.parametrize("model", ["glm-5.2", "auto", "unknown-model"])
-def test_build_backend_body_does_not_add_reasoning_default_to_other_models(monkeypatch, model):
-    monkeypatch.setenv("CB_GATEWAY_DEFAULT_REASONING_EFFORT", "high")
+def test_build_backend_body_does_not_add_reasoning_when_unconfigured(monkeypatch, model):
+    _patch_settings(monkeypatch, {})  # 未设置思考档位 = 功能关闭
     monkeypatch.setattr(proxy, "resolve_model_alias", lambda value: value)
 
     body = proxy.build_backend_body({"model": model, "messages": []})
@@ -97,9 +103,28 @@ def test_build_backend_body_does_not_add_reasoning_default_to_other_models(monke
     assert "reasoning_effort" not in body
 
 
+def test_build_backend_body_channel_default_applies_to_all_models(monkeypatch):
+    _patch_settings(monkeypatch, {"workbuddy.reasoning": {"__default__": "medium"}})
+    monkeypatch.setattr(proxy, "resolve_model_alias", lambda model: model)
+
+    assert proxy.build_backend_body({"model": "deepseek-v4-pro", "messages": []})["reasoning_effort"] == "medium"
+    assert proxy.build_backend_body({"model": "glm-5.2", "messages": []})["reasoning_effort"] == "medium"
+
+
+def test_build_backend_body_per_model_overrides_channel_default(monkeypatch):
+    _patch_settings(monkeypatch, {
+        "workbuddy.reasoning": {"__default__": "high", "deepseek-v4-flash": "low"},
+    })
+    monkeypatch.setattr(proxy, "resolve_model_alias", lambda model: model)
+
+    assert proxy.build_backend_body({"model": "deepseek-v4-flash", "messages": []})["reasoning_effort"] == "low"
+    assert proxy.build_backend_body({"model": "deepseek-v4-pro", "messages": []})["reasoning_effort"] == "high"
+
+
 @pytest.mark.parametrize("explicit", ["none", "off", "low", "max"])
 def test_build_backend_body_preserves_explicit_reasoning_effort(monkeypatch, explicit):
-    monkeypatch.setenv("CB_GATEWAY_DEFAULT_REASONING_EFFORT", "high")
+    # 客户端显式参数始终优先，无论是否配置了默认
+    _patch_settings(monkeypatch, {"workbuddy.reasoning": {"deepseek-v4-flash": "high"}})
     monkeypatch.setattr(proxy, "resolve_model_alias", lambda model: model)
 
     body = proxy.build_backend_body({
@@ -112,7 +137,8 @@ def test_build_backend_body_preserves_explicit_reasoning_effort(monkeypatch, exp
 
 
 def test_build_backend_body_ignores_unsupported_thinking_without_injecting_default(monkeypatch):
-    monkeypatch.setenv("CB_GATEWAY_DEFAULT_REASONING_EFFORT", "high")
+    # 客户端传 thinking → 不注入任何 reasoning_effort（原样丢弃，上游不接受该字段）
+    _patch_settings(monkeypatch, {"workbuddy.reasoning": {"deepseek-v4-pro": "high"}})
     monkeypatch.setattr(proxy, "resolve_model_alias", lambda model: model)
     thinking = {"type": "disabled"}
 
@@ -460,6 +486,30 @@ def test_record_request_updates_log_and_counters_once(isolated_db):
     assert sum(bucket["requests"] for bucket in hourly) == 1
     assert sum(bucket["tokens"] for bucket in hourly) == 7
     assert sum(bucket["credit"] for bucket in hourly) == 0.25
+
+
+def test_record_request_stores_reasoning_effort(isolated_db):
+    account_id = db.add_account({"name": "account", "access_token": "a", "refresh_token": "r"})
+    key_id = db.add_api_key("sk-cb-test", "key")
+    db.record_request({
+        "api_key_id": key_id,
+        "account_id": account_id,
+        "model": "deepseek-v4-flash",
+        "reasoning_effort": "low",
+        "status_code": 200,
+        "finish_reason": "stop",
+    })
+    db.record_request({
+        "api_key_id": key_id,
+        "account_id": account_id,
+        "model": "glm-5.2",
+        "status_code": 200,
+        "finish_reason": "stop",
+    })
+    logs = db.list_logs()
+    by_model = {log["model"]: log.get("reasoning_effort") for log in logs}
+    assert by_model["deepseek-v4-flash"] == "low"
+    assert by_model["glm-5.2"] is None
 
 
 def test_api_auth_fails_closed_without_keys(isolated_db, monkeypatch):

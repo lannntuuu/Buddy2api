@@ -42,6 +42,7 @@ from providers.traesolo.constants import (
     SOFT_COOLDOWN_S,
     STATIC_MODELS,
     ALIASES,
+    MODEL_RATES,
 )
 from providers.traesolo.token import (
     TraeSoloAuthError,
@@ -61,6 +62,36 @@ def _make_client(timeout: Optional[float], stream: bool = False) -> httpx.AsyncC
     else:
         timeout_obj = timeout if timeout else 120.0
     return httpx.AsyncClient(timeout=timeout_obj, transport=_TRANSPORT)
+
+
+# 配额/签到类短请求复用同一连接池（keep-alive）。transport 与 _TRANSPORT 绑定，
+# 测试切换 MockTransport 时按对象身份重建；事件循环变化（测试内多个 asyncio.run）同样重建。
+_quota_client: Optional[httpx.AsyncClient] = None
+_quota_client_transport = None
+_quota_client_loop = None
+
+
+def _get_quota_client() -> httpx.AsyncClient:
+    global _quota_client, _quota_client_transport, _quota_client_loop
+    try:
+        loop: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    stale = (
+        _quota_client is None
+        or _quota_client.is_closed
+        or _quota_client_transport is not _TRANSPORT
+        or (loop is not None and _quota_client_loop is not loop)
+    )
+    if stale:
+        _quota_client = httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=16, max_keepalive_connections=8, keepalive_expiry=60.0),
+            transport=_TRANSPORT,
+            timeout=httpx.Timeout(60.0),
+        )
+        _quota_client_transport = _TRANSPORT
+        _quota_client_loop = loop
+    return _quota_client
 
 
 async def _aclose_client(client: httpx.AsyncClient) -> None:
@@ -657,6 +688,7 @@ class _ModelCache:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.ids: list[str] = []
+        self.details: list[dict] = []
         self.fetched_at: float = 0.0
         self.last_fail_at: float = 0.0
 
@@ -664,8 +696,17 @@ class _ModelCache:
 _model_cache = _ModelCache()
 
 
-async def fetch_models(account: dict) -> list[str]:
-    """拉 SOLO 模型表（get_detail_param），返回 config_name 列表。"""
+async def fetch_model_details(account: dict) -> list[dict]:
+    """拉 SOLO 模型表（get_detail_param），返回每个模型的明细。
+
+    每个明细含：
+      - id: config_name（白名单用的内部名）
+      - display_name: 官方展示名
+      - rate: consumption_rate.data.rate（credit 消耗倍率，原值直用；无则为 None）
+      - context_window: 上下文窗口 token 数（无则为 None）
+      - fee_level: fee_model_level（无则为 None）
+      - official: True（来自官方接口）
+    """
     body = {
         "function": FUNCTION,
         "config_names": None,
@@ -688,16 +729,43 @@ async def fetch_models(account: dict) -> list[str]:
         data = response.json()
     except ValueError as exc:
         raise TraeSoloAuthError("models returned non-JSON") from exc
-    out: list[str] = []
+    out: list[dict] = []
+    import json as _json
     for cfg in data.get("config_info_list") or []:
         if not isinstance(cfg, dict):
             continue
         name = str(cfg.get("config_name") or "").strip()
-        if name and name not in out:
-            out.append(name)
+        if not name or any(o["id"] == name for o in out):
+            continue
+        rate = None
+        dcfg = cfg.get("display_config") if isinstance(cfg.get("display_config"), dict) else {}
+        fee_level = dcfg.get("fee_model_level")
+        cw = cfg.get("context_window_tokens")
+        if isinstance(cw, dict):
+            cw = cw.get("dev") or cw.get("prod")
+        raw_dc = cfg.get("display_contact_config")
+        if isinstance(raw_dc, str) and raw_dc.strip():
+            try:
+                dcj = _json.loads(raw_dc)
+                rate = dcj.get("consumption_rate", {}).get("data", {}).get("rate")
+            except ValueError:
+                pass
+        out.append({
+            "id": name,
+            "display_name": dcfg.get("display_name") or name,
+            "rate": rate,
+            "context_window": int(cw) if isinstance(cw, (int, float)) else None,
+            "fee_level": fee_level,
+            "official": True,
+        })
     if not out:
         raise TraeSoloAuthError("models api returned empty list")
     return out
+
+
+async def fetch_models(account: dict) -> list[str]:
+    """兼容旧调用：仅返回 config_name 列表。"""
+    return [m["id"] for m in await fetch_model_details(account)]
 
 
 async def refresh_dynamic_models(force: bool = False) -> bool:
@@ -714,17 +782,18 @@ async def refresh_dynamic_models(force: bool = False) -> bool:
             _model_cache.last_fail_at = now
         return False
     try:
-        ids = await fetch_models(account)
+        details = await fetch_model_details(account)
     except Exception:
         with _model_cache.lock:
             _model_cache.last_fail_at = now
         return False
-    if not ids:
+    if not details:
         with _model_cache.lock:
             _model_cache.last_fail_at = now
         return False
     with _model_cache.lock:
-        _model_cache.ids = ids
+        _model_cache.details = details
+        _model_cache.ids = [d["id"] for d in details]
         _model_cache.fetched_at = now
         _model_cache.last_fail_at = 0.0
     return True
@@ -734,6 +803,14 @@ def dynamic_model_ids() -> list[str]:
     with _model_cache.lock:
         if _model_cache.ids and time.time() - _model_cache.fetched_at < DYNAMIC_MODELS_TTL:
             return list(_model_cache.ids)
+    return []
+
+
+def dynamic_model_details() -> list[dict]:
+    """返回缓存的官方模型明细（含 rate 等）。TTL 外返回空。"""
+    with _model_cache.lock:
+        if _model_cache.details and time.time() - _model_cache.fetched_at < DYNAMIC_MODELS_TTL:
+            return list(_model_cache.details)
     return []
 
 
@@ -779,6 +856,22 @@ def _effective_default_ids() -> list[str]:
 def effective_model_ids() -> list[str]:
     """当前生效模型白名单：用户自定义 > 动态表 > 内置静态表。"""
     return channel_model_ids(CHANNEL_ID, _effective_default_ids())
+
+
+def model_rate(name: str) -> float | None:
+    """返回某模型官方消耗倍率（consumption_rate.rate 原值）。
+
+    优先用动态拉取的官方明细（缓存命中且 official=True），否则回退静态 MODEL_RATES。
+    返回 None 表示该模型官方未提供倍率（估算时回退到通道单一 credit_rate）。
+    """
+    base = (name or "").strip()
+    details = {d["id"]: d for d in dynamic_model_details()}
+    d = details.get(base)
+    if d is not None and d.get("official") and d.get("rate") is not None:
+        return float(d["rate"])
+    if base in MODEL_RATES:
+        return MODEL_RATES[base]
+    return None
 
 
 def translate_model(model: str) -> str:
@@ -839,17 +932,45 @@ def _log(
     usage: dict | None = None,
 ) -> None:
     prompt = completion = total = 0
+    cache_read = cache_creation = 0
     if isinstance(usage, dict):
         try:
             prompt = int(usage.get("prompt_tokens") or 0)
             completion = int(usage.get("completion_tokens") or 0)
             total = int(usage.get("total_tokens") or 0) or (prompt + completion)
+            # 上游 token_usage 事件原生携带 Anthropic 风格的缓存字段（2026-09-01 实测确认）
+            cache_read = int(usage.get("cache_read_input_tokens") or 0)
+            cache_creation = int(usage.get("cache_creation_input_tokens") or 0)
         except (TypeError, ValueError):
             prompt = completion = total = 0
-    # 上游不回报 credit，用 token→credit 换算率做**近似**消耗统计（可配，0=不估算）。
-    rate = channel_credit_rate(CHANNEL_ID)
-    credit = round(total / rate, 6) if rate else 0
+            cache_read = cache_creation = 0
+    # credit 估算：按官方三档 per-token 单价公式（2026-09-01 从 51 条 usage_type=7 官方
+    # session 真值反解得出，46/51 行误差 <1%）：
+     #   credits = (input_nc×p_in + cache_read×p_cache + output×p_out) / 1e6 ÷ $0.025
+    # 单价见 providers/traesolo/pricing.py（qwen in=2.00/cache=0.40/out=9.20 等，$/1M）。
+    # 注意：仍属估算——个别官方 session 按深度折扣计费（如 8-31 大会话 2.5 折类促销），
+    # 本式给出的是"标价口径"的 credit，非对账值。
+    from providers.traesolo.pricing import trae_credit_from_usage
+
+    credit = trae_credit_from_usage(
+        prompt, completion,
+        cache_read_tokens=cache_read,
+        cache_creation_tokens=cache_creation,
+        model=model_name,
+    )
+    if credit is None:
+        # 无 token 数据时退回相对趋势估算（保留旧口径，仅占位）
+        scale = channel_credit_rate(CHANNEL_ID) or 250.0
+        mr = model_rate(model_name)
+        factor = mr if mr is not None else 1.0
+        credit = round(total / scale * factor, 6)
     try:
+        import json as _json
+        # 存整个 usage 字典（未来再加字段也不丢）
+        try:
+            usage_json = _json.dumps(usage, ensure_ascii=False) if usage else None
+        except (TypeError, ValueError):
+            usage_json = None
         db.record_request(
             {
                 "api_key_id": api_key_info["id"] if api_key_info else None,
@@ -863,11 +984,17 @@ def _log(
                 "completion_tokens": completion,
                 "total_tokens": total,
                 "credit": credit,
+                "cache_read_tokens": cache_read,
+                "cache_creation_tokens": cache_creation,
+                "usage_json": usage_json,
+                "credit_source": "live" if (usage and cache_read) else None,
                 "finish_reason": finish,
                 "duration_ms": int((time.time() - t0) * 1000),
                 "status_code": status,
                 "error_msg": error,
                 "increment_usage": True,
+                "client": (api_key_info or {}).get("_client_tag"),
+                "client_version": (api_key_info or {}).get("_client_version"),
             }
         )
     except Exception:

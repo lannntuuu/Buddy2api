@@ -17,6 +17,7 @@ import html
 import json
 import logging
 import os
+import re
 import secrets
 import sys
 import tempfile
@@ -45,6 +46,15 @@ from gateway.version import VERSION
 
 logger = logging.getLogger("buddy2api.server")
 
+# User-Agent 版本号提取。优先<name>/<semver>可能带 -rc/-beta/-alpha/. 预发布后缀，
+# 其次常见版本格式。预发布后缀一并保留，便于对应 GitHub tag（如 0.1.1-rc.2）。
+_UA_VERSION_PATTERNS = (
+    re.compile(r"^[^/\s]+/([0-9]+(?:\.[0-9]+){1,3}(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?)"),
+    re.compile(r"(?:^|[^0-9])([0-9]+(?:\.[0-9]+){1,3}(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?)"),
+    re.compile(r"(?:^|\W)v([0-9]+(?:\.[0-9]+){1,3}(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?)"),
+)
+_UA_FALLBACK_MAX = 32
+
 
 def _env_flag(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
@@ -68,6 +78,32 @@ def _cors_origins() -> list[str]:
     return [origin.strip() for origin in value.split(",") if origin.strip()]
 
 
+# --- 后台定时同步 TraeWork 官方消耗真值（每小时一次）---
+async def _traework_sync_loop() -> None:
+    await asyncio.sleep(60)  # 启动后延迟首跑
+    while True:
+        try:
+            res = await control_plane.sync_traework_usage(days=90)
+            if res.get("ok"):
+                sys.stderr.write(
+                    f"[traework-sync] ok days={res.get('synced_days')} "
+                    f"sessions={res.get('sessions')} credits={res.get('total_credits')}\n"
+                )
+            else:
+                sys.stderr.write(f"[traework-sync] skipped: {res.get('error')}\n")
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write(f"[traework-sync] error: {exc!r}\n")
+        await asyncio.sleep(3600)
+
+
+def _schedule_traework_sync() -> None:
+    try:
+        asyncio.get_running_loop().create_task(_traework_sync_loop())
+    except RuntimeError:
+        # 无运行中的事件循环（如测试/非 asyncio 上下文），跳过自动调度
+        pass
+
+
 app = FastAPI(title="Buddy 2 API", version=VERSION)
 _CORS_ORIGINS = _cors_origins()
 
@@ -82,6 +118,77 @@ app.add_middleware(
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 # Web UI 静态资源（css/js 模块）；页面本体仍由 GET / 返回
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+
+
+def _detect_client(request: Request, api_key_info: dict | None) -> str | None:
+    """识别发起请求的客户端，写进请求日志用于排查（DSH 与其它客户端对比）。
+
+    按特征优先级判定；无法识别则回落到 User-Agent 前缀。
+    """
+    headers = request.headers
+    if headers.get("x-deepseek-harness-user-id") or headers.get(
+        "x-deepseek-harness-session-id"
+    ):
+        return "dsh"
+    if headers.get("x-openai-client"):
+        return str(headers.get("x-openai-client"))[:60]
+    if api_key_info and api_key_info.get("client_type") == "codex":
+        return "codex"
+    ua = headers.get("user-agent") or ""
+    ua = ua.strip()
+    if not ua:
+        return None
+    low = ua.lower()
+    # DeepSeek Harness 未带专属头时，靠 UA 识别为 dsh
+    if "deepseek-harness" in low:
+        return "dsh"
+    if "zcode" in low:
+        return "zcode"
+    if low.startswith("openai") or "openai" in low and "python" in low:
+        return "openai-sdk"
+    if "curl" in low:
+        return "curl"
+    if "python" in low:
+        return "python"
+    # 兜底取 UA 第一段（product/token），比整串截断更短更可读
+    first = ua.split("/")[0].strip()
+    if first:
+        return first[:32]
+    return ua[:32]
+
+
+def _client_version(request: Request) -> str | None:
+    """从 User-Agent 提取请求方版本号，用于日志排查。
+
+    依次尝试：`<name>/2.5.1` → `2.5.1`；任意 `x.y.z`；`v2.5.1`。
+    取不到则回落到 UA 首 token 的短前缀或 None。只落短版本，不存整条 UA。
+    """
+    ua = request.headers.get("user-agent")
+    if not ua:
+        return None
+    ua = ua.strip()
+    if not ua:
+        return None
+    for pattern in _UA_VERSION_PATTERNS:
+        match = pattern.search(ua)
+        if match and match.group(1):
+            return match.group(1)[:24]
+    # 兜底：取第一段（如 deepseek-harness、ZCodeAgent）
+    first = ua.split()[0] if ua.split() else ua
+    first = first.strip("/").strip()
+    return first[:_UA_FALLBACK_MAX] or None
+
+
+def _stamp_client_info(request: Request, api_key_info: dict | None) -> None:
+    """把请求方的来源标签与版本号写入 api_key_info，供日志落库。
+
+    只做记录，不参与鉴权 / 路由 / 内容处理。client 是易读标签，
+    client_version 是请求方 User-Agent 里提取的版本号（与错误信息无关）。
+    """
+    if not api_key_info:
+        return
+    api_key_info["_client_tag"] = _detect_client(request, api_key_info)
+    api_key_info["_client_version"] = _client_version(request)
 
 
 # ============================================================
@@ -180,8 +287,7 @@ def _check_client_auth(
     consume_quota: bool = True,
 ):
     """Validate a client API key and atomically reserve its daily quota."""
-    keys = db.list_api_keys()
-    if not keys:
+    if not db.has_api_keys():
         if ALLOW_UNAUTHENTICATED_API:
             return None
         raise HTTPException(
@@ -391,6 +497,7 @@ async def chat_completions(
         raise HTTPException(status_code=400, detail={"error": {"message": "messages is required", "type": "invalid_request_error"}})
     if "model" in payload and not isinstance(payload["model"], str):
         raise HTTPException(status_code=400, detail={"error": {"message": "model must be a string", "type": "invalid_request_error"}})
+    _stamp_client_info(request, api_key_info)
     # Codex 类型 Key：自动应用内容清洗 + 工具过滤
     if api_key_info and api_key_info.get("client_type") == "codex":
         payload = responses.apply_codex_sanitize(payload)
@@ -439,6 +546,7 @@ async def resp_responses(
         )
     if "model" in payload and not isinstance(payload["model"], str):
         raise HTTPException(status_code=400, detail={"error": {"message": "model must be a string", "type": "invalid_request_error"}})
+    _stamp_client_info(request, api_key_info)
     bound = router.bind_http(payload, api_key_info)
     _check_model_access(api_key_info, bound.original, bound.inner, bound.channel)
     await router.ensure_usable(bound.channel)
@@ -480,19 +588,65 @@ async def admin_channels(authorization: str | None = Header(default=None)):
     _check_admin(authorization)
     env_set = bool((os.environ.get("CB_GATEWAY_PROVIDERS") or "").strip())
     in_container = auth_manager._running_in_container()
+    enabled_now = set(providers.enabled_provider_ids())
+    # Render the channel list in db order (or alphabetical on first boot, per
+    # contract). workbuddy always first.
+    ordered_known = providers.get_channel_order() + [
+        c for c in KNOWN_CHANNEL_SET if c not in providers.get_channel_order()
+    ]
     items = []
-    for channel in providers.enabled_provider_ids():
+    for channel in ordered_known:
         provider = providers.get_provider(channel)
         items.append({
             "id": channel,
-            "display_name": getattr(provider, "display_name", channel),
-            "enabled": True,
+            "display_name": getattr(provider, "display_name", channel) if provider else channel,
+            "enabled": channel in enabled_now,
             "loaded": provider is not None,
-            "checkin_supported": bool(getattr(provider, "checkin_supported", False)),
+            "checkin_supported": bool(getattr(provider, "checkin_supported", False)) if provider else False,
             "env_locked": env_set,
             "host_auth_limited": bool(in_container and channel in {"qclaw", "qwenwork"}),
         })
-    return {"channels": items, "known": list(KNOWN_CHANNEL_SET)}
+    return {
+        "channels": items,
+        "known": list(ordered_known),
+        "enabled": providers.enabled_provider_ids(),
+        "env_locked": env_set,
+    }
+
+
+@app.put("/admin/channels")
+async def admin_update_channels(
+    request: Request, authorization: str | None = Header(default=None)
+):
+    """Update the runtime-enabled channel list and (optionally) the display order.
+
+    Request body: {"enabled": ["workbuddy", "gmi", ...], "order": ["workbuddy", "gmi", ...]}
+    `enabled` is the set the admin wants enabled. `order` (optional) is the
+    display order used across every page; if omitted, the existing order is
+    preserved and new additions are appended. `workbuddy` is forced to the top
+    regardless of either input.
+    Rejected with 409 if CB_GATEWAY_PROVIDERS is set in the environment.
+    """
+    _check_admin(authorization)
+    if providers.env_locked():
+        raise HTTPException(
+            status_code=409,
+            detail="CB_GATEWAY_PROVIDERS is set in the environment; channel toggles are read-only",
+        )
+    data = await _read_json_object(request)
+    ids = data.get("enabled")
+    if not isinstance(ids, list) or not all(isinstance(x, str) for x in ids):
+        raise HTTPException(status_code=400, detail="enabled must be a list of channel id strings")
+    order = data.get("order")
+    if order is not None and (
+        not isinstance(order, list) or not all(isinstance(x, str) for x in order)
+    ):
+        raise HTTPException(status_code=400, detail="order must be a list of channel id strings")
+    try:
+        resolved_enabled, resolved_order = providers.set_enabled_channels(ids, order)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"enabled": resolved_enabled, "order": resolved_order, "status": "ok"}
 
 
 @app.get("/admin/channels/{channel}/models")
@@ -511,16 +665,18 @@ async def admin_channel_models(
 async def admin_set_channel_models(
     channel: str, request: Request, authorization: str | None = Header(default=None)
 ):
-    """设置或重置某通道的模型列表 / 别名 / credit 换算率。
+    """设置或重置某通道的模型列表 / 别名 / credit 换算率 / 按模型思考档位。
 
-    请求体：{"models": ["id1", ...] | null, "aliases": {"alias": "id"} | null, "credit_rate": <number> | null}
-    传 null 表示重置该项为内置默认；三项至少传一项。
+    请求体：{"models": [...]|null, "aliases": {...}|null, "credit_rate": <num>|null,
+             "reasoning": {"model_id": "low", "__default__": ""}|null}
+    传 null 表示重置该项为内置默认；四项至少传一项。
     """
     _check_admin(authorization)
     data = await _read_json_object(request)
     set_models = "models" in data
     set_aliases = "aliases" in data
     set_rate = "credit_rate" in data
+    set_reasoning = "reasoning" in data
     try:
         return await run_in_threadpool(
             control_plane.set_channel_models,
@@ -528,12 +684,66 @@ async def admin_set_channel_models(
             models=data.get("models") if set_models else None,
             aliases=data.get("aliases") if set_aliases else None,
             credit_rate=data.get("credit_rate") if set_rate else None,
+            reasoning=data.get("reasoning") if set_reasoning else None,
             set_models=set_models,
             set_aliases=set_aliases,
             set_rate=set_rate,
+            set_reasoning=set_reasoning,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/admin/channels/{channel}/models/refresh")
+async def admin_refresh_channel_models(
+    channel: str, authorization: str | None = Header(default=None)
+):
+    """强制刷新某通道官方模型表（仅 traesolo 支持动态拉取；其它通道返回静态白名单）。"""
+    _check_admin(authorization)
+    try:
+        return await control_plane.refresh_channel_models(channel)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/admin/traework/sync-usage")
+async def admin_traework_sync_usage(
+    authorization: str | None = Header(default=None),
+):
+    """手动触发 TraeWork 官方消耗真值同步（定时任务也会每小时跑一次）。"""
+    _check_admin(authorization)
+    try:
+        result = await control_plane.sync_traework_usage(days=90)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)[:240]) from exc
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "sync failed"))
+    return result
+
+
+@app.get("/admin/credit-overview")
+async def admin_credit_overview(authorization: str | None = Header(default=None)):
+    """账户级历史总消耗估算（当前已用 + 已过期积分，假设过期用完）。"""
+    _check_admin(authorization)
+    try:
+        result = await control_plane.account_credit_overview()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)[:240]) from exc
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "failed"))
+    return result
+
+
+@app.get("/admin/traework/usage")
+async def admin_traework_usage(authorization: str | None = Header(default=None)):
+    """查看已同步的 TraeWork 官方消耗真值（按天）。"""
+    _check_admin(authorization)
+    by_day = db.get_traework_daily_credit(days=90)
+    return {
+        "by_day": by_day,
+        "total_credits": db.get_traework_total_credit(),
+        "last_sync_at": db.latest_traework_sync_at(),
+    }
 
 
 @app.get("/admin/unified-models")
@@ -562,7 +772,9 @@ async def admin_set_unified_models(
 @app.get("/admin/stats")
 async def admin_stats(authorization: str | None = Header(default=None)):
     _check_admin(authorization)
-    return db.get_stats()
+    stats = db.get_stats()
+    stats["compaction"] = proxy.compaction_stats()
+    return stats
 
 
 def _usage_date_bounds(days: int | None, start_date: str | None, end_date: str | None):
@@ -710,11 +922,14 @@ async def admin_import_accounts(
     ):
         raise HTTPException(status_code=400, detail="paths must be an array of strings")
     try:
-        return await run_in_threadpool(
+        result = await run_in_threadpool(
             control_plane.import_channel, channel, token, paths, data.get("auth_dir")
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if isinstance(result, dict) and (result.get("imported") or result.get("updated")):
+        control_plane.invalidate_credit_summary_cache()
+    return result
 
 
 @app.post("/admin/accounts/scan")
@@ -725,7 +940,10 @@ async def admin_scan_accounts(
     _check_admin(authorization)
     data = await _read_json_object(request, allow_empty=True)
     auth_dir = data.get("auth_dir") if isinstance(data, dict) else None
-    return await run_in_threadpool(auth_manager.auto_scan_and_import, auth_dir)
+    result = await run_in_threadpool(auth_manager.auto_scan_and_import, auth_dir)
+    if isinstance(result, dict) and (result.get("imported") or result.get("updated")):
+        control_plane.invalidate_credit_summary_cache()
+    return result
 
 
 @app.post("/admin/accounts")
@@ -881,6 +1099,7 @@ async def admin_delete_account(
 ):
     _check_admin(authorization)
     db.delete_account(aid)
+    control_plane.invalidate_credit_summary_cache()
     return {"status": "ok"}
 
 
@@ -1021,10 +1240,15 @@ async def admin_claim_checkin(
         provider = providers.get_provider(channel)
         claim_checkin = getattr(provider, "claim_checkin", None) if provider else None
         if claim_checkin is not None:
-            return await claim_checkin(account)
+            result = await claim_checkin(account)
+            if result.get("ok") or result.get("claimed") or result.get("already_claimed"):
+                control_plane.invalidate_credit_summary_cache()
+            return result
     result = await auth_manager.claim_daily_checkin(account)
     if result.get("ok"):
         result["resources"] = await auth_manager.fetch_account_resources(account, force=True)
+    if result.get("ok") or result.get("claimed") or result.get("already_claimed"):
+        control_plane.invalidate_credit_summary_cache()
     return result
 
 
@@ -1590,6 +1814,9 @@ def main():
 
     startup = control_plane.startup_scan()
     sys.stderr.write(f"[startup] discover: {startup}\n")
+
+    # 后台定时同步 TraeWork 官方消耗真值（每小时一次；首次延迟 60s 避免启动风暴）
+    _schedule_traework_sync()
 
     accounts = db.list_accounts()
     sys.stderr.write(f"\n")

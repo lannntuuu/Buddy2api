@@ -224,3 +224,72 @@ def test_router_bind_uses_custom_models(fake_settings):
     assert bound.inner == "foo"
     with pytest.raises(InvalidModel):
         router.bind({"model": "traework/qwen-3.7-plus"}, {"default_channel": "traework"})
+
+
+# ---------- 按模型思考档位（reasoning effort）----------
+
+def test_channel_model_view_reasoning_defaults(fake_settings):
+    view = control_plane.channel_model_view("workbuddy")
+    assert view["reasoning_supported"] is True
+    assert view["reasoning"] == {}
+    assert view["reasoning_default"] == ""
+    assert view["reasoning_customized"] is False
+    # none 等空串仍属合法选择
+    assert "" in view["reasoning_choices"]
+    assert "off" not in view["reasoning_choices"]
+
+
+def test_set_channel_models_reasoning_roundtrip_and_reset(fake_settings):
+    view = control_plane.set_channel_models(
+        "workbuddy",
+        reasoning={"__default__": "medium", "deepseek-v4-flash": "low"},
+        set_reasoning=True,
+    )
+    assert view["reasoning"] == {"__default__": "medium", "deepseek-v4-flash": "low"}
+    assert view["reasoning_default"] == "medium"
+    assert view["reasoning_customized"] is True
+    assert fake_settings["workbuddy.reasoning"] == {"__default__": "medium", "deepseek-v4-flash": "low"}
+
+    reset = control_plane.set_channel_models("workbuddy", reasoning=None, set_reasoning=True)
+    assert reset["reasoning"] == {}
+    assert "workbuddy.reasoning" not in fake_settings
+
+
+def test_set_channel_models_reasoning_drops_empty_levels(fake_settings):
+    view = control_plane.set_channel_models(
+        "workbuddy",
+        reasoning={"deepseek-v4-pro": "", "glm-5.2": "high"},
+        set_reasoning=True,
+    )
+    # 空串条目被丢弃，只保留显式档位
+    assert view["reasoning"] == {"glm-5.2": "high"}
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not-a-dict",
+        {"deepseek-v4-flash": "super-high"},   # 非法档位
+        {"deepseek-v4-flash": "off"},           # 上游拒绝的 off
+        {"": "low"},                             # 空模型 id
+        {"__default__": "turbo"},               # 非法通道默认
+    ],
+)
+def test_set_channel_models_reasoning_validation(fake_settings, bad):
+    with pytest.raises(ValueError):
+        control_plane.set_channel_models("workbuddy", reasoning=bad, set_reasoning=True)
+
+
+def test_reasoning_for_model_resolution(fake_settings):
+    from providers.model_config import reasoning_for_model
+
+    fake_settings["workbuddy.reasoning"] = {"__default__": "high", "deepseek-v4-flash": "low"}
+    # 别名解析后的后端 id 命中：o3 → deepseek-v4-pro（走 __default__）
+    assert reasoning_for_model("workbuddy", "deepseek-v4-flash") == "low"
+    assert reasoning_for_model("workbuddy", "deepseek-v4-pro") == "high"
+    # 未配置模型回退通道默认
+    assert reasoning_for_model("workbuddy", "glm-5.2") == "high"
+    # 完全没有配置 → None（不注入）
+    del fake_settings["workbuddy.reasoning"]
+    assert reasoning_for_model("workbuddy", "glm-5.2") is None
+

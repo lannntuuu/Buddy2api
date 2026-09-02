@@ -3,8 +3,8 @@ import {I} from '../icons.js';
 const{ref,reactive,computed,onMounted}=Vue;
 
 export default {props:['token','toast'],setup(p){
-  const s=ref(null),credit=ref(null),ld=ref(true),cld=ref(false),err=ref(''),updatedAt=ref(''),todayChartMetric=ref('requests');
-  async function load(forceCredit=false){ld.value=true;err.value='';try{const [stats,cred]=await Promise.all([api.get('/admin/stats',p.token),api.get('/admin/credit-summary'+(forceCredit?'?force=1':''),p.token)]);s.value=stats;credit.value=cred;updatedAt.value=new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}catch(e){s.value=null;err.value=apiErr(e,'加载失败：'+e.message);p.toast(err.value,'err')}ld.value=false}
+  const s=ref(null),credit=ref(null),overview=ref(null),ld=ref(true),cld=ref(false),err=ref(''),updatedAt=ref(''),todayChartMetric=ref('requests');
+  async function load(forceCredit=false){ld.value=true;err.value='';try{const [stats,cred,ov]=await Promise.all([api.get('/admin/stats',p.token),api.get('/admin/credit-summary'+(forceCredit?'?force=1':''),p.token),api.get('/admin/credit-overview',p.token).catch(()=>null)]);s.value=stats;credit.value=cred;overview.value=ov;updatedAt.value=new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}catch(e){s.value=null;err.value=apiErr(e,'加载失败：'+e.message);p.toast(err.value,'err')}ld.value=false}
   async function refreshCredit(){if(cld.value)return;cld.value=true;try{credit.value=await api.get('/admin/credit-summary?force=1',p.token);updatedAt.value=new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});p.toast('官方额度已刷新')}catch(e){p.toast(apiErr(e,'官方额度刷新失败'),'err')}cld.value=false}
   function healthClass(){if(!s.value?.active_accounts||!s.value?.active_keys)return 'err';if((s.value?.today?.errors||0)>0||s.value?.filtered_requests>0)return 'warn';return ''}
   function healthText(){if(!s.value?.active_accounts)return '无可用账号';if(!s.value?.active_keys)return '无可用 API Key';if((s.value?.today?.errors||0)>0)return '有请求异常';if(s.value?.filtered_requests>0)return '存在内容过滤';return '运行正常'}
@@ -16,6 +16,7 @@ export default {props:['token','toast'],setup(p){
     {name:'调用',kind:'requests',values:d.map(x=>Number(x.requests||0)),max:Math.max(...d.map(x=>Number(x.requests||0)),1)},
     {name:'Token',kind:'tokens',values:d.map(x=>Number(x.tokens||0)),max:Math.max(...d.map(x=>Number(x.tokens||0)),1)},
     {name:'Credit',kind:'credit',values:d.map(x=>Number(x.credits||0)),max:Math.max(...d.map(x=>Number(x.credits||0)),1)},
+    {name:'Work真值',kind:'tw',values:d.map(x=>Number(x.traework_credit||0)),max:Math.max(...d.map(x=>Number(x.traework_credit||0)),1)},
   ]});
   const todayLabel=computed(()=>new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric',weekday:'short'}));
   const todayUsage=computed(()=>{
@@ -23,24 +24,26 @@ export default {props:['token','toast'],setup(p){
     function points(kind){const key=kind==='credit'?'credits':kind;const values=daily.map(d=>({date:d.date,value:Number(d[key]||0)}));return{values,max:Math.max(...values.map(x=>x.value),1)}}
     const creditPoints=points('credit'),requestPoints=points('requests'),tokenPoints=points('tokens');
     return[
-      {kind:'credit',label:'今日额度消耗',value:money(t.credit),unit:'Credit',meta:n(requests)+' 次调用 · 单次 '+money(requests?Number(t.credit||0)/requests:0),foot:credit.value?.channels?.length?credit.value.channels.map(c=>c.id+' '+(c.unit==='credit'&&c.remaining!=null?money(c.remaining):'—')).join(' · '):'累计 '+money(s.value?.total_credit),footLabel:credit.value?.channels?.length?'按通道积分':'累计消耗',icon:I.wallet,...creditPoints},
+      {kind:'credit',label:'今日 Credit(官方标价估算)',value:money(t.credit),unit:'Credit',meta:n(requests)+' 次调用 · 单次 '+money(requests?Number(t.credit||0)/requests:0)+'（按官方三档标价公式；订阅内实际扣费远低于此，见文档§10）',foot:credit.value?.channels?.length?credit.value.channels.map(c=>c.id+' '+(c.unit==='credit'&&c.remaining!=null?money(c.remaining):'—')).join(' · '):'累计标价估算 '+money(s.value?.total_credit),footLabel:credit.value?.channels?.length?'按通道积分余额':'累计标价估算',icon:I.wallet,...creditPoints},
       {kind:'requests',label:'今日调用次数',value:n(requests),unit:'次',meta:'成功 '+n(t.success)+' · 异常 '+n(Number(t.errors||0)+Number(t.filtered||0)),foot:pct(t.success_rate),footLabel:'成功率',icon:I.activity,...requestPoints},
       {kind:'tokens',label:'今日 Token',value:tok(t.tokens),unit:'Tokens',meta:'单次平均 '+tok(requests?Math.round(Number(t.tokens||0)/requests):0),foot:'累计 '+tok(s.value?.total_tokens),footLabel:'全部时间',icon:I.tokens,...tokenPoints},
     ]
   });
   const todayChart=computed(()=>{
-    const configs={requests:{label:'调用次数',unit:'次'},tokens:{label:'Token',unit:'tokens'},credit:{label:'额度消耗',unit:'credit'}};
+    const configs={requests:{label:'调用次数',unit:'次'},tokens:{label:'Token',unit:'tokens'},credit:{label:'Credit(标价估算)',unit:'Credit'}};
     const kind=todayChartMetric.value,config=configs[kind],currentHour=new Date().getHours();
     const rows=(s.value?.today?.hourly||[]).map(row=>({...row,value:Number(row[kind]||0)}));
     const elapsed=rows.filter(row=>Number(row.hour)<=currentHour),max=Math.max(...elapsed.map(row=>row.value),0);
     return{...config,kind,currentHour,max,maxLabel:heatValue(kind,max),activeHours:elapsed.filter(row=>row.value>0).length,rows}
   });
   function heatStyle(v,max){const r=Math.max(0,Math.min(1,Number(v||0)/Math.max(Number(max||1),1)));if(!v)return{background:'#e8e9e6',color:'#777872'};if(r<.25)return{background:'#fff0ce',color:'#8a5d22'};if(r<.5)return{background:'#ffc98f',color:'#734217'};if(r<.75)return{background:'#ff9855',color:'#592b0e'};if(r<.9)return{background:'#f15f14',color:'#fff'};return{background:'#3f403e',color:'#fff'}}
-  function heatValue(kind,v){return kind==='tokens'?tok(v):(kind==='credit'?money(v):n(v))}
+  function heatValue(kind,v){return kind==='tokens'?tok(v):(kind==='credit'||kind==='tw'?money(v):n(v))}
+  function cacheStatusLabel(s){return ({accurate:'含 cache 实测',partial:'部分实测+反推',approx:'cache 反推',empty:'无数据'})[s]||'未知'}
+  function cacheStatusColor(s){return ({accurate:'#0a8a4a',partial:'#c47f00',approx:'#b04040',empty:'#999'})[s]||'#999'}
   function sparkHeight(card,v){v=Number(v||0);return(v?Math.max(7,Math.round(v/Math.max(card.max,1)*36)):4)+'px'}
   function hourBarHeight(v,max){v=Number(v||0);return(v?Math.max(6,Math.round(v/Math.max(max,1)*156)):3)+'px'}
   onMounted(load);
-  return{s,credit,ld,cld,err,updatedAt,todayLabel,todayUsage,todayChartMetric,todayChart,load,refreshCredit,n,tok,pct,money,ms,fmt,healthClass,healthText,rateWidth,age,expireMeta,mx,heatRows,heatStyle,heatValue,sparkHeight,hourBarHeight,I}
+  return{s,credit,overview,ld,cld,err,updatedAt,todayLabel,todayUsage,todayChartMetric,todayChart,load,refreshCredit,n,tok,pct,money,ms,fmt,healthClass,healthText,rateWidth,age,expireMeta,mx,heatRows,heatStyle,heatValue,cacheStatusLabel,cacheStatusColor,sparkHeight,hourBarHeight,I}
 },template:`
 <div>
   <div class="phead"><h1>运行总览</h1><p>网关状态、额度和调用强度</p></div>
@@ -113,11 +116,24 @@ export default {props:['token','toast'],setup(p){
         </div>
         <div class="empty" v-else>暂无低余额或即将到期提醒</div>
       </div>
+      <div class="card" v-if="overview&&overview.ok">
+        <div class="card-h">账户历史总消耗（估算）<span class="sub">当前已用 + 已过期积分（假设过期部分已用完）</span></div>
+        <div class="card-p">
+          <div class="metric-row">
+            <div class="metric"><div class="m-label">当前包已用</div><div class="m-value">{{money(overview.current_consumed)}}</div><div class="m-sub">账户级 · 官方</div></div>
+            <div class="metric"><div class="m-label">已过期积分</div><div class="m-value">{{money(overview.expired_total)}}</div><div class="m-sub">{{overview.expired_count}} 个过期包 · 假设用完</div></div>
+            <div class="metric"><div class="m-label">历史总消耗(估)</div><div class="m-value warn-text">{{money(overview.historical_estimate)}}</div><div class="m-sub">= 当前已用 + 过期</div></div>
+          </div>
+          <div class="hint" style="margin-top:10px">官方不回报"过期包实际用量"和"TraeSOLO 单产品消耗"，故历史总消耗为估算值，不可用于按产品/按日拆分；TraeWork 的精确消耗见上方真实明细。</div>
+        </div>
+      </div>
     </div>
 
     <div>
       <div class="card">
-        <div class="card-h">7 天调用强度<span class="sub">每日请求 · Token · Credit</span></div>
+        <div class="card-h">7 天调用强度<span class="sub">Credit=官方标价估算（含 cache 实测/反推，见角标） · Work真值=TraeWork 官方实扣</span>
+        <div class="status-line" style="margin-top:6px"><span class="tag" v-for="d in s.daily" :key="'cs-'+d.date" :style="{color:cacheStatusColor(d.cache_status), borderColor:cacheStatusColor(d.cache_status)}">{{d.date.slice(5)}}: {{cacheStatusLabel(d.cache_status)}}</span></div>
+        </div>
         <div class="chart-box" v-if="s.daily?.length">
           <div class="activity-scroll"><div class="activity-map">
             <div class="activity-corner">指标</div><div class="activity-head" v-for="d in s.daily" :key="'h-'+d.date">{{d.date.slice(5)}}</div>

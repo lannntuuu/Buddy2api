@@ -24,6 +24,7 @@ import httpx
 
 from storage import database as db
 from storage import fingerprint
+from storage.http_pool import get_client
 
 logger = logging.getLogger("buddy2api.auth_manager")
 
@@ -367,8 +368,8 @@ async def refresh_token(account: dict) -> bool:
         url = f"{backend_url()}/v2/plugin/auth/token/refresh"
 
         try:
-            async with httpx.AsyncClient(timeout=request_timeout(15)) as c:
-                r = await c.post(url, headers=headers, json={})
+            c = get_client()
+            r = await c.post(url, headers=headers, json={}, timeout=request_timeout(15))
             data = r.json()
         except (httpx.HTTPError, ValueError) as e:
             logger.warning("刷新 token 网络失败 (account=%s): %s", aid, e)
@@ -683,9 +684,9 @@ async def fetch_account_resources(
         )
 
     try:
-        async with httpx.AsyncClient(timeout=request_timeout(25)) as c:
-            r = await c.post(f"{backend_url()}/v2/billing/meter/get-user-resource", headers=headers, json={})
-            data = r.json()
+        c = get_client()
+        r = await c.post(f"{backend_url()}/v2/billing/meter/get-user-resource", headers=headers, json={}, timeout=request_timeout(25))
+        data = r.json()
     except (httpx.HTTPError, ValueError) as e:
         return _resource_failure(
             account,
@@ -805,9 +806,9 @@ async def fetch_checkin_status(
         )
 
     try:
-        async with httpx.AsyncClient(timeout=request_timeout(20)) as c:
-            r = await c.post(f"{backend_url()}/v2/billing/meter/checkin-activity-status", headers=headers, json={})
-            data = r.json()
+        c = get_client()
+        r = await c.post(f"{backend_url()}/v2/billing/meter/checkin-activity-status", headers=headers, json={}, timeout=request_timeout(20))
+        data = r.json()
     except (httpx.HTTPError, ValueError) as e:
         return _checkin_failure(account, status_code=0, message=str(e)[:240], allow_stale=allow_stale)
 
@@ -859,9 +860,9 @@ async def claim_daily_checkin(account: dict) -> dict:
         )
 
     try:
-        async with httpx.AsyncClient(timeout=request_timeout(30)) as c:
-            r = await c.post(f"{backend_url()}/v2/billing/meter/daily-checkin", headers=headers, json={})
-            data = r.json()
+        c = get_client()
+        r = await c.post(f"{backend_url()}/v2/billing/meter/daily-checkin", headers=headers, json={}, timeout=request_timeout(30))
+        data = r.json()
     except (httpx.HTTPError, ValueError) as e:
         return _checkin_result(account, ok=False, status_code=0, message=str(e)[:240])
 
@@ -892,6 +893,10 @@ async def claim_daily_checkin(account: dict) -> dict:
     result["age_seconds"] = 0
     if ok and account.get("id"):
         db.upsert_account_checkin_cache(account["id"], result)
+    if claimed:
+        from storage import credit_cache
+
+        credit_cache.invalidate()
     return result
 
 

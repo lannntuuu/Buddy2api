@@ -19,6 +19,7 @@ from providers.traesolo.constants import (
     CHANNEL_ID,
     DEFAULT_CONFIG,
     DISPLAY_NAME,
+    MODEL_RATES,
     STATIC_MODELS,
 )
 
@@ -31,6 +32,39 @@ class TraeSoloProvider:
     def list_models(self) -> list[dict]:
         # 动态表（若有可用账号且缓存新鲜）优先，否则内置 32 个 config_name。
         return [{"id": item} for item in chat.effective_model_ids()]
+
+    def fetch_model_rates(self) -> list[dict]:
+        """返回当前生效白名单里每个模型的明细（含官方消耗倍率 rate）。
+
+        traesolo 有官方 get_detail_param 接口，优先用缓存的官方明细（official=True）；
+        缓存未命中（无可用账号/未拉过）时回退到静态 MODEL_RATES（official=False，仍可显示倍率）。
+        """
+        effective_ids = chat.effective_model_ids()
+        details = {d["id"]: d for d in chat.dynamic_model_details()}
+        out: list[dict] = []
+        for mid in effective_ids:
+            d = details.get(mid)
+            if d is not None and d.get("official"):
+                out.append({
+                    "id": mid,
+                    "display_name": d.get("display_name") or mid,
+                    "rate": d.get("rate"),
+                    "context_window": d.get("context_window"),
+                    "official": True,
+                })
+            else:
+                out.append({
+                    "id": mid,
+                    "display_name": mid,
+                    "rate": MODEL_RATES.get(mid),
+                    "context_window": None,
+                    "official": False,
+                })
+        return out
+
+    async def refresh_dynamic_models(self, force: bool = False) -> bool:
+        """强制重新拉取官方模型表（get_detail_param），成功缓存 1h。"""
+        return await chat.refresh_dynamic_models(force=force)
 
     def alias_map(self) -> dict[str, str]:
         return channel_aliases(CHANNEL_ID, ALIASES)

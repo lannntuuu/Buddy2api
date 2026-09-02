@@ -1,10 +1,17 @@
 import {api,apiErr} from '../api.js';
 import {I} from '../icons.js';
-const{ref,reactive,computed,onMounted}=Vue;
+const{ref,reactive,computed,onMounted,onBeforeUnmount,nextTick,watch}=Vue;
 
 export default {props:['token','toast','saveToken'],setup(p){
   const defaults={backend_url:'https://copilot.tencent.com',default_domain:'www.codebuddy.cn',timeout:300};
   const s=ref({...defaults,base_url:'http://127.0.0.1:8787/v1',admin_auth:'本机 Cookie 自动验证'}),ld=ref(true),saving=ref(false),adminToken=ref(p.token||'');
+
+  // Channels panel — collapsed by default. Native <details> for a11y.
+  const chs=ref([]),chLd=ref(false),chBusy=ref(false),chErr=ref(''),
+        chEnvLocked=ref(false),chOpen=ref(false),chDirty=ref(false),
+        chListEl=ref(null);
+  let sortable=null;
+
   async function load(){ld.value=true;try{const cfg=await api.get('/admin/settings',p.token);s.value={...s.value,...cfg}}catch(e){p.toast(apiErr(e,'加载失败'),'err')}ld.value=false}
   async function save(){if(saving.value)return;saving.value=true;try{await api.put('/admin/settings',{backend_url:s.value.backend_url,default_domain:s.value.default_domain,timeout:Number(s.value.timeout)||300},p.token);p.toast('已保存')}catch(e){p.toast(apiErr(e,'保存失败'),'err')}saving.value=false}
   function resetDefaults(){s.value={...s.value,backend_url:defaults.backend_url,default_domain:defaults.default_domain,timeout:defaults.timeout};p.toast('已恢复默认','info')}
@@ -16,7 +23,85 @@ export default {props:['token','toast','saveToken'],setup(p){
     }catch(e){p.toast('登录请求失败：'+e.message,'err')}
   }
   async function clearAdminToken(){adminToken.value='';p.saveToken('');try{await fetch('/admin/logout',{method:'POST',credentials:'same-origin'})}catch(e){}p.toast('已清除','info')}
-  onMounted(load);return{s,ld,saving,adminToken,load,save,resetDefaults,saveAdminToken,clearAdminToken,I}
+
+  async function loadChannels(){
+    chLd.value=true;chErr.value='';
+    try{
+      const r=await api.get('/admin/channels',p.token);
+      // The 启用通道 panel shows ALL known channels so the admin can re-enable
+      // a previously disabled one. Channels with loaded=false (no provider
+      // registered) are still listed so the admin can see what's available.
+      chs.value=(r.channels||[]).map(c=>({...c}));
+      chEnvLocked.value=!!r.env_locked;
+      chDirty.value=false;
+      await nextTick();
+      initSortable();
+    }catch(e){chErr.value=apiErr(e,'加载通道失败')}
+    chLd.value=false;
+  }
+  function toggleChannel(id, on){
+    const c=chs.value.find(x=>x.id===id);if(c)c.enabled=on;
+    chDirty.value=true;
+  }
+
+  function initSortable(){
+    if(sortable){sortable.destroy();sortable=null}
+    if(!chListEl.value||typeof Sortable==='undefined')return;
+    sortable=Sortable.create(chListEl.value, {
+      animation:150,
+      ghostClass:'chk-ghost',
+      dragClass:'chk-drag',
+      // The whole .chk-row is the drag handle. workbuddy is locked to the top:
+      // refuse any move that touches it (either as the dragged element or the
+      // drop target).
+      onMove(evt){
+        const draggedId=evt.dragged?.dataset?.cid;
+        const relatedId=evt.related?.dataset?.cid;
+        if(draggedId==='workbuddy')return false;
+        if(relatedId==='workbuddy')return false;
+        return true;
+      },
+      onEnd(){
+        const ids=[...chListEl.value.querySelectorAll('.chk-row')].map(el=>el.dataset.cid);
+        const map=new Map(chs.value.map(c=>[c.id,c]));
+        chs.value=ids.map(id=>map.get(id)).filter(Boolean);
+        chDirty.value=true;
+      },
+    });
+  }
+
+  async function saveChannels(){
+    if(chBusy.value||chEnvLocked.value||!chDirty.value)return;
+    chBusy.value=true;
+    const ids=chs.value.filter(c=>c.enabled).map(c=>c.id);
+    const order=chs.value.map(c=>c.id);
+    try{
+      const r=await api.put('/admin/channels',{enabled:ids,order:order},p.token);
+      chs.value.forEach(c=>{c.enabled=(r.enabled||[]).includes(c.id)});
+      chDirty.value=false;
+      p.toast('通道已保存');
+    }catch(e){p.toast(apiErr(e,'保存失败'),'err')}
+    chBusy.value=false;
+  }
+
+  const chSummary=computed(()=>{
+    const names=chs.value.filter(c=>c.enabled).map(c=>c.display_name||c.id);
+    if(!names.length)return '未启用任何通道';
+    if(names.length<=3)return names.join(' · ');
+    return names.slice(0,3).join(' · ')+' · +'+(names.length-3)+' 个';
+  });
+
+  onMounted(async ()=>{await load();await loadChannels()});
+  onBeforeUnmount(()=>{if(sortable){sortable.destroy();sortable=null}});
+
+  // Re-bind sortable when the details panel toggles open. The DOM nodes exist
+  // either way, but we want a guarantee that the instance is fresh after the
+  // browser re-lays out the children.
+  watch(chOpen, async (open)=>{if(open){await nextTick();initSortable()}});
+
+  return{s,ld,saving,adminToken,load,save,resetDefaults,saveAdminToken,clearAdminToken,
+         chs,chLd,chBusy,chEnvLocked,chErr,chOpen,chDirty,chSummary,chListEl,
+         loadChannels,toggleChannel,saveChannels,I}
 },template:`
 <div>
   <div class="phead"><h1>设置</h1><p>运行配置与管理鉴权（客户端接入请前往「接入指南」页）</p></div>
@@ -26,12 +111,55 @@ export default {props:['token','toast','saveToken'],setup(p){
     <div class="card">
       <div class="card-h">后端参数<span class="sub">保存后对后续请求生效</span></div>
       <div class="card-p form-grid">
-        <div class="field"><label>后端地址</label><input v-model="s.backend_url" placeholder="https://copilot.tencent.com"/><div class="hint">上游 Work Buddy 服务地址。</div></div>
+        <div class="field"><label>后端地址</label><input v-model="s.backend_url" placeholder="https://copilot.tencent.com"/><div class="hint">上游 WorkBuddy 服务地址。</div></div>
         <div class="field"><label>默认域名</label><input v-model="s.default_domain" placeholder="www.codebuddy.cn"/><div class="hint">账号 auth 中没有 domain 时使用。</div></div>
         <div class="field"><label>请求超时（秒）</label><input v-model="s.timeout" type="number" min="30" max="900" placeholder="300"/><div class="hint">长上下文或慢模型建议保持 300。</div></div>
         <div class="field"><label>管理鉴权</label><input v-model="s.admin_auth" disabled/><div class="hint">本机 Web UI 自动使用 HttpOnly Cookie。</div></div>
       </div>
     </div>
+
+    <details class="card ch-card" :open="chOpen" @toggle="chOpen=$event.target.open">
+      <summary class="card-h ch-h">
+        <span class="ch-h-left">
+          <span class="ch-h-title">启用通道</span>
+          <span class="ch-summary">{{chSummary}}</span>
+          <span v-if="chDirty" class="ch-dirty">未保存</span>
+        </span>
+        <span class="ch-h-right">
+          <button class="btn s pri"
+                  @click.stop="saveChannels"
+                  :disabled="chBusy||chEnvLocked||!chDirty"
+                  @mousedown.stop @focus.stop>{{chBusy?'保存中':'保存通道'}}</button>
+          <span class="ch-caret" v-html="I.chevron"></span>
+        </span>
+      </summary>
+      <div class="card-p ch-panel">
+        <div v-if="chEnvLocked" class="status-line ch-warn">
+            检测到环境变量 <code>CB_GATEWAY_PROVIDERS</code>，通道开关为只读；如需在 UI 内调整，请去掉环境变量后重启。
+          </div>
+        <div v-if="chLd" class="load"><div class="spin"></div></div>
+        <div v-else-if="chErr" class="status-line err">{{chErr}}</div>
+        <div v-else class="ch-list" ref="chListEl">
+          <div v-for="c in chs" :key="c.id" class="chk-row" :data-cid="c.id">
+            <input type="checkbox"
+                   :checked="c.enabled"
+                   :disabled="chEnvLocked||c.id==='workbuddy'||chBusy"
+                   @change="toggleChannel(c.id, $event.target.checked)"
+                   @click.stop
+                   :data-cid="c.id"/>
+            <span class="chk-label">
+              <span class="chk-name">{{c.display_name}}</span>
+              <span class="chk-id">{{c.id}}</span>
+            </span>
+            <span v-if="c.id==='workbuddy'" class="chk-tag">必选</span>
+            <span v-else-if="!c.loaded" class="chk-tag warn">未加载</span>
+            <span v-else-if="c.checkin_supported" class="chk-tag">签到</span>
+            <span class="chk-grip" aria-hidden="true">⋮⋮</span>
+          </div>
+        </div>
+      </div>
+    </details>
+
     <div class="card">
       <div class="card-h">管理页登录<span class="sub">粘贴启动日志中的 Admin Token 登录</span></div>
       <div class="card-p">

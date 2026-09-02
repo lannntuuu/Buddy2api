@@ -77,6 +77,8 @@ def _log(api_key_info, account, model_name, stream, prompt_t, completion_t, tota
                 "status_code": status_code,
                 "error_msg": error_msg,
                 "increment_usage": increment_usage,
+                "client": (api_key_info or {}).get("_client_tag"),
+                "client_version": (api_key_info or {}).get("_client_version"),
             }
         )
     except Exception:

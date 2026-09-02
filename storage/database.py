@@ -61,6 +61,9 @@ def get_conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
+    # WAL 模式下 NORMAL 即可保证一致性（崩溃恢复最多丢一页提交），
+    # 每事务省一次 WAL fsync，写日志路径可显著降延迟。
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
@@ -202,10 +205,21 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_logs_status ON logs(status_code, finish_reason);
         CREATE INDEX IF NOT EXISTS idx_resource_cache_updated ON account_resource_cache(updated_at);
         CREATE INDEX IF NOT EXISTS idx_checkin_cache_date ON account_checkin_cache(checkin_date);
+        CREATE TABLE IF NOT EXISTS traework_daily_credit (
+            day          TEXT NOT NULL,
+            model_name  TEXT NOT NULL,
+            credits     REAL NOT NULL DEFAULT 0,
+            sessions    INTEGER NOT NULL DEFAULT 0,
+            updated_at  INTEGER NOT NULL,
+            PRIMARY KEY(day, model_name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_tw_daily_day ON traework_daily_credit(day);
         """)
         _migrate_accounts(conn)
         _migrate_api_keys(conn)
         _migrate_logs_provider(conn)
+        _migrate_logs_cache_tokens(conn)
+        _migrate_logs_reasoning(conn)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS api_key_daily_usage (
                 api_key_id    INTEGER NOT NULL,
@@ -369,6 +383,42 @@ def _migrate_logs_provider(conn: sqlite3.Connection):
     if "provider" not in cols:
         conn.execute("ALTER TABLE logs ADD COLUMN provider TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_provider ON logs(provider)")
+    _migrate_logs_client(conn)
+
+
+def _migrate_logs_cache_tokens(conn: sqlite3.Connection):
+    """Add logs.cache_read_tokens / cache_creation_tokens — needed for the 3-tier
+    TRAE credit formula (cache_read bills at a much lower price than fresh input)."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(logs)").fetchall()}
+    if "cache_read_tokens" not in cols:
+        conn.execute("ALTER TABLE logs ADD COLUMN cache_read_tokens INTEGER DEFAULT 0")
+    if "cache_creation_tokens" not in cols:
+        conn.execute("ALTER TABLE logs ADD COLUMN cache_creation_tokens INTEGER DEFAULT 0")
+    if "usage_json" not in cols:
+        # full upstream token_usage payload (cache fields, reasoning, etc.) — never lose data
+        conn.execute("ALTER TABLE logs ADD COLUMN usage_json TEXT")
+    if "credit_source" not in cols:
+        # 'live'=from real usage / 'historical_backfill'=cache ratio derived from official sessions
+        conn.execute("ALTER TABLE logs ADD COLUMN credit_source TEXT")
+
+
+def _migrate_logs_reasoning(conn: sqlite3.Connection):
+    """Add logs.reasoning_effort — the effective reasoning level actually sent
+    upstream for each request (client-explicit or gateway-injected per model)."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(logs)").fetchall()}
+    if "reasoning_effort" not in cols:
+        conn.execute("ALTER TABLE logs ADD COLUMN reasoning_effort TEXT")
+
+
+def _migrate_logs_client(conn: sqlite3.Connection):
+    """Add logs.client / client_version — inbound client tag + version for diagnosis."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(logs)").fetchall()}
+    if "client" not in cols:
+        conn.execute("ALTER TABLE logs ADD COLUMN client TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_client ON logs(client)")
+    if "client_version" not in cols:
+        conn.execute("ALTER TABLE logs ADD COLUMN client_version TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_client_version ON logs(client_version)")
 
 
 def _migrate_account_credentials(conn: sqlite3.Connection):
@@ -666,6 +716,67 @@ def get_account_checkin_cache(account_id: int, today_only: bool = True) -> Optio
 
 
 # ============================================================
+# TraeWork 官方消耗真值（query_user_usage_group_by_session）
+# 按天 + 模型聚合；由定时/手动同步写入，dashboard 直接读取。
+# 与 logs.credit（估算）无关——这是官方 session 接口的真值。
+# ============================================================
+
+def upsert_traework_daily_credit(rows: list[dict]) -> None:
+    """rows: [{day, model_name, credits, sessions}]，按 (day, model_name) upsert。"""
+    if not rows:
+        return
+    now = int(time.time())
+    with _lock:
+        conn = get_conn()
+        conn.executemany(
+            """
+            INSERT INTO traework_daily_credit (day, model_name, credits, sessions, updated_at)
+            VALUES (?,?,?,?,?)
+            ON CONFLICT(day, model_name) DO UPDATE SET
+                credits=excluded.credits,
+                sessions=excluded.sessions,
+                updated_at=excluded.updated_at
+            """,
+            [(r["day"], r["model_name"], r["credits"], r["sessions"], now) for r in rows],
+        )
+        conn.commit()
+        conn.close()
+
+
+def get_traework_daily_credit(days: int = 30) -> dict:
+    """返回 {day: {model_name: credits, ...}, ...} 以及按天汇总的 credits。
+    用于 dashboard 的 TraeWork 消耗真值展示。"""
+    conn = get_conn()
+    cutoff = date.today().isoformat()  # 仅作为排序参考，实际取最近 N 天由调用方筛
+    rows = conn.execute(
+        "SELECT day, model_name, credits, sessions FROM traework_daily_credit ORDER BY day"
+    ).fetchall()
+    conn.close()
+    by_day: dict[str, dict] = {}
+    for r in rows:
+        d = r["day"]
+        by_day.setdefault(d, {"models": {}, "credits": 0.0, "sessions": 0})
+        by_day[d]["models"][r["model_name"]] = float(r["credits"])
+        by_day[d]["credits"] += float(r["credits"])
+        by_day[d]["sessions"] += int(r["sessions"] or 0)
+    return by_day
+
+
+def get_traework_total_credit() -> float:
+    conn = get_conn()
+    val = conn.execute("SELECT COALESCE(SUM(credits),0) FROM traework_daily_credit").fetchone()[0]
+    conn.close()
+    return float(val)
+
+
+def latest_traework_sync_at() -> int:
+    conn = get_conn()
+    val = conn.execute("SELECT COALESCE(MAX(updated_at),0) FROM traework_daily_credit").fetchone()[0]
+    conn.close()
+    return int(val or 0)
+
+
+# ============================================================
 # API Keys
 # ============================================================
 
@@ -726,6 +837,16 @@ def delete_api_key(kid: int):
         conn = get_conn()
         conn.execute("DELETE FROM api_keys WHERE id=?", (kid,))
         conn.commit()
+        conn.close()
+
+
+def has_api_keys() -> bool:
+    """轻量判断是否存在 API key，避免鉴权热路径全表 JOIN 扫描。"""
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT 1 FROM api_keys LIMIT 1").fetchone()
+        return row is not None
+    finally:
         conn.close()
 
 
@@ -889,8 +1010,11 @@ def record_request(data: dict):
                 INSERT INTO logs
                     (api_key_id, api_key_name, account_id, account_name, model, stream,
                      prompt_tokens, completion_tokens, total_tokens, credit,
-                     finish_reason, duration_ms, status_code, error_msg, provider, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     cache_read_tokens, cache_creation_tokens,
+                     usage_json, credit_source,
+                     finish_reason, duration_ms, status_code, error_msg, provider, client, client_version,
+                     reasoning_effort, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     data.get("api_key_id"), data.get("api_key_name"),
@@ -898,9 +1022,15 @@ def record_request(data: dict):
                     data.get("model", ""), data.get("stream", 0),
                     data.get("prompt_tokens", 0), data.get("completion_tokens", 0),
                     data.get("total_tokens", 0), data.get("credit", 0),
+                    data.get("cache_read_tokens", 0), data.get("cache_creation_tokens", 0),
+                    data.get("usage_json"), data.get("credit_source"),
                     data.get("finish_reason", ""), data.get("duration_ms", 0),
                     data.get("status_code", 200), data.get("error_msg", ""),
-                    data.get("provider") or "workbuddy", now,
+                    data.get("provider") or "workbuddy",
+                    data.get("client"),
+                    data.get("client_version"),
+                    data.get("reasoning_effort"),
+                    now,
                 ),
             )
             if data.get("account_id") and data.get("increment_usage", True):
@@ -970,9 +1100,9 @@ def search_logs(filters: Optional[dict] = None) -> dict:
     if q:
         like = f"%{q}%"
         where.append(
-            "(api_key_name LIKE ? OR account_name LIKE ? OR model LIKE ? OR finish_reason LIKE ? OR error_msg LIKE ?)"
+            "(api_key_name LIKE ? OR account_name LIKE ? OR model LIKE ? OR finish_reason LIKE ? OR error_msg LIKE ? OR client LIKE ? OR client_version LIKE ?)"
         )
-        values.extend([like, like, like, like, like])
+        values.extend([like, like, like, like, like, like, like])
 
     status = str(filters.get("status") or "all").strip()
     if status == "success":
@@ -1070,6 +1200,8 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
                COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
                COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
                COALESCE(SUM(total_tokens), 0) AS total_tokens,
+               COALESCE(SUM(COALESCE(cache_read_tokens, 0)), 0) AS cache_read_tokens,
+               COALESCE(SUM(COALESCE(cache_creation_tokens, 0)), 0) AS cache_creation_tokens,
                COALESCE(SUM(credit), 0) AS credit,
                COALESCE(SUM(duration_ms), 0) AS duration_ms
         FROM logs{sql_where}
@@ -1086,6 +1218,8 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
             "credit": 0.0,
             "duration_ms": 0,
         }
@@ -1095,6 +1229,8 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
         summary["prompt_tokens"] += int(row["prompt_tokens"])
         summary["completion_tokens"] += int(row["completion_tokens"])
         summary["total_tokens"] += int(row["total_tokens"])
+        summary["cache_read_tokens"] += int(row["cache_read_tokens"])
+        summary["cache_creation_tokens"] += int(row["cache_creation_tokens"])
         summary["credit"] += float(row["credit"])
         summary["duration_ms"] += int(row["duration_ms"])
 
@@ -1105,6 +1241,11 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
             int(out["duration_ms"] / out["requests"]) if out["requests"] else 0
         )
         out.pop("duration_ms", None)
+        # cache hit ratio for the row: cache_read / (cache_read + fresh_input)
+        # 干净视角：fresh = prompt - cache_read (clamp); cache 只对 prompt 起作用
+        fresh = max(0, out["prompt_tokens"] - out["cache_read_tokens"])
+        denom = fresh + out["cache_read_tokens"]
+        out["cache_hit_ratio"] = round(out["cache_read_tokens"] / denom, 4) if denom else 0.0
         return out
 
     providers_out: dict[str, dict] = {}
@@ -1119,6 +1260,8 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
             "prompt_tokens": int(row["prompt_tokens"]),
             "completion_tokens": int(row["completion_tokens"]),
             "total_tokens": int(row["total_tokens"]),
+            "cache_read_tokens": int(row["cache_read_tokens"]),
+            "cache_creation_tokens": int(row["cache_creation_tokens"]),
             "credit": round(float(row["credit"]), 4),
             "avg_duration_ms": (
                 int(row["duration_ms"] / row["requests"]) if row["requests"] else 0
@@ -1209,7 +1352,11 @@ def get_stats() -> dict:
         SELECT date(created_at, 'unixepoch', 'localtime') as date,
                COUNT(*) as requests,
                COALESCE(SUM(total_tokens), 0) as tokens,
-               COALESCE(SUM(credit), 0) as credits
+               COALESCE(SUM(credit), 0) as credits,
+               COALESCE(SUM(COALESCE(cache_read_tokens, 0)), 0) as cache_tokens,
+               SUM(CASE WHEN credit_source='live' THEN 1 ELSE 0 END) as n_live,
+               SUM(CASE WHEN credit_source='historical_backfill' THEN 1 ELSE 0 END) as n_backfill,
+               COUNT(*) as n_total
         FROM logs WHERE created_at >= ?
         GROUP BY date ORDER BY date
     """, (seven_days_ago,)).fetchall()
@@ -1223,7 +1370,46 @@ def get_stats() -> dict:
             "requests": 0,
             "tokens": 0,
             "credits": 0,
+            "cache_tokens": 0,
+            "n_live": 0,
+            "n_backfill": 0,
+            "n_total": 0,
         }))
+
+    # Credit 口径说明：logs.credit 现为三档标价公式（traesolo），traework 的 logs.credit 恒 0。
+    # TraeWork 官方 session 真值单独放 traework_credit 字段（不与标价估算混加——量纲不同）。
+    # credit_source 标记该天 credit 的构成，供前端区分展示。
+    try:
+        tw_by_day = get_traework_daily_credit(days=30)
+    except Exception:
+        tw_by_day = {}
+    for d in daily:
+        tw = tw_by_day.get(d["date"]) or {}
+        tw_c = round(float(tw.get("credits") or 0), 4)
+        d["traework_credit"] = tw_c
+        base = float(d.get("credits") or 0)
+        if tw_c > 0 and base <= 0:
+            d["credit_source"] = "official"      # 仅 Work 真值
+        elif tw_c > 0:
+            d["credit_source"] = "mixed"          # 标价估算 + Work 真值并存
+        else:
+            d["credit_source"] = "pricelist"      # 仅标价估算
+        d["credit_is_official"] = tw_c > 0 and base <= 0  # 兼容旧字段语义
+        # cache 状态: live = 全部行带 cache 字段，backfill = 用官方 session 比例反推
+        n_live = int(d.get("n_live") or 0)
+        n_backfill = int(d.get("n_backfill") or 0)
+        n_total = int(d.get("n_total") or 0)
+        # 0-token 行无意义（不参与 credit 计算），当 n_total==0 才算 empty
+        if n_total == 0 or d.get("requests", 0) == 0:
+            d["cache_status"] = "empty"
+        elif n_live == n_total:
+            d["cache_status"] = "accurate"   # 100% 实测
+        elif n_live > 0:
+            d["cache_status"] = "partial"    # 部分实测 + 部分反推（或 0-token）
+        elif n_backfill == n_total:
+            d["cache_status"] = "approx"     # 全反推
+        else:
+            d["cache_status"] = "approx"
 
     # 模型使用统计
     model_stats = conn.execute("""

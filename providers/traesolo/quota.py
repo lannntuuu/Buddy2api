@@ -24,8 +24,8 @@ async def _post_json(account: dict, path: str, timeout: float = 30.0):
     """POST 空 JSON 到 ug 端点，返回 (status_code, data, error_message)。"""
     url = f"{UG_HOST}{path}"
     try:
-        async with httpx.AsyncClient(timeout=timeout, transport=_transport()) as client:
-            response = await client.post(url, headers=ug_headers(account), json={})
+        client = _quota_client()
+        response = await client.post(url, headers=ug_headers(account), json={}, timeout=timeout)
     except httpx.HTTPError as exc:
         return 0, {}, str(exc)[:240]
     try:
@@ -37,10 +37,10 @@ async def _post_json(account: dict, path: str, timeout: float = 30.0):
     return response.status_code, data, ""
 
 
-def _transport():
+def _quota_client():
     from providers.traesolo import chat as _chat
 
-    return _chat._TRANSPORT
+    return _chat._get_quota_client()
 
 
 async def fetch_quota(account: dict) -> QuotaSnapshot:
@@ -156,3 +156,24 @@ async def claim_checkin(account: dict) -> dict:
         credit=credit,
         message=str(data.get("message") or "success"),
     )
+
+
+# --- 账户级权益 / 过期积分（用于补全"历史总消耗"估算）---
+ENTITLEMENT_LIST_PATH = "/trae/api/v2/pay/user_current_entitlement_list"
+EXPIRED_ENTS_PATH = "/trae/api/v2/pay/expired_ents"
+
+
+async def fetch_entitlement_list(account: dict) -> dict:
+    """当前权益包列表（含 usage_summary.consumed_amount = 当前包已用积分）。"""
+    status_code, data, error = await _post_json(account, ENTITLEMENT_LIST_PATH)
+    if error:
+        return {"ok": False, "error": error}
+    return {"ok": True, "data": data or {}}
+
+
+async def fetch_expired_ents(account: dict) -> dict:
+    """已过期积分包列表（每个只有 credits_limit 上限，无"已用"字段）。"""
+    status_code, data, error = await _post_json(account, EXPIRED_ENTS_PATH)
+    if error:
+        return {"ok": False, "error": error}
+    return {"ok": True, "data": data or {}}

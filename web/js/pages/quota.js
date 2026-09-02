@@ -7,7 +7,7 @@ export default {props:['token','toast'],setup(p){
   function busyKey(id,k){return busy.value[id+'-'+k]}
   function withBusy(id,k,fn){busy.value={...busy.value,[id+'-'+k]:true};try{return fn()}finally{const o={...busy.value};delete o[id+'-'+k];busy.value=o}}
   function chName(a){return a.provider||'workbuddy'}
-  async function load(){ld.value=true;try{l.value=await api.get('/admin/accounts',p.token)}catch(e){p.toast(apiErr(e),'err')}ld.value=false;await loadCheckins(false);await loadCredit(false)}
+  async function load(){ld.value=true;try{l.value=await api.get('/admin/accounts',p.token)}catch(e){p.toast(apiErr(e),'err')}ld.value=false;await Promise.all([loadCheckins(false),loadCredit(false)])}
   async function loadCredit(force){try{creditSum.value=await api.get('/admin/credit-summary'+(force?'?force=1':''),p.token)}catch(e){if(force)p.toast(apiErr(e,'官方额度加载失败'),'err')}}
   async function loadCheckins(force=false){checkinLoading.value=true;try{const r=await api.get('/admin/accounts/checkin-status-all'+(force?'?force=1':''),p.token);checkinSummary.value=r;const map={};(r.results||[]).forEach(x=>{map[x.account_id]=x});checkins.value=map}catch(e){if(force)p.toast(apiErr(e,'签到状态加载失败'),'err')}checkinLoading.value=false}
   async function refreshAllResources(){if(officialRefreshing.value)return;officialRefreshing.value=true;const targets=l.value.filter(a=>a.status==='active');await Promise.all(targets.map(a=>refreshResource(a,true,true)));officialRefreshing.value=false;p.toast('官方额度已刷新 '+targets.length+' 个账号','ok')}

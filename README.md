@@ -12,7 +12,7 @@ Buddy2api 在本机提供 `http://127.0.0.1:8787/v1`。你在官方客户端里�
 
 五个通道默认都开。没装、没登录的通道，账号页检测为空，不会自动入库。Trae SOLO 不走本机登录目录，走管理页「Web 登录」或粘贴回调 URL（见下）。
 
-`powershell
+```powershell
 python -m gateway.server
 ```
 
@@ -233,23 +233,76 @@ curl -X PUT -H "Authorization: Bearer <admin-token>" -H "Content-Type: applicati
 
 ## 环境变量
 
+> 全部可选，都有合理的默认值；绝大多数场合**什么都不用设**。变量按用途分组，单说明里括号内为该变量的默认值，`*` 表示只在特殊场合用。
+
+### 核心 / 启动
 | 变量 | 说明 |
 |---|---|
-| `CB_GATEWAY_PROVIDERS` | 启用哪些通道，逗号分隔。默认 `workbuddy,qclaw,qwenwork,traework,traesolo`。只想留一家时再改 |
-| `CB_GATEWAY_AUTO_IMPORT` | 设 `1` 则启动时自动导入。默认 `0` |
-| `CB_GATEWAY_CHECKIN_GAP_MS` | 一键领取间隔，默认 `800` |
-| `CB_AUTH_DIR` | WorkBuddy 登录目录 |
-| `CB_QCLAW_AUTH_DIR` | QClaw 登录目录 |
-| `CB_QWENWORK_AUTH_DIR` | QwenWork 登录目录 |
-| `CB_TRAEWORK_AUTH_DIR` | TraeWork `storage.json` 所在目录 |
-| `CB_TRAESOLO_CALLBACK_BASE` | Trae SOLO 登录回调基地址（远程部署时指向能访问服务的地址，默认用请求自身地址） |
-| `CB_TRAESOLO_AUTH_DIR` | Trae SOLO 凭证 JSON 扫描目录（可选；该通道默认不扫目录，走 Web 登录） |
-| `CB_HOST_AUTH_DIR` | Docker 脚本用的本机 WorkBuddy 目录 |
-| `CB_GATEWAY_ADMIN_TOKEN` | 固定管理 Token |
-| `CB_GATEWAY_DB_PATH` | 数据库路径 |
-| `CB_GATEWAY_MASTER_KEY` | 跨系统搬数据库时的加密主密钥 |
-| `CB_GATEWAY_LOG_RETENTION_DAYS` | 日志保留天数，默认 `90` |
-| `CB_GATEWAY_USER_AGENT` | 只影响 WorkBuddy 出站头，默认 `CLI/2.109.2 CodeBuddy/2.109.2` |
+| `CB_GATEWAY_PROVIDERS` | 启用哪些通道，逗号分隔。默认 `workbuddy,qclaw,qwenwork,traework,traesolo`。只想留一家时改 |
+| `CB_GATEWAY_AUTO_IMPORT` | 设 `1` 则启动时自动扫描导入账号。默认 `0` |
+| `CB_GATEWAY_CHECKIN_GAP_MS` | 一键领取时相邻账号的间隔毫秒（防风控，不可设太小）。默认 `800` |
+| `CB_GATEWAY_ADMIN_TOKEN` | 固定管理 Token。默认自动生成（启动日志打印一次，管理页「设置」粘贴一次即可拿 Cookie） |
+| `CB_GATEWAY_DB_PATH` | 数据库文件路径。默认项目下 `data/` 内 |
+| `CB_GATEWAY_MASTER_KEY` | 跨系统搬数据库时手动指定的加密主密钥。默认每实例自动生成（换机器或删 data 会失效，需迁移时用） |
+| `CB_GATEWAY_CREDENTIAL_KEY_FILE` * | 读取加密主密钥的文件路径（Docker 场景注入用）。默认空，即用 `CB_GATEWAY_MASTER_KEY` 或自动生成 |
+| `CB_GATEWAY_SECURE_COOKIE` | 设 `1` 强制管理 Cookie 走 Secure（https 或反向代理后）。默认跟随请求协议 |
+| `CB_GATEWAY_LOG_RETENTION_DAYS` | 日志保留天数。默认 `90` |
+
+### 各通道登录目录
+| 通道 | 变量 | 说明 |
+|---|---|---|
+| WorkBuddy | `CB_AUTH_DIR` | 本机登录目录 |
+| QClaw | `CB_QCLAW_AUTH_DIR` | 本机登录目录 |
+| QwenWork | `CB_QWENWORK_AUTH_DIR` | 本机登录目录 |
+| TraeWork | `CB_TRAEWORK_AUTH_DIR` | `storage.json` 所在目录 |
+| Trae SOLO | `CB_TRAESOLO_CALLBACK_BASE` | 登录回调基地址（远程部署时指向能从外网访问服务的地址，默认用请求自身地址） |
+| Trae SOLO | `CB_TRAESOLO_AUTH_DIR` * | 凭证 JSON 扫描目录（可选；该通道默认不扫目录，走 Web 登录） |
+
+> `CB_HOST_AUTH_DIR` 仅 Docker 部署脚本内部使用（挂载的本机 WorkBuddy 目录），`CB_CONTAINER_AUTH_DIR` 是容器内的挂载点（默认 `/auth`），一般不用管。
+
+### WorkBuddy 出站指纹（User-Agent / 版本头）
+| 变量 | 说明 |
+|---|---|
+| `CB_GATEWAY_USER_AGENT` | 整体覆盖整个 User-Agent。默认 `CLI/2.109.2 CodeBuddy/2.109.2`，设 `codebuddy2openai/2.0` 可回退历史 UA。只影响 WorkBuddy 出站 |
+| `CB_GATEWAY_IDE_VERSION` | CLI 版本号，驱动 UA 与 X-IDE-Version。默认 `2.109.2` |
+| `CB_GATEWAY_STAINLESS_OS` * | 上报的操作系统字符串。默认按当前平台推断 |
+| `CB_GATEWAY_STAINLESS_PACKAGE_VERSION` * | `stainless` 包版本。默认 `5.10.1` |
+| `CB_GATEWAY_NODE_VERSION` * | Node 运行时版本。默认 `v22.13.1` |
+
+### 请求 / 风险控制
+| 变量 | 说明 |
+|---|---|
+| `CB_GATEWAY_CORS_ORIGINS` | 允许的 CORS 来源，逗号分隔。默认 `http://127.0.0.1:8787,http://localhost:8787` |
+| `CB_GATEWAY_ALLOW_UNAUTHENTICATED_API` | 设 `1` 允许无 API key 请求（只适合本机临时测）。默认 `0` |
+| `CB_GATEWAY_MAX_BODY_BYTES` | 请求体上限字节。默认 `10MiB` |
+| `CB_GATEWAY_USAGE_RATE_LIMIT` | /usage 接口秒级限流，设 `0` 关闭。默认 `30` |
+| `CB_GATEWAY_TOOL_STALL_RETRY` | 工具停转时自动用 `tool_choice=required` 重试一次。默认 `1` |
+| `CB_GATEWAY_TOOL_STALL_FAIL_STREAM` * | 流式工具停转且重试也失败时，把回合标记为失败而不是返回正文。默认 `0` |
+
+### 思考档位（按模型）
+
+不再用环境变量，改为在管理页「通道与模型 → 各平台设置」里**按模型**配置（存数据库，即时生效）：
+
+- 每个模型一个下拉：`默认（不注入）` / `none` / `minimal` / `low` / `medium` / `high` / `max`；另有「通道默认」档位作用于未单独设置的模型。
+- 优先级：客户端显式 `reasoning_effort` > 按模型配置 > 通道默认 > 不注入（跟随上游默认）。
+- 仅 WorkBuddy 通道上游（`copilot.tencent.com`）确认支持该参数；其它通道在 UI 显示「—」。
+- 实测原生接受值见 `docs/design/per-model-reasoning-effort.md`。注意：deepseek/glm/auto 默认不思考、选档位=开启思考（会变慢）；想最快可给 DeepSeek 选 `low` 或留空。`off` 上游不接受（11150）。
+
+### content 精简（workbuddy 11128 拦截自愈）
+| 变量 | 说明 |
+|---|---|
+| `CB_GATEWAY_COMPACT_CHARS` | 手动全局开启精简超大请求体，并指定单字段字符阈值。默认 `0`（关闭，走下方的按通道自愈） |
+| `CB_GATEWAY_COMPACT_ARMED_CHARS` * | 某通道真触发过一次 11128 后，该通道自动精简的单字段阈值。默认 `3000` |
+| `CB_GATEWAY_COMPACT_SYSTEM_CHARS` * | system 消息阈值（纯头部截断，实测其尾部 git/commit 块是 11128 触发源）。默认 `5000` |
+
+> 详见 `docs/workbuddy-11128-troubleshoot.md`：正常请求默认不截断，某通道返回 11128 后自动武装并精简（system 纯头切 5000、超大 content/reasoning 头切、tools 描述精简，结构键与 `tool_calls` 永不截），`/admin/stats` 的 `compaction` 字段可看生效情况。
+
+### 调试
+| 变量 | 说明 |
+|---|---|
+| `CB_DEBUG_DUMP` * | 把 responses 协议的请求/响应（脱敏 JSON）dump 到 `upstream/.debug/` 便于排查出站协议。默认关 |
+| `CB_DEBUG_DUMP_INCLUDE_CONTENT` * | dump 时连 content 一起写（默认脱敏不含正文）。默认关，仅随 `CB_DEBUG_DUMP` 一起用 |
+| `CB_DOCKER` * | 标记运行在 Docker 内（内部判断用）。默认空 |
 
 ## Credit 与 Token 统计
 

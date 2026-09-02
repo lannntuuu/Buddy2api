@@ -5,14 +5,98 @@ from storage import database as db
 from accounts import auth_manager
 
 
-def test_default_registry_enables_wave1_channels(monkeypatch):
+def _fresh_default(monkeypatch):
+    """Reset db.get_setting to return defaults so we hit the code-fallback path."""
+    monkeypatch.setattr(db, "get_setting", lambda key, default=None: default)
+
+
+def test_default_registry_first_boot_alphabetical_with_workbuddy_locked(monkeypatch):
+    """Fresh boot with no env var and no db write: alphabetical, but locked to workbuddy first."""
     import providers
 
     monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
-    assert providers.enabled_provider_ids() == ["workbuddy", "qclaw", "qwenwork", "traework", "traesolo"]
+    _fresh_default(monkeypatch)
+    got = providers.enabled_provider_ids()
+    # workbuddy is forced to the front; the rest follow alphabetical order.
+    assert got[0] == "workbuddy"
+    tail = got[1:]
+    assert sorted(tail) == tail
+    # The full set is the known channel set.
+    assert set(got) == set(providers.KNOWN_CHANNEL_IDS)
+
+
+def test_env_var_overrides_db(monkeypatch):
+    import providers
+
+    _fresh_default(monkeypatch)
     monkeypatch.setenv("CB_GATEWAY_PROVIDERS", "workbuddy")
     assert providers.enabled_provider_ids() == ["workbuddy"]
     assert providers.get_provider("qclaw") is None
+
+
+def test_set_enabled_channels_persists_and_lock_first(monkeypatch, isolated_db):
+    """UI write path: env unset, db.set_setting wins."""
+    import providers
+
+    monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
+    _fresh_default(monkeypatch)
+    assert providers.env_locked() is False
+    saved = providers.set_enabled_channels(["gmi", "qwenwork"])
+    # workbuddy forced on, then user's order preserved with gmi / qwenwork.
+    assert saved == ["workbuddy", "gmi", "qwenwork"]
+
+    import pytest
+    with pytest.raises(ValueError):
+        providers.set_enabled_channels(["workbuddy", "nope-not-a-channel"])
+
+
+def test_set_enabled_channels_with_order(monkeypatch, isolated_db):
+    """User drags to reorder. The order should be respected; workbuddy still first."""
+    import providers
+
+    monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
+    _fresh_default(monkeypatch)
+    saved = providers.set_enabled_channels(
+        ids=["workbuddy", "qclaw", "qwenwork", "traework", "traesolo"],
+        order=["workbuddy", "traesolo", "traework", "qwenwork", "qclaw"],
+    )
+    # workbuddy first, then the user's drag order.
+    assert saved == ["workbuddy", "traesolo", "traework", "qwenwork", "qclaw"]
+    # And enabled_provider_ids honours that order on subsequent reads.
+    assert providers.enabled_provider_ids() == saved
+    assert providers.get_channel_order() == saved
+
+
+def test_workbuddy_is_locked_first_after_drag(monkeypatch, isolated_db):
+    """Even if the user puts workbuddy in the middle, the lock_first post-condition
+    puts it back at index 0."""
+    import providers
+
+    monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
+    _fresh_default(monkeypatch)
+    saved = providers.set_enabled_channels(
+        ids=["workbuddy", "qclaw", "qwenwork"],
+        order=["qclaw", "workbuddy", "qwenwork"],
+    )
+    assert saved[0] == "workbuddy"
+
+
+def test_disabled_channels_filtered_out(monkeypatch, isolated_db):
+    """A disabled channel must not appear in enabled_provider_ids — this is the
+    single source of truth for 'what the rest of the system sees'."""
+    import providers
+
+    monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
+    _fresh_default(monkeypatch)
+    providers.set_enabled_channels(
+        ids=["workbuddy", "qclaw"],  # qwenwork / traework / traesolo / gmi off
+        order=["workbuddy", "qclaw"],
+    )
+    enabled = providers.enabled_provider_ids()
+    assert set(enabled) == {"workbuddy", "qclaw"}
+    assert providers.is_channel_enabled("qwenwork") is False
+    assert providers.is_channel_enabled("gmi") is False
+    assert providers.get_provider("traesolo") is None
 
 
 def test_accounts_and_keys_have_channel_columns(isolated_db):
