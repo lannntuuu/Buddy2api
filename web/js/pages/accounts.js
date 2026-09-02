@@ -111,7 +111,7 @@ export default {props:['token','toast'],setup(p){
           <select class="selectctl" v-model="discChannel"><option v-for="c in channels" :key="c.id" :value="c.id">{{c.display_name||c.id}}</option></select>
         </div>
       </div>
-      <div v-if="gmiMode" style="margin-bottom:12px;border:1px solid #e8e8e8;border-radius:8px;padding:12px">
+      <div v-if="gmiMode" class="notebox">
         <div class="field"><label>API Key（支持裸 Key / "Bearer xxx" / {"api_key":"..."} 三种粘贴形态）</label><textarea v-model="gmiKey" placeholder="粘贴 API Key" style="font-family:var(--mono)"></textarea></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <div class="field" style="flex:1;min-width:180px"><label>昵称（可选）</label><input v-model="gmiNick" placeholder="如 main"/></div>
@@ -124,7 +124,7 @@ export default {props:['token','toast'],setup(p){
         </div>
       </div>
       <template v-else>
-      <div v-if="discChannel==='traesolo'" style="margin-bottom:12px;border:1px solid #e8e8e8;border-radius:8px;padding:12px">
+      <div v-if="discChannel==='traesolo'" class="notebox">
         <h4 style="margin:0 0 8px">Web 登录（TRAE SOLO）</h4>
         <p class="hint" style="margin:0 0 10px">点击「发起网页登录」后在新窗口完成 TRAE 登录。本机部署时浏览器会自动跳回 <span class="mono">{{solo.callbackUrl||'/authorize'}}</span> 完成入库；远程部署够不到回调时，把浏览器地址栏里的完整回调 URL 粘到下方点「手动完成」。</p>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">

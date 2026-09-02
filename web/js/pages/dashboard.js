@@ -49,7 +49,7 @@ export default {props:['token','toast'],setup(p){
   <div class="phead"><h1>运行总览</h1><p>网关状态、额度和调用强度</p></div>
   <div class="tbar"><button class="btn s" @click="load(false)" :disabled="ld"><span v-html="I.refresh"></span>{{ld?'刷新中':'刷新'}}</button><button class="btn s" @click="refreshCredit" :disabled="cld||ld">{{cld?'刷新中':'强制刷新官方额度'}}</button><div class="spacer"></div><span class="tag" v-if="updatedAt">更新 {{updatedAt}}</span><span class="tag" v-if="s">Base URL · 127.0.0.1:8787/v1</span></div>
   <div v-if="ld" class="load"><div class="spin"></div></div>
-  <div class="card card-p empty" v-else-if="err"><div class="em">!</div><p style="font-weight:600;color:var(--fg)">{{err}}</p><p style="margin-top:6px">本机访问通常刷新页面即可重新获取管理凭证。</p></div>
+  <div class="card card-p empty" v-else-if="err"><div class="em">!</div><p class="text-bold" style="color:var(--fg)">{{err}}</p><p class="mt-1">本机访问通常刷新页面即可重新获取管理凭证。</p></div>
   <template v-else-if="s">
     <div class="dash-hero">
       <div>
@@ -99,7 +99,7 @@ export default {props:['token','toast'],setup(p){
             <div class="metric"><div class="m-label">7 天内到期</div><div class="m-value" :class="{'warn-text':Number(credit.expiring_7d_total)>0}">{{money(credit.expiring_7d_total)}}</div><div class="m-sub">仅 WorkBuddy</div></div>
             <div class="metric"><div class="m-label">30 天内到期</div><div class="m-value" :class="{'warn-text':Number(credit.expiring_30d_total)>0}">{{money(credit.expiring_30d_total)}}</div><div class="m-sub">{{credit.package_count}} 个额度包</div></div>
           </div>
-          <div class="status-line" style="margin-top:12px">
+          <div class="status-line mt-3">
             <span class="badge" :class="credit.failed_accounts?'warn':'ok'">失败 {{credit.failed_accounts}}</span>
             <span class="badge" :class="credit.stale_accounts?'warn':'ok'">旧缓存 {{credit.stale_accounts}}</span>
             <span class="tag">更新时间 {{fmt(credit.updated_at)}}</span>
@@ -124,7 +124,7 @@ export default {props:['token','toast'],setup(p){
             <div class="metric"><div class="m-label">已过期积分</div><div class="m-value">{{money(overview.expired_total)}}</div><div class="m-sub">{{overview.expired_count}} 个过期包 · 假设用完</div></div>
             <div class="metric"><div class="m-label">历史总消耗(估)</div><div class="m-value warn-text">{{money(overview.historical_estimate)}}</div><div class="m-sub">= 当前已用 + 过期</div></div>
           </div>
-          <div class="hint" style="margin-top:10px">官方不回报"过期包实际用量"和"TraeSOLO 单产品消耗"，故历史总消耗为估算值，不可用于按产品/按日拆分；TraeWork 的精确消耗见上方真实明细。</div>
+          <div class="hint mt-3">官方不回报"过期包实际用量"和"TraeSOLO 单产品消耗"，故历史总消耗为估算值，不可用于按产品/按日拆分；TraeWork 的精确消耗见上方真实明细。</div>
         </div>
       </div>
     </div>
@@ -132,7 +132,7 @@ export default {props:['token','toast'],setup(p){
     <div>
       <div class="card">
         <div class="card-h">7 天调用强度<span class="sub">Credit=官方标价估算（含 cache 实测/反推，见角标） · Work真值=TraeWork 官方实扣</span>
-        <div class="status-line" style="margin-top:6px"><span class="tag" :class="cacheStatusClass(d.cache_status)" v-for="d in s.daily" :key="'cs-'+d.date">{{d.date.slice(5)}}: {{cacheStatusLabel(d.cache_status)}}</span></div>
+        <div class="status-line mt-2"><span class="tag" :class="cacheStatusClass(d.cache_status)" v-for="d in s.daily" :key="'cs-'+d.date">{{d.date.slice(5)}}: {{cacheStatusLabel(d.cache_status)}}</span></div>
         </div>
         <div class="chart-box" v-if="s.daily?.length">
           <div class="activity-scroll"><div class="activity-map">

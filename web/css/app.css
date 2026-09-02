@@ -583,6 +583,21 @@ tr:hover td{background:var(--accent-soft)}
 /* ---- generic row ------------------------------------------- */
 .row{display:flex;align-items:center;gap:var(--sp-2)}
 
+/* ---- utilities (replace the worst inline-style offenders) -- */
+.mt-1{margin-top:var(--sp-1)}.mt-2{margin-top:var(--sp-2)}.mt-3{margin-top:var(--sp-3)}.mt-4{margin-top:var(--sp-4)}.mt-5{margin-top:var(--sp-5)}
+.mb-1{margin-bottom:var(--sp-1)}.mb-2{margin-bottom:var(--sp-2)}.mb-3{margin-bottom:var(--sp-3)}.mb-4{margin-bottom:var(--sp-4)}
+.ml-1{margin-left:var(--sp-1)}.ml-2{margin-left:var(--sp-2)}
+.text-err{color:var(--err)}.text-warn{color:var(--warn)}.text-muted{color:var(--fg-3)}
+.text-bold{font-weight:700}
+.tcell{width:100%;padding:6px 9px;border:1px solid var(--border-strong);border-radius:var(--r-m);
+  font:inherit;font-size:var(--fs-b);font-family:var(--mono);background:var(--bg-elevated);outline:none;
+  transition:border-color var(--dur-fast) var(--ease),box-shadow var(--dur-fast) var(--ease)}
+.tcell:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
+.tcell.warn{border-color:var(--err);background:var(--err-bg)}
+
+.notebox{border:1px solid var(--border);border-radius:var(--r-m);padding:var(--sp-3);margin-bottom:var(--sp-3)}
+.notebox.warn{border-color:var(--accent-border);background:var(--warn-bg)}
+
 /* =============================================================
    Responsive (two breakpoints: 1180 tablet, 760 mobile)
    ============================================================= */
