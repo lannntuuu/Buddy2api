@@ -420,6 +420,12 @@ async def health():
     }
 
 
+@app.get("/admin/meta")
+async def meta():
+    """Lightweight metadata for the admin console. No auth, no DB."""
+    return {"title": "Buddy 2 API", "version": VERSION}
+
+
 @app.get("/v1/models")
 async def list_models(
     authorization: str | None = Header(default=None),
