@@ -567,9 +567,9 @@ tr:hover td{background:var(--accent-soft)}
 .ch-list .chk-row.chk-ghost{opacity:.4;background:var(--warn-bg);border-color:var(--warn)}
 .ch-list .chk-row.chk-drag{box-shadow:0 6px 20px rgba(0,0,0,.12);
   border-color:var(--accent);background:var(--bg-elevated)}
-.ch-grip{margin-left:6px;color:var(--fg-3);font-size:14px;line-height:1;
+.chk-grip{margin-left:6px;color:var(--fg-3);font-size:14px;line-height:1;
   user-select:none;opacity:0;transition:opacity var(--dur-fast) var(--ease)}
-.ch-list .chk-row:hover .ch-grip{opacity:1}
+.ch-list .chk-row:hover .chk-grip{opacity:1}
 
 /* ---- quick row (legacy quick) ------------------------------ */
 .quick{display:grid;gap:var(--sp-2)}
