@@ -187,7 +187,7 @@ def test_ui_channel_fallback_covers_apikey_channels():
     from pathlib import Path
 
     accounts_js = (
-        Path(__file__).resolve().parent.parent / "web" / "js" / "pages" / "accounts.js"
+        Path(__file__).resolve().parent.parent / "src" / "web" / "js" / "pages" / "accounts.js"
     ).read_text(encoding="utf-8")
     m = re.search(r"channels=ref\(\[(.*?)\]\)", accounts_js, re.S)
     assert m, "accounts.js fallback channels list not found"

@@ -4,9 +4,9 @@ These are not part of the production codebase. They are kept here
 (git history preserved) because they document design decisions and
 historical debugging:
 
-- `_analysis_*.py` / `_analysis_data.json`: one-time usage analysis
+- `analyze-*.py` / `analyze-data.json`: one-time usage analysis
   scripts and the JSON they produced
-- `_backfill_*.py`: backfill scripts used during the cache-tracking
+- `backfill-*.py`: backfill scripts used during the cache-tracking
   rollout
 
 Do not import from these. Do not run them in production. The files
