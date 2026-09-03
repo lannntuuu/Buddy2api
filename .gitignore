@@ -39,6 +39,10 @@ secrets/
 credentials/
 .lab-agent/
 
+# Local config and backup credential artifacts
+config.toml
+data/**/*.key.*
+
 # Local databases and runtime state
 *.db
 *.sqlite
