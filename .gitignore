@@ -47,7 +47,10 @@ credentials/
 *.db-shm
 buddy2api.db
 codebuddy_gateway.db
-data/
+data/**/*.db
+data/**/*.key
+data/**/*-wal
+data/**/*-shm
 logs/
 *.log
 .dsh_server.*.log

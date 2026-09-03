@@ -136,6 +136,20 @@ __all__ = [
 
 def init_db():
     """Create tables, run migrations, and prune old logs in one shot."""
+    # Snapshot the live db before any schema work runs, so a botched
+    # migration has a one-command fallback. Gateable via env so test
+    # fixtures (which call init_db() on every test) don't fill the
+    # tmp db's backup/ dir with hundreds of identical pre-migration
+    # copies. Production: leave it on (default). CI: BUDDY2API_BACKUP_ON_INIT=0.
+    if os.environ.get("BUDDY2API_BACKUP_ON_INIT", "1") == "1":
+        try:
+            from storage import backup as _backup
+            _backup.snapshot("pre-migration", reason="init_db")
+        except Exception:  # pragma: no cover - never let backup break startup
+            import logging
+            logging.getLogger("buddy2api.database").exception(
+                "pre-migration backup failed; continuing with init_db"
+            )
     with _lock:
         conn = get_conn()
         conn.execute("PRAGMA journal_mode=WAL")
