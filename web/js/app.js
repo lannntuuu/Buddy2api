@@ -21,8 +21,10 @@ createApp({
     function go(k){page.value=k;localStorage.setItem('cb_gw_page',k)}
     function saveToken(value){token.value=value.trim();if(token.value)localStorage.setItem('cb_gw_token',token.value);else localStorage.removeItem('cb_gw_token');tf(token.value?'备用 Admin Token 已保存':'备用 Admin Token 已清除')}
     function hardRefresh(){window.location.reload()}
+    const theme=ref(localStorage.getItem('cb_gw_theme')||'light');
+    function toggleTheme(){theme.value=theme.value==='dark'?'light':'dark';document.documentElement.setAttribute('data-theme',theme.value);try{localStorage.setItem('cb_gw_theme',theme.value)}catch(_){}}
     const nav=[{k:'dashboard',l:'运行总览',i:I.dash},{k:'accounts',l:'账号管理',i:I.users},{k:'quota',l:'额度与积分',i:I.wallet},{k:'keys',l:'API Keys',i:I.key},{k:'channels',l:'通道与模型',i:I.cpu},{k:'usage',l:'用量统计',i:I.tokens},{k:'logs',l:'请求日志',i:I.log},{k:'setup',l:'接入指南',i:I.scan},{k:'settings',l:'设置',i:I.gear}];
-    return{page,token,toasts,meta,metaTag,tf,go,saveToken,hardRefresh,nav,I}
+    return{page,token,toasts,meta,metaTag,theme,toggleTheme,tf,go,saveToken,hardRefresh,nav,I}
   },
   template:`
   <div class="layout">
@@ -30,6 +32,9 @@ createApp({
       <div class="brand-block"><div class="brand-symbol">B2</div><div class="brand-copy"><div class="brand-title">{{meta.title}}</div><div class="brand-meta">{{metaTag}}<span v-if="meta.version"> · v{{meta.version}}</span></div></div></div>
       <nav class="topnav"><div v-for="n in nav" :key="n.k" class="nav-item" :class="{on:page===n.k}" @click="go(n.k)" v-html="n.i+'<span>'+n.l+'</span>'"></div></nav>
       <div class="top-actions">
+        <button class="iconbtn" @click="toggleTheme" :title="theme==='dark'?'切到浅色':'切到深色'">
+          <span v-html="theme==='dark'?I.sun:I.moon"></span>
+        </button>
         <button class="refresh-cta" @click="hardRefresh"><span v-html="I.refresh"></span><span>刷新</span></button>
       </div>
     </header>
