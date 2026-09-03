@@ -23,6 +23,7 @@ from providers.traework.constants import (
     STATIC_MODELS,
 )
 from providers.traework.token import TraeWorkAuthError, auth_headers, is_token_expired, refresh_account
+from providers.host_override import channel_host
 
 # 持有最近一次后台清理（删会话 / 关连接）的任务引用，避免被 GC 提前回收。
 _bg_close: asyncio.Task | None = None
@@ -266,7 +267,7 @@ async def _turn(
     thought/reasoning_content）到达时逐片段调用，供流式请求提前转发。
     """
     headers = auth_headers(account)
-    session_url = f"{AGENT_API}{SESSIONS_PATH}"
+    session_url = f"{channel_host(CHANNEL_ID, 'agent_host', AGENT_API)}{SESSIONS_PATH}"
     sid = ""
     client = httpx.AsyncClient(timeout=timeout)
     task: asyncio.Task | None = None

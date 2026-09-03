@@ -23,11 +23,13 @@ from typing import Optional
 
 from providers.traesolo.constants import (
     AUTHORIZE_PATH,
+    CHANNEL_ID,
     DOMAIN,
     OAUTH_HOST,
     PENDING_TTL_S,
 )
 from providers.traesolo import store
+from providers.host_override import channel_host
 from providers.traesolo.token import (
     TraeSoloAuthError,
     build_login_url,
@@ -145,7 +147,7 @@ async def _finish_login(info: dict, machine_id: str, device_id: str) -> dict:
 
     # 有 refreshToken → ExchangeToken 换新 access + 轮换 refreshToken
     if refresh:
-        access, refresh, expires_ms, refresh_expires_ms = await exchange(refresh, host=OAUTH_HOST)
+        access, refresh, expires_ms, refresh_expires_ms = await exchange(refresh, host=channel_host(CHANNEL_ID, "oauth_host", OAUTH_HOST))
     if not access:
         # parse_callback 已保证 access 或 refresh 至少有一个；走到这里说明
         # exchange 没返回 token。
@@ -160,7 +162,7 @@ async def _finish_login(info: dict, machine_id: str, device_id: str) -> dict:
         "access_token": access,
         "refresh_token": refresh,
         "uid": uid,
-        "extra": {"machine_id": machine_id, "device_id": device_id, "api_host": OAUTH_HOST},
+        "extra": {"machine_id": machine_id, "device_id": device_id, "api_host": channel_host(CHANNEL_ID, "oauth_host", OAUTH_HOST)},
     }
     try:
         g_uid, g_nick, g_ent = await get_user_info(temp_account)
@@ -182,7 +184,7 @@ async def _finish_login(info: dict, machine_id: str, device_id: str) -> dict:
             "refreshToken": refresh,
             "expiresAt": expires_ms,
             "domain": DOMAIN,
-            "apiHost": OAUTH_HOST,
+            "apiHost": channel_host(CHANNEL_ID, "oauth_host", OAUTH_HOST),
             "machineId": machine_id,
             "deviceId": device_id,
             "uid": uid,
@@ -194,7 +196,7 @@ async def _finish_login(info: dict, machine_id: str, device_id: str) -> dict:
     parsed["extra"] = {
         "machine_id": machine_id,
         "device_id": device_id,
-        "api_host": OAUTH_HOST,
+        "api_host": channel_host(CHANNEL_ID, "oauth_host", OAUTH_HOST),
         "source": "web_login",
     }
     res = store.upsert_account(parsed)

@@ -9,12 +9,14 @@ import httpx
 
 from providers.qwenwork.constants import (
     BUILD,
+    CHANNEL_ID,
     GATEWAY,
     IDE_VERSION,
     REFRESH_PATH,
     RELEASE_VERSION,
     USER_AGENT,
 )
+from providers.host_override import channel_host
 from providers.qwenwork.store import iso_to_ms, write_refreshed_auth
 
 
@@ -56,7 +58,7 @@ async def refresh_account(account: dict) -> dict:
         headers["Authorization"] = f"Bearer {access}"
     body = {"refresh_token": refresh, "target": "c"}
     async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(f"{GATEWAY}{REFRESH_PATH}", headers=headers, json=body)
+        response = await client.post(f"{channel_host(CHANNEL_ID, 'gateway', GATEWAY)}{REFRESH_PATH}", headers=headers, json=body)
     if response.status_code >= 400:
         raise QwenWorkAuthError(f"deviceToken refresh failed: HTTP {response.status_code}")
     try:

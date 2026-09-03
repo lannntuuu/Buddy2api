@@ -60,7 +60,7 @@ export default {props:['token','toast'],setup(p){
     <div class="card">
       <div class="card-h">客户端接入向导<span class="sub">按运行位置选择地址</span></div>
       <div class="card-p">
-        <div class="callout" style="margin-bottom:12px">宿主机客户端用 <span class="mono">http://127.0.0.1:8787/v1</span>；Docker 容器里的 sub2api 用 <span class="mono">http://host.docker.internal:8787/v1</span>。Codex 选择 "Codex (OpenAI)" 标签查看专用配置（wire_api、内容清洗等自动处理）。</div>
+        <div class="callout mb-3">宿主机客户端用 <span class="mono">http://127.0.0.1:8787/v1</span>；Docker 容器里的 sub2api 用 <span class="mono">http://host.docker.internal:8787/v1</span>。Codex 选择 "Codex (OpenAI)" 标签查看专用配置（wire_api、内容清洗等自动处理）。</div>
         <div class="setup-tabs"><button v-for="(x,k) in presets" :key="k" :class="{on:setupTab===k}" @click="setupTab=k">{{x.name}}</button></div>
         <div class="setup-panel">
           <div class="info-list">
@@ -70,65 +70,71 @@ export default {props:['token','toast'],setup(p){
             <div class="callout">{{currentPreset.note}}</div>
           </div>
           <div>
-            <div class="codeblk" style="margin-bottom:10px">{{envBlock()}}</div>
-            <button class="btn s" @click="copy(envBlock(),'preset-env')" style="margin-bottom:10px">{{copied==='preset-env'?'已复制':'复制配置'}}</button>
+            <div class="codeblk mb-2">{{envBlock()}}</div>
+            <button class="btn s mb-3" @click="copy(envBlock(),'preset-env')">{{copied==='preset-env'?'已复制':'复制配置'}}</button>
             <div class="codeblk">{{curlBlock()}}</div>
-            <button class="btn s" @click="copy(curlBlock(),'preset-curl')" style="margin-top:10px">{{copied==='preset-curl'?'已复制':'复制 curl'}}</button>
+            <button class="btn s mt-2" @click="copy(curlBlock(),'preset-curl')">{{copied==='preset-curl'?'已复制':'复制 curl'}}</button>
           </div>
         </div>
-        <div v-if="setupTab==='codex'" class="callout" style="margin-top:16px;background:var(--blue-soft);border-color:var(--blue-border)">
-          <div style="font-weight:600;margin-bottom:8px">Codex 专用处理（自动启用，无需手动配置）</div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:12px">
-            <div><strong>Responses API 转换</strong><br/><span style="color:var(--fg2)">/v1/responses 请求自动转换为 Chat Completions 转发后端，响应再映射回 Responses SSE 事件格式</span></div>
-            <div><strong>模型别名映射</strong><br/><span style="color:var(--fg2)">gpt-5.5 / gpt-5.4 / o3 / o4-mini 等自动映射到 glm-5.2 / deepseek-v4-pro 等后端模型</span></div>
-            <div><strong>内容清洗</strong><br/><span style="color:var(--fg2)">Codex system prompt 中的 sandbox / filesystem / execute / elevated 等敏感词自动替换，避免触发腾讯内容审核</span></div>
-            <div><strong>工具过滤</strong><br/><span style="color:var(--fg2)">非 function 类型工具（web_search / file_search 等）自动过滤，developer 角色映射为 system</span></div>
-          </div>
-        </div>
-        <div v-if="setupTab==='codex'" style="margin-top:16px;border:1px solid var(--blue-border);border-radius:var(--r);padding:16px;background:var(--blue-soft)">
-          <div style="font-weight:600;font-size:14px;margin-bottom:4px">一键配置 Codex</div>
-          <div style="font-size:12px;color:var(--fg2);margin-bottom:16px">选择一个 API Key，自动写入 <span class="mono">~/.codex/config.toml</span> 和 <span class="mono">~/.codex/auth.json</span>（原文件备份为 .bak），并设置 <span class="mono">OPENAI_API_KEY</span> 环境变量。配置后需完全关闭 Codex 重新打开。</div>
-
-          <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px">
-            <div class="field" style="flex:1;min-width:280px;margin:0">
-              <label>API Key（sk-cb- 开头）</label>
-              <input v-model="codexKeyInput" placeholder="sk-cb-xxxxxxxxxxxxxxxx" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:var(--r);font-size:13px;font-family:var(--mono);background:var(--bg)"/>
-              <div class="hint" style="margin-top:4px">可在 API Keys 页面随时查看并复制完整 Key。</div>
-            </div>
-            <button class="btn pri" @click="codexSetup" :disabled="codexBusy||!codexKeyInput" style="white-space:nowrap">{{codexBusy?'写入中...':'一键写入配置'}}</button>
-          </div>
-
-          <div v-if="codexStatus" style="margin-top:12px">
-            <div style="font-size:12px;font-weight:600;margin-bottom:6px">当前 Codex 配置状态</div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <span class="badge" :class="codexStatus.config_has_buddy2api?'ok':'inactive'">Provider: {{codexStatus.config_has_buddy2api?'buddy2api':'未配置'}}</span>
-              <span class="badge" :class="codexStatus.config_wire_api==='responses'?'ok':'warn'">wire_api: {{codexStatus.config_wire_api||'未设置'}}</span>
-              <span class="badge" :class="codexStatus.auth_has_key?'ok':'inactive'">auth.json: {{codexStatus.auth_has_key?'已配置':'未配置'}}</span>
-              <span class="badge" :class="codexStatus.config_model?'ok':'inactive'">model: {{codexStatus.config_model||'未设置'}}</span>
-            </div>
-          </div>
-
-          <div v-if="codexResult" style="margin-top:12px;padding:12px;border-radius:var(--r);background:var(--bg);border:1px solid var(--border)">
-            <div v-if="codexResult.status==='ok'" style="color:var(--green)">
-              <strong>配置成功</strong>
-              <div style="margin-top:6px;font-size:12px;color:var(--fg2)">已写入文件：<span class="mono" v-for="f in codexResult.written" :key="f">{{f}} </span></div>
-              <div v-if="codexResult.backed_up && codexResult.backed_up.length" style="margin-top:4px;font-size:12px;color:var(--fg3)">已备份：<span class="mono" v-for="f in codexResult.backed_up" :key="f">{{f}} </span></div>
-              <div style="margin-top:8px;font-size:12px;color:var(--blue)">请完全关闭 Codex 后重新打开。</div>
-            </div>
-            <div v-else style="color:var(--red)">
-              <strong>配置失败</strong>
-              <div style="margin-top:4px;font-size:12px">{{codexResult.message||'未知错误'}}</div>
-            </div>
+        <div v-if="setupTab==='codex'" class="callout accent mt-4">
+          <div class="text-bold mb-2">Codex 专用处理（自动启用，无需手动配置）</div>
+          <div class="codex-grid">
+            <div><strong>Responses API 转换</strong><br/><span class="text-muted">/v1/responses 请求自动转换为 Chat Completions 转发后端，响应再映射回 Responses SSE 事件格式</span></div>
+            <div><strong>模型别名映射</strong><br/><span class="text-muted">gpt-5.5 / gpt-5.4 / o3 / o4-mini 等自动映射到 glm-5.2 / deepseek-v4-pro 等后端模型</span></div>
+            <div><strong>内容清洗</strong><br/><span class="text-muted">Codex system prompt 中的 sandbox / filesystem / execute / elevated 等敏感词自动替换，避免触发腾讯内容审核</span></div>
+            <div><strong>工具过滤</strong><br/><span class="text-muted">非 function 类型工具（web_search / file_search 等）自动过滤，developer 角色映射为 system</span></div>
           </div>
         </div>
       </div>
     </div>
 
-    <div class="card card-p"><div style="font-weight:600;font-size:13px;margin-bottom:10px">快速验证</div>
-      <div class="codeblk"><span class="k">curl</span> {{s.base_url}}/chat/completions \\
+    <div class="card">
+      <div class="card-h">Codex 一键配置<span class="sub">自动写入 ~/.codex</span></div>
+      <div class="card-p">
+        <div class="callout mb-3">选择一个 API Key，自动写入 <span class="mono">~/.codex/config.toml</span> 和 <span class="mono">~/.codex/auth.json</span>（原文件备份为 .bak），并设置 <span class="mono">OPENAI_API_KEY</span> 环境变量。配置后需完全关闭 Codex 重新打开。</div>
+
+        <div class="codex-row">
+          <div class="field field-grow">
+            <label>API Key（sk-cb- 开头）</label>
+            <input class="tcell" v-model="codexKeyInput" placeholder="sk-cb-xxxxxxxxxxxxxxxx"/>
+            <div class="hint mt-1">可在 API Keys 页面随时查看并复制完整 Key。</div>
+          </div>
+          <button class="btn pri" @click="codexSetup" :disabled="codexBusy||!codexKeyInput">{{codexBusy?'写入中...':'一键写入配置'}}</button>
+        </div>
+
+        <div v-if="codexStatus" class="mt-3">
+          <div class="text-bold mb-1 text-xs">当前 Codex 配置状态</div>
+          <div class="status-line">
+            <span class="badge" :class="codexStatus.config_has_buddy2api?'ok':'inactive'">Provider: {{codexStatus.config_has_buddy2api?'buddy2api':'未配置'}}</span>
+            <span class="badge" :class="codexStatus.config_wire_api==='responses'?'ok':'warn'">wire_api: {{codexStatus.config_wire_api||'未设置'}}</span>
+            <span class="badge" :class="codexStatus.auth_has_key?'ok':'inactive'">auth.json: {{codexStatus.auth_has_key?'已配置':'未配置'}}</span>
+            <span class="badge" :class="codexStatus.config_model?'ok':'inactive'">model: {{codexStatus.config_model||'未设置'}}</span>
+          </div>
+        </div>
+
+        <div v-if="codexResult" class="testbox mt-3">
+          <div v-if="codexResult.status==='ok'" class="text-ok">
+            <strong>配置成功</strong>
+            <div class="mt-1 text-muted text-xs">已写入文件：<span class="mono" v-for="f in codexResult.written" :key="f">{{f}} </span></div>
+            <div v-if="codexResult.backed_up && codexResult.backed_up.length" class="mt-1 text-muted text-xs">已备份：<span class="mono" v-for="f in codexResult.backed_up" :key="f">{{f}} </span></div>
+            <div class="mt-2 text-accent text-xs">请完全关闭 Codex 后重新打开。</div>
+          </div>
+          <div v-else class="text-err">
+            <strong>配置失败</strong>
+            <div class="mt-1 text-xs">{{codexResult.message||'未知错误'}}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">快速验证<span class="sub">curl 一行通</span></div>
+      <div class="card-p">
+        <div class="codeblk"><span class="k">curl</span> {{s.base_url}}/chat/completions \\
   -H <span class="s">"Authorization: Bearer YOUR_KEY"</span> \\
   -H <span class="s">"Content-Type: application/json"</span> \\
   -d <span class="s">'{"model":"auto","messages":[{"role":"user","content":"hi"}]}'</span></div>
+      </div>
     </div>
   </template>
 </div>`};

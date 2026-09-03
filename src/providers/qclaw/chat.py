@@ -14,6 +14,7 @@ from providers.model_config import channel_aliases, channel_credit_rate
 from providers.qclaw.constants import AIZONE_BASE, ALIASES, CHANNEL_ID, RETRYABLE_STATUS
 from providers.retry import retry_delay
 from providers.qclaw.sign import aizone_headers
+from providers.host_override import channel_host
 
 
 def translate_model(model: str) -> str:
@@ -145,7 +146,7 @@ async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
             headers = _headers_for(account)
             async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.post(
-                    f"{AIZONE_BASE}/chat/completions",
+                    f"{channel_host(CHANNEL_ID, 'aizone_base', AIZONE_BASE)}/chat/completions",
                     headers=headers,
                     content=raw,
                 )
@@ -210,7 +211,7 @@ async def _stream(body: dict, raw: str, api_key_info, model_name: str) -> AsyncG
             async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10.0, read=None)) as client:
                 async with client.stream(
                     "POST",
-                    f"{AIZONE_BASE}/chat/completions",
+                    f"{channel_host(CHANNEL_ID, 'aizone_base', AIZONE_BASE)}/chat/completions",
                     headers=headers,
                     content=raw,
                 ) as response:
@@ -285,7 +286,7 @@ async def test_chat(account: dict, model: str = "default", prompt: str = "ping")
         headers = _headers_for(account)
         async with httpx.AsyncClient(timeout=45.0) as client:
             response = await client.post(
-                f"{AIZONE_BASE}/chat/completions",
+                f"{channel_host(CHANNEL_ID, 'aizone_base', AIZONE_BASE)}/chat/completions",
                 headers=headers,
                 content=raw,
             )

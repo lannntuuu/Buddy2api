@@ -52,8 +52,12 @@ export default {props:['token','toast'],setup(p){
   <div class="card card-p empty" v-else-if="err"><div class="em">!</div><p class="text-bold" style="color:var(--fg)">{{err}}</p><p class="mt-1">本机访问通常刷新页面即可重新获取管理凭证。</p></div>
   <template v-else-if="s">
     <div class="dash-hero">
-      <div>
-        <div class="health-main"><span class="health-dot" :class="healthClass()"></span><div><div class="health-title">{{healthText()}}</div><div class="health-sub">本机 OpenAI 兼容网关 · {{s.active_accounts}}/{{s.total_accounts}} 账号可用 · {{s.active_keys}}/{{s.total_keys}} Key 可用</div></div></div>
+      <div class="hero-left">
+        <div class="hero-statusline">
+          <span class="health-dot" :class="healthClass()"></span>
+          <span class="hero-state">{{healthText()}}</span>
+        </div>
+        <div class="hero-sub">本机 OpenAI 兼容网关 · {{s.active_accounts}}/{{s.total_accounts}} 账号可用 · {{s.active_keys}}/{{s.total_keys}} Key 可用</div>
         <div class="status-line">
           <span class="badge" :class="s.active_accounts?'ok':'err'">Accounts {{s.active_accounts}}</span>
           <span class="badge" :class="s.active_keys?'ok':'err'">Keys {{s.active_keys}}</span>
@@ -61,10 +65,10 @@ export default {props:['token','toast'],setup(p){
           <span class="tag">Filtered {{s.today?.filtered||0}}</span>
         </div>
       </div>
-      <div class="health-kpis">
-        <div class="health-kpi"><div class="k">今日请求</div><div class="v">{{n(s.today?.requests)}}</div></div>
-        <div class="health-kpi"><div class="k">今日成功率</div><div class="v">{{pct(s.today?.success_rate)}}</div></div>
-        <div class="health-kpi"><div class="k">平均耗时</div><div class="v">{{ms(s.today?.avg_duration_ms)}}</div></div>
+      <div class="hero-kpis">
+        <div class="hero-kpi"><div class="k">今日请求</div><div class="v state-number">{{n(s.today?.requests)}}</div></div>
+        <div class="hero-kpi"><div class="k">今日成功率</div><div class="v state-number">{{pct(s.today?.success_rate)}}</div></div>
+        <div class="hero-kpi"><div class="k">平均耗时</div><div class="v state-number">{{ms(s.today?.avg_duration_ms)}}</div></div>
       </div>
     </div>
 
