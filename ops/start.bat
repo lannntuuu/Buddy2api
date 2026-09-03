@@ -1,7 +1,7 @@
 @echo off
 title Buddy 2 API
 
-REM 切到项目根目录（ops/ 的父目录），保证 python -m gateway.server 能正确 import
+REM 切到项目根目录（ops/ 的父目录），保证 python -m src.gateway.server 能正确 import
 cd /d "%~dp0\.."
 
 echo.
@@ -48,7 +48,7 @@ if errorlevel 1 (
 echo  [Start] http://127.0.0.1:8787
 echo  [Stop] Ctrl+C
 echo.
-call "%CONDA_EXE%" run --no-capture-output -n buddy2api python -m gateway.server --port 8787 %*
+call "%CONDA_EXE%" run --no-capture-output -n buddy2api python -m src.gateway.server --port 8787 %*
 goto end
 
 :use_venv

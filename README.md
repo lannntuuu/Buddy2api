@@ -13,7 +13,7 @@ Buddy2api 在本机提供 `http://127.0.0.1:8787/v1`。你在官方客户端里�
 五个通道默认都开，第六个 GMI 默认关（opt-in）。没装、没登录的通道，账号页检测为空，不会自动入库。Trae SOLO 不走本机登录目录，走管理页「Web 登录」或粘贴回调 URL（见下）。
 
 ```powershell
-python -m gateway.server
+python -m src.gateway.server
 ```
 
 | 通道 | 默认 | 本机登录位置 |
@@ -34,12 +34,12 @@ python -m gateway.server
 1. **启动后账号页是空的，这是正常的。** 默认不再自动入库。到「账号」页：选通道 → 重新检测 → 一键导入。四个本地通道都能选；**Trae SOLO 选完后点「发起网页登录」**，在新窗口完成 TRAE 登录，浏览器会自动跳回服务完成入库（远程够不到回调时，把地址栏完整 URL 粘贴到「手动完成」）。
 2. **一把 API Key 只打一个通道。** 创建时必须选通道。WorkBuddy 的 Key 发 `auto` / `glm-5.2`；QwenWork 的 Key 发 `auto` 或 `qwork-advanced`；TraeWork 的 Key 发 `auto` 或 `qwen-3.7-plus`；Trae SOLO 的 Key 发 `auto` 或 `glm-5.2`（SOLO 模型表较大，`/v1/models` 里以 `traesolo/` 前缀列出）。通道和模型对不上会 400 或 403，不会帮你转到另一家。
 3. **某个通道返回 503 `channel_unavailable`：** 这个通道还没导入可用账号。
-4. **QClaw / QwenWork 请在 Windows 上直接跑 `python -m gateway.server`。** Linux Docker 读不了这两家用 DPAPI 加密的本机文件；管理页会写明这一点。WorkBuddy 可以继续用 Docker。
+4. **QClaw / QwenWork 请在 Windows 上直接跑 `python -m src.gateway.server`。** Linux Docker 读不了这两家用 DPAPI 加密的本机文件；管理页会写明这一点。WorkBuddy 可以继续用 Docker。
 5. 本项目和聊天客户端最好在同一台电脑。客户端如果跑在 Docker 里，Base URL 填 `http://host.docker.internal:8787/v1`，不要填容器自己的 `127.0.0.1`。
 
 ## 安装与启动
 
-还没装环境时按这几步走。已经有虚拟环境的，装完 `ops/requirements/base.txt` 后执行 `python -m gateway.server` 即可。
+还没装环境时按这几步走。已经有虚拟环境的，装完 `ops/requirements/base.txt` 后执行 `python -m src.gateway.server` 即可。
 
 ### 1. 安装工具
 
@@ -73,7 +73,7 @@ conda create -n buddy2api python=3.12 -y
 conda activate buddy2api
 python -m pip install --upgrade pip
 python -m pip install -r ops/requirements/base.txt
-python -m gateway.server
+python -m src.gateway.server
 ```
 
 看到监听信息后，浏览器打开：
@@ -87,7 +87,7 @@ http://127.0.0.1:8787
 ```powershell
 cd <你的项目路径>\Buddy2api
 conda activate buddy2api
-python -m gateway.server
+python -m src.gateway.server
 ```
 
 提示符前面应出现 `(buddy2api)`，再执行 `python -m pip`，避免装到系统 Python。
@@ -95,7 +95,7 @@ python -m gateway.server
 ### 其他启动方式
 
 - **脚本：** Windows 安装 Python 时勾选 Add Python to PATH，在项目目录执行 `.\ops\start.bat`。Linux / macOS：`chmod +x ops/start.sh && ./ops/start.sh`。脚本优先用名为 `buddy2api` 的 Conda 环境，没有 Conda 才建 `.venv`。
-- **Docker：** `powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1`。本机没有 WorkBuddy 登录目录时脚本仍会启动。容器下拉里仍有六个通道（开 GMI 需 `CB_GATEWAY_PROVIDERS`），但 QClaw / QwenWork 请用上面的 `python -m gateway.server`。TraeWork 登录文件不是 DPAPI，本机 `python -m gateway.server` 导入后 Docker 也能用库里的 token。Trae SOLO 不读本机目录，登录闭环与 token 都在库里，容器内同样可用。GMI 走 Web 导入，容器内也直接可用。
+- **Docker：** `powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1`。本机没有 WorkBuddy 登录目录时脚本仍会启动。容器下拉里仍有六个通道（开 GMI 需 `CB_GATEWAY_PROVIDERS`），但 QClaw / QwenWork 请用上面的 `python -m src.gateway.server`。TraeWork 登录文件不是 DPAPI，本机 `python -m src.gateway.server` 导入后 Docker 也能用库里的 token。Trae SOLO 不读本机目录，登录闭环与 token 都在库里，容器内同样可用。GMI 走 Web 导入，容器内也直接可用。
 
 ### 第一次打开网页之后
 
@@ -113,7 +113,7 @@ python -m gateway.server
 
 ```powershell
 $env:CB_GATEWAY_ADMIN_TOKEN="cb-admin-请换成足够长的随机值"
-python -m gateway.server
+python -m src.gateway.server
 ```
 
 ### 更新
@@ -125,7 +125,7 @@ cd <你的项目路径>\Buddy2api
 git pull --ff-only
 conda activate buddy2api
 python -m pip install -r ops/requirements/base.txt
-python -m gateway.server
+python -m src.gateway.server
 ```
 
 ## 常见问题
@@ -133,7 +133,7 @@ python -m gateway.server
 - `git` 或 `conda` 不是内部命令：关掉终端重开；Conda 用户改用 Miniconda Prompt。
 - `No module named ...`：先 `conda activate buddy2api`，再 `python -m pip install -r ops/requirements/base.txt`。
 - 下载依赖很慢：确认能访问 PyPI，不要混用好几个 Python。
-- 端口 8787 被占用：关掉旧的 Buddy2api，或 `python -m gateway.server --port 8788`。
+- 端口 8787 被占用：关掉旧的 Buddy2api，或 `python -m src.gateway.server --port 8788`。
 - 网页里一个账号都没有：还没导入。选对通道再检测；登录目录不对就设 `CB_AUTH_DIR` / `CB_QCLAW_AUTH_DIR` / `CB_QWENWORK_AUTH_DIR`。
 - 创建 Key 失败：没选通道。
 - 客户端 503 `channel_unavailable`：这个 Key 绑定的通道还没有可用账号。
@@ -236,7 +236,7 @@ curl -X PUT -H "Authorization: Bearer <admin-token>" -H "Content-Type: applicati
 
 ## 配置文件
 
-`config.toml` 放在项目根目录，启动时被 `gateway.server` 自动加载。适合"我不想每次记一堆 CLI 参数 / 环境变量"的场景，把 `host` `port` `database.path` `admin.token` 写进文件，bare `python -m gateway.server` 就能直接用。
+`config.toml` 放在项目根目录，启动时被 `gateway.server` 自动加载。适合"我不想每次记一堆 CLI 参数 / 环境变量"的场景，把 `host` `port` `database.path` `admin.token` 写进文件，bare `python -m src.gateway.server` 就能直接用。
 
 **优先级**（later wins）：
 
@@ -248,12 +248,12 @@ curl -X PUT -H "Authorization: Bearer <admin-token>" -H "Content-Type: applicati
 
 ```bash
 # 1) profile 写在同一个 config.toml 里
-python -m gateway.server                          # 用 [default] 块
-python -m gateway.server --config prod            # 用 [prod] 块
-CB_GATEWAY_CONFIG=prod python -m gateway.server   # 同上，但通过环境变量
+python -m src.gateway.server                          # 用 [default] 块
+python -m src.gateway.server --config prod            # 用 [prod] 块
+CB_GATEWAY_CONFIG=prod python -m src.gateway.server   # 同上，但通过环境变量
 
 # 2) profile 在独立文件里
-python -m gateway.server --config config.prod.toml
+python -m src.gateway.server --config config.prod.toml
 ```
 
 **完整示例**（dev / prod 共享同一份代码、各自一份配置）：
@@ -456,7 +456,7 @@ Buddy2api/
 └── README.md / README_EN.md / SECURITY.md / LICENSE / .gitignore / .dockerignore / .mailmap
 ```
 
-启动方式：`python -m gateway.server`（从根目录）。
+启动方式：`python -m src.gateway.server`（从根目录）。
 
 启动脚本：
 
@@ -489,7 +489,7 @@ powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1
   - 56 个端点路径、契约、行为全部保持不变；`pytest` 与基线一致（pre-existing 失败不在重构范围）。
 - **管理页 Overhaul**：8 个 lever（依赖本地化、版本号单一来源、CSS 单一令牌体系重建、组件层重做、图表令牌化、重点页重排、移动端断点收敛、一次性脚本归档）。版本号现在从 `/admin/meta` 拉，不再写死。`em-dash` 全部清理为中文标点。
 - **一次 commits 走完**：每个 lever 一个 commit（`refactor(web): ...` / `refactor(storage): ...` / `refactor(gateway): ...` / `refactor(upstream): ...`），所有 commit 已 push 到 `refactor/web-console-ia`。详细设计见 `redesign-audit/`。
-- **配置文件 `config.toml`**：新增。`gateway.server` 启动时自动加载，支持 `[default]` / `[dev]` / `[prod]` profile 与 `--config <profile>` / `CB_GATEWAY_CONFIG=<profile>` 切换。dev / prod 双 checkout 各自一份 `config.toml`（`.gitignore`d，per-deploy 私有），端口和 db 路径已写死，bare `python -m gateway.server` 走对端。详见 [配置文件](#配置文件) 一节。
+- **配置文件 `config.toml`**：新增。`gateway.server` 启动时自动加载，支持 `[default]` / `[dev]` / `[prod]` profile 与 `--config <profile>` / `CB_GATEWAY_CONFIG=<profile>` 切换。dev / prod 双 checkout 各自一份 `config.toml`（`.gitignore`d，per-deploy 私有），端口和 db 路径已写死，bare `python -m src.gateway.server` 走对端。详见 [配置文件](#配置文件) 一节。
 
 ## License
 

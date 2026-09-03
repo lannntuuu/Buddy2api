@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# 切到项目根目录（脚本所在目录的父目录），保证 python -m gateway.server 能正确 import
+# 切到项目根目录（脚本所在目录的父目录），保证 python -m src.gateway.server 能正确 import
 cd "$(dirname "$0")/.."
 
 echo ""
@@ -40,7 +40,7 @@ if [ -n "$conda_exe" ]; then
     echo "  [启动] http://127.0.0.1:8787"
     echo "  [停止] Ctrl+C"
     echo ""
-    exec "$conda_exe" run --no-capture-output -n buddy2api python -m gateway.server --port 8787 "$@"
+    exec "$conda_exe" run --no-capture-output -n buddy2api python -m src.gateway.server --port 8787 "$@"
 fi
 
 echo "  [环境] 未找到 Conda，使用项目 .venv"

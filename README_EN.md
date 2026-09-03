@@ -13,7 +13,7 @@ Buddy2api serves `http://127.0.0.1:8787/v1` on your machine. You stay signed int
 Five channels are on by default and a sixth (GMI) is opt-in. A channel you haven't installed or signed into shows empty on the Accounts page and is not auto-imported. Trae SOLO does not read a local login directory — import it via the admin UI's **Web login** or by pasting a callback URL (see below). GMI doesn't read a local directory either; paste its API key on the Accounts page.
 
 ```powershell
-python -m gateway.server
+python -m src.gateway.server
 ```
 
 | Channel | Default | Where logins live |
@@ -33,12 +33,12 @@ Just follow "Install and run" below. These are the easiest things to trip over i
 1. **An empty Accounts page right after startup is normal.** It no longer auto-imports by default. Go to the **Accounts** page: pick a channel → Re-detect → Import all. All four local channels are available; **for Trae SOLO click "Start web login"** after selecting it, finish the TRAE login in the new window, and the browser redirects back to the server to complete the import (if the remote side can't reach the callback, paste the full address-bar URL into "Manual complete").
 2. **One API key hits exactly one channel.** You must pick a channel when creating it. A WorkBuddy key sends `auto` / `glm-5.2`; a QwenWork key sends `auto` or `qwork-advanced`; a TraeWork key sends `auto` or `qwen-3.7-plus`; a Trae SOLO key sends `auto` or `glm-5.2`; a GMI key sends any model the upstream lists (SOLO's model list is large and surfaced under the `traesolo/` prefix in `/v1/models`). A channel/model mismatch returns 400 or 403; the gateway won't forward you to another vendor.
 3. **A channel returns 503 `channel_unavailable`:** that channel has no imported, usable account yet.
-4. **Run QClaw / QwenWork with `python -m gateway.server` directly on Windows.** A Linux Docker container can't decrypt the DPAPI-encrypted local files those two use; the admin UI says so. WorkBuddy can keep using Docker.
+4. **Run QClaw / QwenWork with `python -m src.gateway.server` directly on Windows.** A Linux Docker container can't decrypt the DPAPI-encrypted local files those two use; the admin UI says so. WorkBuddy can keep using Docker.
 5. This project and the chat client should run on the same machine. If the client runs inside Docker, set Base URL to `http://host.docker.internal:8787/v1`, not the container's own `127.0.0.1`.
 
 ## Install and run
 
-Follow these steps if you haven't set up the environment yet. If you already have a virtual environment, just install `ops/requirements/base.txt` and run `python -m gateway.server`.
+Follow these steps if you haven't set up the environment yet. If you already have a virtual environment, just install `ops/requirements/base.txt` and run `python -m src.gateway.server`.
 
 ### 1. Install tooling
 
@@ -72,7 +72,7 @@ conda create -n buddy2api python=3.12 -y
 conda activate buddy2api
 python -m pip install --upgrade pip
 python -m pip install -r ops/requirements/base.txt
-python -m gateway.server
+python -m src.gateway.server
 ```
 
 When you see the listening message, open in your browser:
@@ -86,7 +86,7 @@ To stop the server: go back to the terminal and press `Ctrl+C`. After a reboot n
 ```powershell
 cd <your project path>\Buddy2api
 conda activate buddy2api
-python -m gateway.server
+python -m src.gateway.server
 ```
 
 The prompt should show `(buddy2api)` before you run `python -m pip`, so you don't install into the system Python.
@@ -94,7 +94,7 @@ The prompt should show `(buddy2api)` before you run `python -m pip`, so you don'
 ### Other ways to start
 
 - **Script:** On Windows, with Python added to PATH during install, run `.\ops\start.bat` in the project directory. Linux / macOS: `chmod +x ops/start.sh && ./ops/start.sh`. The script prefers a Conda environment named `buddy2api`, and only creates a `.venv` if Conda isn't present.
-- **Docker:** `powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1`. The script still starts even when there's no WorkBuddy login directory on the host. All six channels are still in the dropdown when GMI is enabled via `CB_GATEWAY_PROVIDERS`, but use the `python -m gateway.server` method above for QClaw / QwenWork. TraeWork's login file isn't DPAPI, so once imported via local `python -m gateway.server`, Docker can use the tokens from the database. Trae SOLO doesn't read a local directory — its login loop and tokens live in the database, so it works inside the container too. GMI is Web-imported and works inside the container as well.
+- **Docker:** `powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1`. The script still starts even when there's no WorkBuddy login directory on the host. All six channels are still in the dropdown when GMI is enabled via `CB_GATEWAY_PROVIDERS`, but use the `python -m src.gateway.server` method above for QClaw / QwenWork. TraeWork's login file isn't DPAPI, so once imported via local `python -m src.gateway.server`, Docker can use the tokens from the database. Trae SOLO doesn't read a local directory — its login loop and tokens live in the database, so it works inside the container too. GMI is Web-imported and works inside the container as well.
 
 ### After opening the web UI for the first time
 
@@ -112,7 +112,7 @@ If the admin UI won't open or you need remote access:
 
 ```powershell
 $env:CB_GATEWAY_ADMIN_TOKEN="cb-admin-replace-with-a-long-random-value"
-python -m gateway.server
+python -m src.gateway.server
 ```
 
 ### Update
@@ -124,7 +124,7 @@ cd <your project path>\Buddy2api
 git pull --ff-only
 conda activate buddy2api
 python -m pip install -r ops/requirements/base.txt
-python -m gateway.server
+python -m src.gateway.server
 ```
 
 ## FAQ
@@ -132,7 +132,7 @@ python -m gateway.server
 - `git` or `conda` is not a recognized command: close the terminal and reopen it; Conda users should use Miniconda Prompt.
 - `No module named ...`: first `conda activate buddy2api`, then `python -m pip install -r ops/requirements/base.txt`.
 - Dependency download is very slow: make sure PyPI is reachable and don't mix several Python installs.
-- Port 8787 is occupied: stop the old Buddy2api, or `python -m gateway.server --port 8788`.
+- Port 8787 is occupied: stop the old Buddy2api, or `python -m src.gateway.server --port 8788`.
 - No accounts in the web UI: not imported yet. Pick the right channel and detect; if the login directory is wrong, set `CB_AUTH_DIR` / `CB_QCLAW_AUTH_DIR` / `CB_QWENWORK_AUTH_DIR`.
 - Key creation failed: no channel was selected.
 - Client 503 `channel_unavailable`: the channel bound to this key has no usable account yet.
@@ -230,7 +230,7 @@ The admin UI's "Model config" page provides a graphical interface: a wide "Unifi
 
 ## Configuration file
 
-Place a `config.toml` at the project root and `gateway.server` will auto-load it on startup. This is the alternative to a wall of CLI flags / env vars: put `host`, `port`, `database.path`, `admin.token` in a file, and a bare `python -m gateway.server` does the right thing.
+Place a `config.toml` at the project root and `gateway.server` will auto-load it on startup. This is the alternative to a wall of CLI flags / env vars: put `host`, `port`, `database.path`, `admin.token` in a file, and a bare `python -m src.gateway.server` does the right thing.
 
 **Priority order** (later wins):
 
@@ -242,12 +242,12 @@ code default  ->  config.toml [default]  ->  config.toml [<profile>]  ->  env va
 
 ```bash
 # 1) Profile is a table inside the same config.toml
-python -m gateway.server                          # uses [default]
-python -m gateway.server --config prod            # uses [prod]
-CB_GATEWAY_CONFIG=prod python -m gateway.server   # same, via env
+python -m src.gateway.server                          # uses [default]
+python -m src.gateway.server --config prod            # uses [prod]
+CB_GATEWAY_CONFIG=prod python -m src.gateway.server   # same, via env
 
 # 2) Profile lives in a separate file
-python -m gateway.server --config config.prod.toml
+python -m src.gateway.server --config config.prod.toml
 ```
 
 **Full example** (dev / prod share the same code, each has its own config):
@@ -448,7 +448,7 @@ Buddy2api/
 └── README.md / README_EN.md / SECURITY.md / LICENSE / .gitignore / .dockerignore / .mailmap
 ```
 
-Start with `python -m gateway.server` (from the repo root).
+Start with `python -m src.gateway.server` (from the repo root).
 
 Launch scripts:
 
@@ -481,7 +481,7 @@ Compared to 1.4 / 2.0 / 2.1:
   - All 56 endpoint paths, contracts, and behavior are unchanged; the test suite shows the same pre-existing pass/fail as the v2.1 baseline (no new regressions).
 - **Admin UI overhaul**: eight levers, one commit each (vendor local, version from `/admin/meta`, CSS token rebuild, component layer, chart palette tokenization, key page reflow, responsive breakpoint consolidation, one-off script archive). Version is now fetched from the backend instead of hard-coded. `em-dash` characters were replaced with Chinese punctuation throughout the SPA.
 - **One lever, one commit**: every refactor commit is independently reviewable (`refactor(web): ...`, `refactor(storage): ...`, `refactor(gateway): ...`, `refactor(upstream): ...`); all commits are pushed to `refactor/web-console-ia`. See `redesign-audit/` for the design baseline, audit findings, strategy, and token spec.
-- **Config file `config.toml`**: added. `gateway.server` auto-loads it on startup, supports `[default]` / `[dev]` / `[prod]` profiles plus `--config <profile>` / `CB_GATEWAY_CONFIG=<profile>` to switch. A dev/prod worktree split keeps two `config.toml` files (`.gitignore`d, per-deploy private) pinning port and db path, so a bare `python -m gateway.server` lands on the right port in each checkout. See [Configuration file](#configuration-file) for details.
+- **Config file `config.toml`**: added. `gateway.server` auto-loads it on startup, supports `[default]` / `[dev]` / `[prod]` profiles plus `--config <profile>` / `CB_GATEWAY_CONFIG=<profile>` to switch. A dev/prod worktree split keeps two `config.toml` files (`.gitignore`d, per-deploy private) pinning port and db path, so a bare `python -m src.gateway.server` lands on the right port in each checkout. See [Configuration file](#configuration-file) for details.
 
 ## License
 
