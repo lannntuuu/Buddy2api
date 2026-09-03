@@ -5,6 +5,7 @@ from __future__ import annotations
 import httpx
 
 from providers.qclaw.constants import (
+    CHANNEL_ID,
     CMD_CREATE_API_KEY,
     CMD_MODEL_LIST,
     CMD_REFRESH_CHANNEL,
@@ -17,6 +18,7 @@ from providers.qclaw.constants import (
     STATIC_MODELS,
     WEB_VERSION,
 )
+from providers.host_override import channel_host
 from providers.qclaw.sign import jprx_ctx
 
 
@@ -92,7 +94,7 @@ async def post_cmd(
 
     payload = business_body(extra)
     body = json_lib.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    url = f"{JPRX_GATEWAY}/data/{cmd}/forward"
+    url = f"{channel_host(CHANNEL_ID, 'jprx_gateway', JPRX_GATEWAY)}/data/{cmd}/forward"
     headers = build_headers(account, body)
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(url, headers=headers, content=body)

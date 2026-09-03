@@ -50,6 +50,7 @@ from providers.traesolo.token import (
     refresh_account,
     solo_headers,
 )
+from providers.host_override import channel_host
 
 # 测试注入点：模块级 MockTransport（tests/test_traesolo.py 设置）。
 _TRANSPORT: Optional[httpx.AsyncBaseTransport] = None
@@ -719,7 +720,7 @@ async def fetch_model_details(account: dict) -> list[dict]:
     client = _make_client(30.0)
     try:
         response = await client.post(
-            f"{AGENT_HOST}{EP_MODELS}", headers=solo_headers(account, stream=False), json=body
+            f"{channel_host(CHANNEL_ID, 'agent_host', AGENT_HOST)}{EP_MODELS}", headers=solo_headers(account, stream=False), json=body
         )
     finally:
         await _aclose_client(client)
@@ -903,7 +904,7 @@ async def _open(account: dict, body: dict) -> tuple[httpx.AsyncClient, httpx.Res
     client = _make_client(None, stream=True)
     headers = solo_headers(account, stream=True)
     content = json.dumps(body, ensure_ascii=False)
-    request = client.build_request("POST", f"{AGENT_HOST}{EP_CHAT}", headers=headers, content=content)
+    request = client.build_request("POST", f"{channel_host(CHANNEL_ID, 'agent_host', AGENT_HOST)}{EP_CHAT}", headers=headers, content=content)
     response = await client.send(request, stream=True)
     return client, response
 

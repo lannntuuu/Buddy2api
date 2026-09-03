@@ -8,10 +8,14 @@ from storage import database as db
 
 # Field whitelist per channel. Only these keys are accepted in the
 # `channel_hosts` settings blob; anything else is rejected by the admin
-# route. Phase A covers single-host channels only.
+# route. Phase A covers single-host channels; Phase B adds multi-host
+# channels (qclaw, traesolo, traework).
 CHANNEL_HOST_FIELDS: dict[str, tuple[str, ...]] = {
     "gmi": ("base_url",),
     "qwenwork": ("gateway",),
+    "qclaw": ("jprx_gateway", "aizone_base"),
+    "traesolo": ("oauth_host", "console_host", "agent_host"),
+    "traework": ("agent_host", "ug_host"),
 }
 
 def channel_host(channel_id: str, field: str, default: str) -> str:
