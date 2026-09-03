@@ -922,7 +922,7 @@ async def admin_update_settings(
 ):
     _check_admin(authorization)
     data = await _read_json_object(request)
-    allowed_settings = {"backend_url", "default_domain", "timeout"}
+    allowed_settings = {"backend_url", "default_domain", "timeout", "channel_hosts"}
     unknown = set(data) - allowed_settings
     if unknown:
         raise HTTPException(status_code=400, detail=f"Unsupported settings: {', '.join(sorted(unknown))}")
@@ -936,6 +936,26 @@ async def admin_update_settings(
         if not backend_url.startswith("https://"):
             raise HTTPException(status_code=400, detail="backend_url must use HTTPS")
         data["backend_url"] = backend_url
+    if "channel_hosts" in data:
+        ch = data["channel_hosts"]
+        if not isinstance(ch, dict):
+            raise HTTPException(status_code=400, detail="channel_hosts must be an object")
+        from providers.host_override import CHANNEL_HOST_FIELDS
+        for cid, fields in ch.items():
+            if cid not in CHANNEL_HOST_FIELDS:
+                raise HTTPException(status_code=400, detail=f"Unsupported channel: {cid}")
+            if not isinstance(fields, dict):
+                raise HTTPException(status_code=400, detail=f"channel_hosts[{cid}] must be an object")
+            unknown_fields = set(fields) - set(CHANNEL_HOST_FIELDS[cid])
+            if unknown_fields:
+                raise HTTPException(status_code=400, detail=f"Unsupported host fields: {', '.join(sorted(unknown_fields))}")
+            for f, v in fields.items():
+                if not v:
+                    continue
+                val = str(v).strip().rstrip("/")
+                if not val.startswith("https://"):
+                    raise HTTPException(status_code=400, detail=f"{cid}.{f} must use HTTPS")
+                fields[f] = val
     for k, v in data.items():
         db.set_setting(k, v)
     return {"status": "ok"}

@@ -39,6 +39,7 @@ from providers.gmi.constants import (
     MODELS_CACHE_TTL,
     STATIC_MODELS,
 )
+from providers.host_override import channel_host
 from providers.model_config import channel_aliases, channel_model_ids
 from storage import database as db
 
@@ -88,7 +89,11 @@ def _auth_headers(account: dict, stream: bool) -> dict[str, str]:
 
 def _base_url(account: dict) -> str:
     extra = account.get("extra") if isinstance(account.get("extra"), dict) else {}
-    host = str(extra.get("base_url") or account.get("domain") or DEFAULT_BASE_URL).rstrip("/")
+    host = str(
+        extra.get("base_url")
+        or account.get("domain")
+        or channel_host(CHANNEL_ID, "base_url", DEFAULT_BASE_URL)
+    ).rstrip("/")
     return host or DEFAULT_BASE_URL
 
 

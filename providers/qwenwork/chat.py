@@ -33,6 +33,7 @@ from providers.qwenwork.constants import (
     SCENE,
     USER_AGENT,
 )
+from providers.host_override import channel_host
 from providers.qwenwork.token import is_token_expired, refresh_account
 
 
@@ -42,7 +43,7 @@ def translate_model(model: str) -> str:
 
 
 def chat_url() -> str:
-    return f"{GATEWAY}{CHAT_PATH}?{CHAT_QUERY}"
+    return f"{channel_host(CHANNEL_ID, 'gateway', GATEWAY)}{CHAT_PATH}?{CHAT_QUERY}"
 
 
 def _ids(account: dict) -> tuple[str, str, str, str]:

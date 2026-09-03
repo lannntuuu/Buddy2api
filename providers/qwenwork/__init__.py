@@ -21,6 +21,7 @@ from providers.qwenwork.constants import (
     STATIC_MODELS,
 )
 from providers.qwenwork.token import QwenWorkAuthError, is_token_expired, openapi_headers, refresh_account
+from providers.host_override import channel_host
 
 
 class QwenWorkProvider:
@@ -102,7 +103,7 @@ class QwenWorkProvider:
         access = str(account.get("access_token") or "")
         if access:
             headers["Authorization"] = f"Bearer {access}"
-        url = f"{GATEWAY}{ACCOUNT_CONTEXT_PATH}?include=user,plan,quota"
+        url = f"{channel_host(CHANNEL_ID, 'gateway', GATEWAY)}{ACCOUNT_CONTEXT_PATH}?include=user,plan,quota"
         try:
             client = get_client()
             response = await client.get(url, headers=headers, timeout=30.0)
