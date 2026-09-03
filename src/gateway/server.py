@@ -23,6 +23,17 @@ import tomllib
 import types
 from pathlib import Path
 
+# Make `python -m gateway.server` work from the project root by prepending
+# the src/ directory to sys.path. The src/ layout puts every Python package
+# under src/; without this line, the bare module name `gateway` cannot
+# be resolved from a cwd outside src/. Tests add src/ via pytest.ini's
+# pythonpath, but a CLI invocation of `python -m gateway.server` has
+# no such helper. Adding it here keeps the same launch command
+# (python -m gateway.server) working with no env-var juggling.
+_SRC_ROOT = Path(__file__).resolve().parent.parent
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
+
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware

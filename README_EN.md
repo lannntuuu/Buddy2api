@@ -1,6 +1,6 @@
 # Buddy2api 2.2
 
-[English](README_EN.md) | [中文](README.md)
+[English](README_EN.md) | [涓枃](README.md)
 
 > Turn consumer AI clients you're already signed into locally into one OpenAI-compatible API for Codex, OpenCode, Cherry Studio, NextChat, and similar agents. Work Buddy / CodeBuddy, QClaw, QwenWork, TraeWork, and Trae SOLO are enabled by default; GMI is a new opt-in channel in v2.2 and must be listed in `CB_GATEWAY_PROVIDERS` to show up. Pick one in the admin UI dropdown. Each request stays on one channel.
 
@@ -10,10 +10,10 @@ Current release **2.2.0**. This project is for local, personal use only. Do not 
 
 Buddy2api serves `http://127.0.0.1:8787/v1` on your machine. You stay signed into the official clients and still have quota; this gateway imports those local sessions and forwards requests to the matching vendor. Normal clients use Chat Completions; Codex uses `/v1/responses`, and when you set the key type to Codex in the admin UI it runs a round of prompt sanitization.
 
-Five channels are on by default and a sixth (GMI) is opt-in. A channel you haven't installed or signed into shows empty on the Accounts page and is not auto-imported. Trae SOLO does not read a local login directory — import it via the admin UI's **Web login** or by pasting a callback URL (see below). GMI doesn't read a local directory either; paste its API key on the Accounts page.
+Five channels are on by default and a sixth (GMI) is opt-in. A channel you haven't installed or signed into shows empty on the Accounts page and is not auto-imported. Trae SOLO does not read a local login directory 鈥?import it via the admin UI's **Web login** or by pasting a callback URL (see below). GMI doesn't read a local directory either; paste its API key on the Accounts page.
 
 ```powershell
-python -m gateway.server
+python -m src.gateway.server
 ```
 
 | Channel | Default | Where logins live |
@@ -30,20 +30,20 @@ If the paths are wrong you can point them with `CB_AUTH_DIR`, `CB_QCLAW_AUTH_DIR
 
 Just follow "Install and run" below. These are the easiest things to trip over in 2.0:
 
-1. **An empty Accounts page right after startup is normal.** It no longer auto-imports by default. Go to the **Accounts** page: pick a channel → Re-detect → Import all. All four local channels are available; **for Trae SOLO click "Start web login"** after selecting it, finish the TRAE login in the new window, and the browser redirects back to the server to complete the import (if the remote side can't reach the callback, paste the full address-bar URL into "Manual complete").
+1. **An empty Accounts page right after startup is normal.** It no longer auto-imports by default. Go to the **Accounts** page: pick a channel 鈫?Re-detect 鈫?Import all. All four local channels are available; **for Trae SOLO click "Start web login"** after selecting it, finish the TRAE login in the new window, and the browser redirects back to the server to complete the import (if the remote side can't reach the callback, paste the full address-bar URL into "Manual complete").
 2. **One API key hits exactly one channel.** You must pick a channel when creating it. A WorkBuddy key sends `auto` / `glm-5.2`; a QwenWork key sends `auto` or `qwork-advanced`; a TraeWork key sends `auto` or `qwen-3.7-plus`; a Trae SOLO key sends `auto` or `glm-5.2`; a GMI key sends any model the upstream lists (SOLO's model list is large and surfaced under the `traesolo/` prefix in `/v1/models`). A channel/model mismatch returns 400 or 403; the gateway won't forward you to another vendor.
 3. **A channel returns 503 `channel_unavailable`:** that channel has no imported, usable account yet.
-4. **Run QClaw / QwenWork with `python -m gateway.server` directly on Windows.** A Linux Docker container can't decrypt the DPAPI-encrypted local files those two use; the admin UI says so. WorkBuddy can keep using Docker.
+4. **Run QClaw / QwenWork with `python -m src.gateway.server` directly on Windows.** A Linux Docker container can't decrypt the DPAPI-encrypted local files those two use; the admin UI says so. WorkBuddy can keep using Docker.
 5. This project and the chat client should run on the same machine. If the client runs inside Docker, set Base URL to `http://host.docker.internal:8787/v1`, not the container's own `127.0.0.1`.
 
 ## Install and run
 
-Follow these steps if you haven't set up the environment yet. If you already have a virtual environment, just install `ops/requirements/base.txt` and run `python -m gateway.server`.
+Follow these steps if you haven't set up the environment yet. If you already have a virtual environment, just install `ops/requirements/base.txt` and run `python -m src.gateway.server`.
 
 ### 1. Install tooling
 
-1. [Git](https://git-scm.com/downloads) — on Windows keep the default options.
-2. [Miniconda](https://docs.conda.io/projects/miniconda/en/latest/) — Python 3.12 recommended.
+1. [Git](https://git-scm.com/downloads) 鈥?on Windows keep the default options.
+2. [Miniconda](https://docs.conda.io/projects/miniconda/en/latest/) 鈥?Python 3.12 recommended.
 3. Open and sign into the official client(s) you'll use at least once (Work Buddy / CodeBuddy at minimum).
 
 After installing, **reopen** PowerShell, Windows Terminal, or Anaconda Prompt:
@@ -72,7 +72,7 @@ conda create -n buddy2api python=3.12 -y
 conda activate buddy2api
 python -m pip install --upgrade pip
 python -m pip install -r ops/requirements/base.txt
-python -m gateway.server
+python -m src.gateway.server
 ```
 
 When you see the listening message, open in your browser:
@@ -86,7 +86,7 @@ To stop the server: go back to the terminal and press `Ctrl+C`. After a reboot n
 ```powershell
 cd <your project path>\Buddy2api
 conda activate buddy2api
-python -m gateway.server
+python -m src.gateway.server
 ```
 
 The prompt should show `(buddy2api)` before you run `python -m pip`, so you don't install into the system Python.
@@ -94,14 +94,14 @@ The prompt should show `(buddy2api)` before you run `python -m pip`, so you don'
 ### Other ways to start
 
 - **Script:** On Windows, with Python added to PATH during install, run `.\ops\start.bat` in the project directory. Linux / macOS: `chmod +x ops/start.sh && ./ops/start.sh`. The script prefers a Conda environment named `buddy2api`, and only creates a `.venv` if Conda isn't present.
-- **Docker:** `powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1`. The script still starts even when there's no WorkBuddy login directory on the host. All six channels are still in the dropdown when GMI is enabled via `CB_GATEWAY_PROVIDERS`, but use the `python -m gateway.server` method above for QClaw / QwenWork. TraeWork's login file isn't DPAPI, so once imported via local `python -m gateway.server`, Docker can use the tokens from the database. Trae SOLO doesn't read a local directory — its login loop and tokens live in the database, so it works inside the container too. GMI is Web-imported and works inside the container as well.
+- **Docker:** `powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1`. The script still starts even when there's no WorkBuddy login directory on the host. All six channels are still in the dropdown when GMI is enabled via `CB_GATEWAY_PROVIDERS`, but use the `python -m src.gateway.server` method above for QClaw / QwenWork. TraeWork's login file isn't DPAPI, so once imported via local `python -m src.gateway.server`, Docker can use the tokens from the database. Trae SOLO doesn't read a local directory 鈥?its login loop and tokens live in the database, so it works inside the container too. GMI is Web-imported and works inside the container as well.
 
 ### After opening the web UI for the first time
 
 The admin UI no longer auto-issues a cookie. After first opening the page, go to **Settings** and paste the Admin Token from the startup log into "Admin login" and save once; after that the browser uses the HttpOnly cookie.
 
 1. Open **Accounts**. Select WorkBuddy / QClaw / QwenWork / TraeWork from the dropdown, click "Re-detect", then "Import local logins". For **Trae SOLO** use "Start web login" instead: finish the TRAE login in the new window and it redirects back to import; if the remote can't reach the `127.0.0.1` callback, paste the full address-bar URL into "Manual complete".
-2. Click "Test" on the account — if it returns a sentence, that channel is working.
+2. Click "Test" on the account 鈥?if it returns a sentence, that channel is working.
 3. Open **API Keys**, **pick the same channel first** then create. For Codex, set the key type to Codex and use the `/v1/responses` interface. After creating you can reveal and copy the full key.
 4. Fill in your client:
    - Base URL: `http://127.0.0.1:8787/v1`
@@ -112,7 +112,7 @@ If the admin UI won't open or you need remote access:
 
 ```powershell
 $env:CB_GATEWAY_ADMIN_TOKEN="cb-admin-replace-with-a-long-random-value"
-python -m gateway.server
+python -m src.gateway.server
 ```
 
 ### Update
@@ -124,7 +124,7 @@ cd <your project path>\Buddy2api
 git pull --ff-only
 conda activate buddy2api
 python -m pip install -r ops/requirements/base.txt
-python -m gateway.server
+python -m src.gateway.server
 ```
 
 ## FAQ
@@ -132,7 +132,7 @@ python -m gateway.server
 - `git` or `conda` is not a recognized command: close the terminal and reopen it; Conda users should use Miniconda Prompt.
 - `No module named ...`: first `conda activate buddy2api`, then `python -m pip install -r ops/requirements/base.txt`.
 - Dependency download is very slow: make sure PyPI is reachable and don't mix several Python installs.
-- Port 8787 is occupied: stop the old Buddy2api, or `python -m gateway.server --port 8788`.
+- Port 8787 is occupied: stop the old Buddy2api, or `python -m src.gateway.server --port 8788`.
 - No accounts in the web UI: not imported yet. Pick the right channel and detect; if the login directory is wrong, set `CB_AUTH_DIR` / `CB_QCLAW_AUTH_DIR` / `CB_QWENWORK_AUTH_DIR`.
 - Key creation failed: no channel was selected.
 - Client 503 `channel_unavailable`: the channel bound to this key has no usable account yet.
@@ -187,7 +187,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
   -d '{"model":"auto","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-QwenWork, QClaw, TraeWork, and Trae SOLO each use their own key — don't mix them. Note `glm-5.2` exists on both WorkBuddy and Trae SOLO: unprefixed it resolves via the key's bound channel; to point explicitly at SOLO use `traesolo/glm-5.2`.
+QwenWork, QClaw, TraeWork, and Trae SOLO each use their own key 鈥?don't mix them. Note `glm-5.2` exists on both WorkBuddy and Trae SOLO: unprefixed it resolves via the key's bound channel; to point explicitly at SOLO use `traesolo/glm-5.2`.
 
 ### Configure the model list per channel
 
@@ -203,11 +203,11 @@ curl -X PUT -H "Authorization: Bearer <admin-token>" -H "Content-Type: applicati
   -d '{"models":["qwen-3.7-plus","glm-5"],"aliases":{"auto":"qwen-3.7-plus"}}'
 ```
 
-Rules: `models` is a non-empty array of strings (or `{"id": "..."}` objects); `aliases` is a non-empty object of `alias -> model id`; at least one field per request. The custom list is a whitelist — models not in it return 400 for that channel (except QClaw's `pool-*` prefix). WorkBuddy is compatible with the legacy keys `models` / `model_aliases`; other channels store `<channel>.models` / `<channel>.aliases`.
+Rules: `models` is a non-empty array of strings (or `{"id": "..."}` objects); `aliases` is a non-empty object of `alias -> model id`; at least one field per request. The custom list is a whitelist 鈥?models not in it return 400 for that channel (except QClaw's `pool-*` prefix). WorkBuddy is compatible with the legacy keys `models` / `model_aliases`; other channels store `<channel>.models` / `<channel>.aliases`.
 
 ### Unified models (cross-platform translation layer)
 
-When the same model has different names on different platforms, define a unified model once (the unified name follows WorkBuddy's naming). The client only requests the unified name, and the gateway translates it to that platform's internal name based on the key's bound platform; whitelist validation then proceeds as usual (an internal name not in the whitelist still returns 400 — unified models don't auto-enter the whitelist).
+When the same model has different names on different platforms, define a unified model once (the unified name follows WorkBuddy's naming). The client only requests the unified name, and the gateway translates it to that platform's internal name based on the key's bound platform; whitelist validation then proceeds as usual (an internal name not in the whitelist still returns 400 鈥?unified models don't auto-enter the whitelist).
 
 ```bash
 curl -X PUT -H "Authorization: Bearer <admin-token>" -H "Content-Type: application/json" \
@@ -230,7 +230,7 @@ The admin UI's "Model config" page provides a graphical interface: a wide "Unifi
 
 ## Configuration file
 
-Place a `config.toml` at the project root and `gateway.server` will auto-load it on startup. This is the alternative to a wall of CLI flags / env vars: put `host`, `port`, `database.path`, `admin.token` in a file, and a bare `python -m gateway.server` does the right thing.
+Place a `config.toml` at the project root and `gateway.server` will auto-load it on startup. This is the alternative to a wall of CLI flags / env vars: put `host`, `port`, `database.path`, `admin.token` in a file, and a bare `python -m src.gateway.server` does the right thing.
 
 **Priority order** (later wins):
 
@@ -242,12 +242,12 @@ code default  ->  config.toml [default]  ->  config.toml [<profile>]  ->  env va
 
 ```bash
 # 1) Profile is a table inside the same config.toml
-python -m gateway.server                          # uses [default]
-python -m gateway.server --config prod            # uses [prod]
-CB_GATEWAY_CONFIG=prod python -m gateway.server   # same, via env
+python -m src.gateway.server                          # uses [default]
+python -m src.gateway.server --config prod            # uses [prod]
+CB_GATEWAY_CONFIG=prod python -m src.gateway.server   # same, via env
 
 # 2) Profile lives in a separate file
-python -m gateway.server --config config.prod.toml
+python -m src.gateway.server --config config.prod.toml
 ```
 
 **Full example** (dev / prod share the same code, each has its own config):
@@ -339,12 +339,12 @@ Pin the admin token so the browser cookie survives restarts: edit `config.toml` 
 
 ### Reasoning effort (per model)
 
-No more environment variable: configure it **per model** on the admin page **Channels & Models → per-platform settings** (stored in DB, takes effect immediately):
+No more environment variable: configure it **per model** on the admin page **Channels & Models 鈫?per-platform settings** (stored in DB, takes effect immediately):
 
 - Per-model dropdown: `default (no injection)` / `none` / `minimal` / `low` / `medium` / `high` / `max`, plus a channel-level default that applies to models without an explicit entry.
 - Priority: explicit client `reasoning_effort` > per-model config > channel default > no injection (upstream default).
-- Only the WorkBuddy channel upstream (`copilot.tencent.com`) is confirmed to support this parameter; other channels show `—` in the UI.
-- Native accepted values from live probing: see `docs/design/per-model-reasoning-effort.md`. Note: deepseek/glm/auto default to *no* thinking — selecting a level turns thinking *on* (slower); for fastest, pick `low` or leave empty for DeepSeek. `off` is rejected upstream (11150).
+- Only the WorkBuddy channel upstream (`copilot.tencent.com`) is confirmed to support this parameter; other channels show `鈥擿 in the UI.
+- Native accepted values from live probing: see `docs/design/per-model-reasoning-effort.md`. Note: deepseek/glm/auto default to *no* thinking 鈥?selecting a level turns thinking *on* (slower); for fastest, pick `low` or leave empty for DeepSeek. `off` is rejected upstream (11150).
 
 ### content compaction (workbuddy 11128 self-heal)
 | Variable | Description |
@@ -370,7 +370,7 @@ Channel-level token / credit accounting is inconsistent:
 - **Trae SOLO / QClaw / QwenWork**: tokens are reported by the upstream, credit is not;
 - **TraeWork**: neither tokens nor credit are reported (the `token_usage` event is dropped from its SSE).
 
-Since v2.2.0, traesolo / qclaw / qwenwork can enable a **gateway-side token→credit estimate** (set `credit_rate` per channel in "Model config → Per-channel settings"; default 1000 tokens / 1 credit). This is an **estimate, not a real charge** — for trend-spotting and internal estimates only; don't reconcile it against the upstream's real balance. TraeWork would need its SSE parser fixed first to participate. See `docs/credit-and-token-tracking.md` for details.
+Since v2.2.0, traesolo / qclaw / qwenwork can enable a **gateway-side token鈫抍redit estimate** (set `credit_rate` per channel in "Model config 鈫?Per-channel settings"; default 1000 tokens / 1 credit). This is an **estimate, not a real charge** 鈥?for trend-spotting and internal estimates only; don't reconcile it against the upstream's real balance. TraeWork would need its SSE parser fixed first to participate. See `docs/credit-and-token-tracking.md` for details.
 
 ## Data and security
 
@@ -384,83 +384,82 @@ The core Python code is split into three packages by responsibility; in v2.3 the
 
 ```text
 Buddy2api/
-├── src/                    # All Python and frontend source
-│   ├── gateway/            # HTTP entry (FastAPI app + routes + version)
-│   │   ├── server.py       # app factory, lifespan, StaticFiles mount
-│   │   ├── router.py       # Bind request to channel, model translation (helper)
-│   │   ├── deps.py         # Shared auth dependencies
-│   │   ├── routers/
-│   │   │   ├── admin.py        # /admin/* endpoints
-│   │   │   ├── v1.py           # /v1/chat/completions, /v1/responses, /v1/models
-│   │   │   └── static_router.py# /admin/meta and other metadata
-│   │   └── version.py
-│   ├── accounts/           # Account and channel management
-│   │   ├── auth_manager.py     # Account selection, token management, checkin
-│   │   └── control_plane.py    # Startup scan, one-click claim, model config
-│   ├── upstream/           # Upstream adapters
-│   │   ├── proxy.py        # Pipeline orchestration (proxy_chat_completions, etc.)
-│   │   ├── aliases.py      # Model alias table, default model list, reasoning effort
-│   │   ├── moderation.py   # Content moderation, tool-stall detection
-│   │   ├── compaction.py   # Request body compaction, 11128 self-heal
-│   │   └── responses.py    # OpenAI Responses ↔ Chat Completions translation
-│   ├── storage/            # Infrastructure layer (DB, crypto, fingerprint, cache)
-│   │   ├── database.py     # Compat facade (re-exports from storage.repos)
-│   │   ├── backup.py       # db snapshot / rotation / credentials-key sync
-│   │   ├── repos/
-│   │   │   ├── accounts.py     # Account CRUD
-│   │   │   ├── api_keys.py     # API key CRUD
-│   │   │   ├── logs.py         # Request log + queries
-│   │   │   ├── settings.py     # Channel config, KV
-│   │   │   ├── stats.py        # Dashboard aggregations
-│   │   │   └── _common.py      # Shared connection / schema
-│   │   ├── credit_cache.py     # Per-channel credit cache
-│   │   ├── http_pool.py        # Upstream httpx client pool
-│   │   ├── credential_crypto.py
-│   │   └── fingerprint.py
-│   ├── providers/          # Channel adapters
-│   │   ├── workbuddy/
-│   │   ├── qclaw/
-│   │   ├── qwenwork/
-│   │   ├── traework/
-│   │   ├── traesolo/
-│   │   └── gmi/            # v2.2 new, opt-in
-│   └── web/                # Admin UI
-│       ├── index.html
-│       ├── css/app.css
-│       ├── js/
-│       │   ├── app.js      # Entry
-│       │   ├── api.js      # Backend API client
-│       │   ├── icons.js    # Inline SVG icons
-│       │   └── pages/      # dashboard / accounts / quota / keys / channels / usage / logs / setup / settings
-│       └── vendor/         # Vue 3.4.21 + SortableJS 1.15.6 (local, works offline)
-├── docs/                   # Design and usage docs
-│   ├── *.md                # credit-and-token-tracking / dashboard-slow-query / provider-model-usage / traesolo-usage / traework-usage / workbuddy-11128 / cache-tracking
-│   ├── design/             # per-model-reasoning-effort and similar design notes
-│   ├── maintenance/        # Maintenance playbooks
-│   ├── releases/           # Release notes
-│   └── redesign/           # v2.2 refactor design docs (00-baseline / 01-audit / 02-strategy / 03-tokens / 04-prod-worktree)
-├── tests/                  # pytest
-│   ├── conftest.py
-│   ├── pytest.ini
-│   ├── test_*.py           # Business and per-channel tests
-│   └── test_web_assets.py  # SPA ESM parse + vendor/CDN guards (new in v2.2)
-├── ops/                    # Launch / deploy / build / one-off scripts
-│   ├── start.bat / start.sh             # Native launch scripts
-│   ├── start-docker-win.ps1 / start-docker-wsl.sh
-│   ├── Dockerfile
-│   ├── docker-compose.yml / docker-compose.windows.yml
-│   ├── docker-entrypoint.sh
-│   ├── requirements/{base.txt, dev.txt}
-│   ├── scripts/backup-db.py             # Manual db snapshot CLI
-│   ├── scripts/copy-dev-to-prod.py      # dev -> prod config copier
-│   └── scripts/oneoff/                  # Archived one-off analysis and backfill scripts (do not import)
-├── data/                   # Runtime data (DB + credentials, .gitignore)
-├── pyproject.toml          # pythonpath=["src"] so pytest finds src/
-├── config.example.toml     # Config template (config.toml itself is .gitignore'd)
-└── README.md / README_EN.md / SECURITY.md / LICENSE / .gitignore / .dockerignore / .mailmap
+鈹溾攢鈹€ src/                    # All Python and frontend source
+鈹?  鈹溾攢鈹€ gateway/            # HTTP entry (FastAPI app + routes + version)
+鈹?  鈹?  鈹溾攢鈹€ server.py       # app factory, lifespan, StaticFiles mount
+鈹?  鈹?  鈹溾攢鈹€ router.py       # Bind request to channel, model translation (helper)
+鈹?  鈹?  鈹溾攢鈹€ deps.py         # Shared auth dependencies
+鈹?  鈹?  鈹溾攢鈹€ routers/
+鈹?  鈹?  鈹?  鈹溾攢鈹€ admin.py        # /admin/* endpoints
+鈹?  鈹?  鈹?  鈹溾攢鈹€ v1.py           # /v1/chat/completions, /v1/responses, /v1/models
+鈹?  鈹?  鈹?  鈹斺攢鈹€ static_router.py# /admin/meta and other metadata
+鈹?  鈹?  鈹斺攢鈹€ version.py
+鈹?  鈹溾攢鈹€ accounts/           # Account and channel management
+鈹?  鈹?  鈹溾攢鈹€ auth_manager.py     # Account selection, token management, checkin
+鈹?  鈹?  鈹斺攢鈹€ control_plane.py    # Startup scan, one-click claim, model config
+鈹?  鈹溾攢鈹€ upstream/           # Upstream adapters
+鈹?  鈹?  鈹溾攢鈹€ proxy.py        # Pipeline orchestration (proxy_chat_completions, etc.)
+鈹?  鈹?  鈹溾攢鈹€ aliases.py      # Model alias table, default model list, reasoning effort
+鈹?  鈹?  鈹溾攢鈹€ moderation.py   # Content moderation, tool-stall detection
+鈹?  鈹?  鈹溾攢鈹€ compaction.py   # Request body compaction, 11128 self-heal
+鈹?  鈹?  鈹斺攢鈹€ responses.py    # OpenAI Responses 鈫?Chat Completions translation
+鈹?  鈹溾攢鈹€ storage/            # Infrastructure layer (DB, crypto, fingerprint, cache)
+鈹?  鈹?  鈹溾攢鈹€ database.py     # Compat facade (re-exports from storage.repos)
+鈹?  鈹?  鈹溾攢鈹€ backup.py       # db snapshot / rotation / credentials-key sync
+鈹?  鈹?  鈹溾攢鈹€ repos/
+鈹?  鈹?  鈹?  鈹溾攢鈹€ accounts.py     # Account CRUD
+鈹?  鈹?  鈹?  鈹溾攢鈹€ api_keys.py     # API key CRUD
+鈹?  鈹?  鈹?  鈹溾攢鈹€ logs.py         # Request log + queries
+鈹?  鈹?  鈹?  鈹溾攢鈹€ settings.py     # Channel config, KV
+鈹?  鈹?  鈹?  鈹溾攢鈹€ stats.py        # Dashboard aggregations
+鈹?  鈹?  鈹?  鈹斺攢鈹€ _common.py      # Shared connection / schema
+鈹?  鈹?  鈹溾攢鈹€ credit_cache.py     # Per-channel credit cache
+鈹?  鈹?  鈹溾攢鈹€ http_pool.py        # Upstream httpx client pool
+鈹?  鈹?  鈹溾攢鈹€ credential_crypto.py
+鈹?  鈹?  鈹斺攢鈹€ fingerprint.py
+鈹?  鈹溾攢鈹€ providers/          # Channel adapters
+鈹?  鈹?  鈹溾攢鈹€ workbuddy/
+鈹?  鈹?  鈹溾攢鈹€ qclaw/
+鈹?  鈹?  鈹溾攢鈹€ qwenwork/
+鈹?  鈹?  鈹溾攢鈹€ traework/
+鈹?  鈹?  鈹溾攢鈹€ traesolo/
+鈹?  鈹?  鈹斺攢鈹€ gmi/            # v2.2 new, opt-in
+鈹?  鈹斺攢鈹€ web/                # Admin UI
+鈹?      鈹溾攢鈹€ index.html
+鈹?      鈹溾攢鈹€ css/app.css
+鈹?      鈹溾攢鈹€ js/
+鈹?      鈹?  鈹溾攢鈹€ app.js      # Entry
+鈹?      鈹?  鈹溾攢鈹€ api.js      # Backend API client
+鈹?      鈹?  鈹溾攢鈹€ icons.js    # Inline SVG icons
+鈹?      鈹?  鈹斺攢鈹€ pages/      # dashboard / accounts / quota / keys / channels / usage / logs / setup / settings
+鈹?      鈹斺攢鈹€ vendor/         # Vue 3.4.21 + SortableJS 1.15.6 (local, works offline)
+鈹溾攢鈹€ docs/                   # Design and usage docs
+鈹?  鈹溾攢鈹€ *.md                # credit-and-token-tracking / dashboard-slow-query / provider-model-usage / traesolo-usage / traework-usage / workbuddy-11128 / cache-tracking
+鈹?  鈹溾攢鈹€ design/             # per-model-reasoning-effort and similar design notes
+鈹?  鈹溾攢鈹€ maintenance/        # Maintenance playbooks
+鈹?  鈹溾攢鈹€ releases/           # Release notes
+鈹?  鈹斺攢鈹€ redesign/           # v2.2 refactor design docs (00-baseline / 01-audit / 02-strategy / 03-tokens / 04-prod-worktree)
+鈹溾攢鈹€ tests/                  # pytest
+鈹?  鈹溾攢鈹€ conftest.py
+鈹?  鈹溾攢鈹€ pytest.ini
+鈹?  鈹溾攢鈹€ test_*.py           # Business and per-channel tests
+鈹?  鈹斺攢鈹€ test_web_assets.py  # SPA ESM parse + vendor/CDN guards (new in v2.2)
+鈹溾攢鈹€ ops/                    # Launch / deploy / build / one-off scripts
+鈹?  鈹溾攢鈹€ start.bat / start.sh             # Native launch scripts
+鈹?  鈹溾攢鈹€ start-docker-win.ps1 / start-docker-wsl.sh
+鈹?  鈹溾攢鈹€ Dockerfile
+鈹?  鈹溾攢鈹€ docker-compose.yml / docker-compose.windows.yml
+鈹?  鈹溾攢鈹€ docker-entrypoint.sh
+鈹?  鈹溾攢鈹€ requirements/{base.txt, dev.txt}
+鈹?  鈹溾攢鈹€ scripts/backup-db.py             # Manual db snapshot CLI
+鈹?  鈹溾攢鈹€ scripts/copy-dev-to-prod.py      # dev -> prod config copier
+鈹?  鈹斺攢鈹€ scripts/oneoff/                  # Archived one-off analysis and backfill scripts (do not import)
+鈹溾攢鈹€ data/                   # Runtime data (DB + credentials, .gitignore)
+鈹溾攢鈹€ config.example.toml     # Config template (config.toml itself is .gitignore'd)
+鈹斺攢鈹€ README.md / README_EN.md / SECURITY.md / LICENSE / .gitignore / .dockerignore / .mailmap
 ```
 
-Start with `python -m gateway.server` (from the repo root; `pyproject.toml` provides `src/` on `sys.path`).
+Start with `python -m src.gateway.server` (from the repo root; `src/` is part of the launch command's module path).
 
 Launch scripts:
 
@@ -493,7 +492,7 @@ Compared to 1.4 / 2.0 / 2.1:
   - All 56 endpoint paths, contracts, and behavior are unchanged; the test suite shows the same pre-existing pass/fail as the v2.1 baseline (no new regressions).
 - **Admin UI overhaul**: eight levers, one commit each (vendor local, version from `/admin/meta`, CSS token rebuild, component layer, chart palette tokenization, key page reflow, responsive breakpoint consolidation, one-off script archive). Version is now fetched from the backend instead of hard-coded. `em-dash` characters were replaced with Chinese punctuation throughout the SPA.
 - **One lever, one commit**: every refactor commit is independently reviewable (`refactor(web): ...`, `refactor(storage): ...`, `refactor(gateway): ...`, `refactor(upstream): ...`); all commits are pushed to `refactor/web-console-ia`. See `docs/redesign/` for the design baseline, audit findings, strategy, and token spec.
-- **Config file `config.toml`**: added. `gateway.server` auto-loads it on startup, supports `[default]` / `[dev]` / `[prod]` profiles plus `--config <profile>` / `CB_GATEWAY_CONFIG=<profile>` to switch. A dev/prod worktree split keeps two `config.toml` files (`.gitignore`d, per-deploy private) pinning port and db path, so a bare `python -m gateway.server` lands on the right port in each checkout. See [Configuration file](#configuration-file) for details.
+- **Config file `config.toml`**: added. `gateway.server` auto-loads it on startup, supports `[default]` / `[dev]` / `[prod]` profiles plus `--config <profile>` / `CB_GATEWAY_CONFIG=<profile>` to switch. A dev/prod worktree split keeps two `config.toml` files (`.gitignore`d, per-deploy private) pinning port and db path, so a bare `python -m src.gateway.server` lands on the right port in each checkout. See [Configuration file](#configuration-file) for details.
 
 ## License
 

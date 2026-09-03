@@ -1,62 +1,62 @@
 # Buddy2api 2.2
 
-[English](README_EN.md) | 中文
+[English](README_EN.md) | 涓枃
 
-> 把本机已经登录的消费级 AI 客户端，接成 OpenAI 兼容接口，给 Codex、OpenCode、Cherry Studio、NextChat 等用。默认打开 Work Buddy / CodeBuddy、QClaw、千问办公（QwenWork）、TraeWork、Trae SOLO 五个通道；GMI 是 v2.2 新增的 opt-in 通道，需要在 `CB_GATEWAY_PROVIDERS` 里启用。管理页下拉选其中一个，一次请求只走一个通道。
+> 鎶婃湰鏈哄凡缁忕櫥褰曠殑娑堣垂绾?AI 瀹㈡埛绔紝鎺ユ垚 OpenAI 鍏煎鎺ュ彛锛岀粰 Codex銆丱penCode銆丆herry Studio銆丯extChat 绛夌敤銆傞粯璁ゆ墦寮€ Work Buddy / CodeBuddy銆丵Claw銆佸崈闂姙鍏紙QwenWork锛夈€乀raeWork銆乀rae SOLO 浜斾釜閫氶亾锛汫MI 鏄?v2.2 鏂板鐨?opt-in 閫氶亾锛岄渶瑕佸湪 `CB_GATEWAY_PROVIDERS` 閲屽惎鐢ㄣ€傜鐞嗛〉涓嬫媺閫夊叾涓竴涓紝涓€娆¤姹傚彧璧颁竴涓€氶亾銆?
 
-当前版本 **2.2.0**。这个项目只适合本机自用，不要公开部署，也不要把登录凭据、API Key、数据库文件发给别人。v2.2 重点变化：管理页不再依赖 CDN（Vue 与 Sortable 全部本地 vendor 化，断网也能打开）；后端三个巨石模块（`storage/database.py`、`gateway/server.py`、`upstream/proxy.py`）按域拆分；新增 GMI opt-in 通道。完整更新见「v2.2 更新内容」。
+褰撳墠鐗堟湰 **2.2.0**銆傝繖涓」鐩彧閫傚悎鏈満鑷敤锛屼笉瑕佸叕寮€閮ㄧ讲锛屼篃涓嶈鎶婄櫥褰曞嚟鎹€丄PI Key銆佹暟鎹簱鏂囦欢鍙戠粰鍒汉銆倂2.2 閲嶇偣鍙樺寲锛氱鐞嗛〉涓嶅啀渚濊禆 CDN锛圴ue 涓?Sortable 鍏ㄩ儴鏈湴 vendor 鍖栵紝鏂綉涔熻兘鎵撳紑锛夛紱鍚庣涓変釜宸ㄧ煶妯″潡锛坄storage/database.py`銆乣gateway/server.py`銆乣upstream/proxy.py`锛夋寜鍩熸媶鍒嗭紱鏂板 GMI opt-in 閫氶亾銆傚畬鏁存洿鏂拌銆寁2.2 鏇存柊鍐呭銆嶃€?
 
-## 这是什么？
+## 杩欐槸浠€涔堬紵
 
-Buddy2api 在本机提供 `http://127.0.0.1:8787/v1`。你在官方客户端里登录并且还有额度，这个网关把本机登录导入进来，把请求转到对应厂商。普通客户端走 Chat Completions；Codex 走 `/v1/responses`，管理页把 Key 类型选成 Codex 时会做一轮内容清洗。
+Buddy2api 鍦ㄦ湰鏈烘彁渚?`http://127.0.0.1:8787/v1`銆備綘鍦ㄥ畼鏂瑰鎴风閲岀櫥褰曞苟涓旇繕鏈夐搴︼紝杩欎釜缃戝叧鎶婃湰鏈虹櫥褰曞鍏ヨ繘鏉ワ紝鎶婅姹傝浆鍒板搴斿巶鍟嗐€傛櫘閫氬鎴风璧?Chat Completions锛汣odex 璧?`/v1/responses`锛岀鐞嗛〉鎶?Key 绫诲瀷閫夋垚 Codex 鏃朵細鍋氫竴杞唴瀹规竻娲椼€?
 
-五个通道默认都开，第六个 GMI 默认关（opt-in）。没装、没登录的通道，账号页检测为空，不会自动入库。Trae SOLO 不走本机登录目录，走管理页「Web 登录」或粘贴回调 URL（见下）。
+浜斾釜閫氶亾榛樿閮藉紑锛岀鍏釜 GMI 榛樿鍏筹紙opt-in锛夈€傛病瑁呫€佹病鐧诲綍鐨勯€氶亾锛岃处鍙烽〉妫€娴嬩负绌猴紝涓嶄細鑷姩鍏ュ簱銆俆rae SOLO 涓嶈蛋鏈満鐧诲綍鐩綍锛岃蛋绠＄悊椤点€學eb 鐧诲綍銆嶆垨绮樿创鍥炶皟 URL锛堣涓嬶級銆?
 
 ```powershell
-python -m gateway.server
+python -m src.gateway.server
 ```
 
-| 通道 | 默认 | 本机登录位置 |
+| 閫氶亾 | 榛樿 | 鏈満鐧诲綍浣嶇疆 |
 |---|---|---|
-| WorkBuddy / CodeBuddy | 开 | `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth` |
-| QClaw | 开 | `%APPDATA%\QClaw` |
-| 千问办公 QwenWork | 开 | `%APPDATA%\QwenWorkCN` |
-| TraeWork | 开 | `%APPDATA%\TRAE SOLO CN\User\globalStorage` |
-| Trae SOLO | 开 | 无（Web 登录闭环 / 凭证 JSON 导入） |
-| GMI | 关（opt-in） | Web 配置：账号页选 GMI 通道后粘 API Key 即可 |
+| WorkBuddy / CodeBuddy | 寮€ | `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth` |
+| QClaw | 寮€ | `%APPDATA%\QClaw` |
+| 鍗冮棶鍔炲叕 QwenWork | 寮€ | `%APPDATA%\QwenWorkCN` |
+| TraeWork | 寮€ | `%APPDATA%\TRAE SOLO CN\User\globalStorage` |
+| Trae SOLO | 寮€ | 鏃狅紙Web 鐧诲綍闂幆 / 鍑瘉 JSON 瀵煎叆锛?|
+| GMI | 鍏筹紙opt-in锛?| Web 閰嶇疆锛氳处鍙烽〉閫?GMI 閫氶亾鍚庣矘 API Key 鍗冲彲 |
 
-路径不对时可用 `CB_AUTH_DIR`、`CB_QCLAW_AUTH_DIR`、`CB_QWENWORK_AUTH_DIR`、`CB_TRAEWORK_AUTH_DIR` 指定。四个通道的登录文件不要混在同一个目录。Trae SOLO 的凭证 JSON 可用 `CB_TRAESOLO_AUTH_DIR` 指定扫描目录（可选）。GMI 不读本机登录目录，靠管理页导入 API Key。
+璺緞涓嶅鏃跺彲鐢?`CB_AUTH_DIR`銆乣CB_QCLAW_AUTH_DIR`銆乣CB_QWENWORK_AUTH_DIR`銆乣CB_TRAEWORK_AUTH_DIR` 鎸囧畾銆傚洓涓€氶亾鐨勭櫥褰曟枃浠朵笉瑕佹贩鍦ㄥ悓涓€涓洰褰曘€俆rae SOLO 鐨勫嚟璇?JSON 鍙敤 `CB_TRAESOLO_AUTH_DIR` 鎸囧畾鎵弿鐩綍锛堝彲閫夛級銆侴MI 涓嶈鏈満鐧诲綍鐩綍锛岄潬绠＄悊椤靛鍏?API Key銆?
 
-## 注意事项
+## 娉ㄦ剰浜嬮」
 
-按下面「安装与启动」即可。这几条是 2.0 里最容易踩空的：
+鎸変笅闈€屽畨瑁呬笌鍚姩銆嶅嵆鍙€傝繖鍑犳潯鏄?2.0 閲屾渶瀹规槗韪╃┖鐨勶細
 
-1. **启动后账号页是空的，这是正常的。** 默认不再自动入库。到「账号」页：选通道 → 重新检测 → 一键导入。四个本地通道都能选；**Trae SOLO 选完后点「发起网页登录」**，在新窗口完成 TRAE 登录，浏览器会自动跳回服务完成入库（远程够不到回调时，把地址栏完整 URL 粘贴到「手动完成」）。
-2. **一把 API Key 只打一个通道。** 创建时必须选通道。WorkBuddy 的 Key 发 `auto` / `glm-5.2`；QwenWork 的 Key 发 `auto` 或 `qwork-advanced`；TraeWork 的 Key 发 `auto` 或 `qwen-3.7-plus`；Trae SOLO 的 Key 发 `auto` 或 `glm-5.2`（SOLO 模型表较大，`/v1/models` 里以 `traesolo/` 前缀列出）。通道和模型对不上会 400 或 403，不会帮你转到另一家。
-3. **某个通道返回 503 `channel_unavailable`：** 这个通道还没导入可用账号。
-4. **QClaw / QwenWork 请在 Windows 上直接跑 `python -m gateway.server`。** Linux Docker 读不了这两家用 DPAPI 加密的本机文件；管理页会写明这一点。WorkBuddy 可以继续用 Docker。
-5. 本项目和聊天客户端最好在同一台电脑。客户端如果跑在 Docker 里，Base URL 填 `http://host.docker.internal:8787/v1`，不要填容器自己的 `127.0.0.1`。
+1. **鍚姩鍚庤处鍙烽〉鏄┖鐨勶紝杩欐槸姝ｅ父鐨勩€?* 榛樿涓嶅啀鑷姩鍏ュ簱銆傚埌銆岃处鍙枫€嶉〉锛氶€夐€氶亾 鈫?閲嶆柊妫€娴?鈫?涓€閿鍏ャ€傚洓涓湰鍦伴€氶亾閮借兘閫夛紱**Trae SOLO 閫夊畬鍚庣偣銆屽彂璧风綉椤电櫥褰曘€?*锛屽湪鏂扮獥鍙ｅ畬鎴?TRAE 鐧诲綍锛屾祻瑙堝櫒浼氳嚜鍔ㄨ烦鍥炴湇鍔″畬鎴愬叆搴擄紙杩滅▼澶熶笉鍒板洖璋冩椂锛屾妸鍦板潃鏍忓畬鏁?URL 绮樿创鍒般€屾墜鍔ㄥ畬鎴愩€嶏級銆?
+2. **涓€鎶?API Key 鍙墦涓€涓€氶亾銆?* 鍒涘缓鏃跺繀椤婚€夐€氶亾銆俉orkBuddy 鐨?Key 鍙?`auto` / `glm-5.2`锛決wenWork 鐨?Key 鍙?`auto` 鎴?`qwork-advanced`锛汿raeWork 鐨?Key 鍙?`auto` 鎴?`qwen-3.7-plus`锛汿rae SOLO 鐨?Key 鍙?`auto` 鎴?`glm-5.2`锛圫OLO 妯″瀷琛ㄨ緝澶э紝`/v1/models` 閲屼互 `traesolo/` 鍓嶇紑鍒楀嚭锛夈€傞€氶亾鍜屾ā鍨嬪涓嶄笂浼?400 鎴?403锛屼笉浼氬府浣犺浆鍒板彟涓€瀹躲€?
+3. **鏌愪釜閫氶亾杩斿洖 503 `channel_unavailable`锛?* 杩欎釜閫氶亾杩樻病瀵煎叆鍙敤璐﹀彿銆?
+4. **QClaw / QwenWork 璇峰湪 Windows 涓婄洿鎺ヨ窇 `python -m src.gateway.server`銆?* Linux Docker 璇讳笉浜嗚繖涓ゅ鐢?DPAPI 鍔犲瘑鐨勬湰鏈烘枃浠讹紱绠＄悊椤典細鍐欐槑杩欎竴鐐广€俉orkBuddy 鍙互缁х画鐢?Docker銆?
+5. 鏈」鐩拰鑱婂ぉ瀹㈡埛绔渶濂藉湪鍚屼竴鍙扮數鑴戙€傚鎴风濡傛灉璺戝湪 Docker 閲岋紝Base URL 濉?`http://host.docker.internal:8787/v1`锛屼笉瑕佸～瀹瑰櫒鑷繁鐨?`127.0.0.1`銆?
 
-## 安装与启动
+## 瀹夎涓庡惎鍔?
 
-还没装环境时按这几步走。已经有虚拟环境的，装完 `ops/requirements/base.txt` 后执行 `python -m gateway.server` 即可。
+杩樻病瑁呯幆澧冩椂鎸夎繖鍑犳璧般€傚凡缁忔湁铏氭嫙鐜鐨勶紝瑁呭畬 `ops/requirements/base.txt` 鍚庢墽琛?`python -m src.gateway.server` 鍗冲彲銆?
 
-### 1. 安装工具
+### 1. 瀹夎宸ュ叿
 
-1. [Git](https://git-scm.com/downloads)，Windows 保持默认选项
-2. [Miniconda](https://docs.conda.io/projects/miniconda/en/latest/)，推荐 Python 3.12
-3. 先打开并登录你要用的官方客户端（至少 Work Buddy / CodeBuddy）
+1. [Git](https://git-scm.com/downloads)锛學indows 淇濇寔榛樿閫夐」
+2. [Miniconda](https://docs.conda.io/projects/miniconda/en/latest/)锛屾帹鑽?Python 3.12
+3. 鍏堟墦寮€骞剁櫥褰曚綘瑕佺敤鐨勫畼鏂瑰鎴风锛堣嚦灏?Work Buddy / CodeBuddy锛?
 
-装完后**重新打开** PowerShell、Windows Terminal 或 Anaconda Prompt：
+瑁呭畬鍚?*閲嶆柊鎵撳紑** PowerShell銆乄indows Terminal 鎴?Anaconda Prompt锛?
 
 ```powershell
 git --version
 conda --version
 ```
 
-找不到 `conda` 时，用开始菜单里的 **Anaconda Prompt / Miniconda Prompt**。也可以在那里执行 `conda init powershell`，关掉窗口再开。
+鎵句笉鍒?`conda` 鏃讹紝鐢ㄥ紑濮嬭彍鍗曢噷鐨?**Anaconda Prompt / Miniconda Prompt**銆備篃鍙互鍦ㄩ偅閲屾墽琛?`conda init powershell`锛屽叧鎺夌獥鍙ｅ啀寮€銆?
 
-### 2. 克隆项目
+### 2. 鍏嬮殕椤圭洰
 
 ```powershell
 git clone https://github.com/wicm84266964/Buddy2api.git
@@ -64,100 +64,100 @@ cd Buddy2api
 Get-ChildItem README.md, ops, gateway
 ```
 
-后面的命令都要在这个目录里执行。
+鍚庨潰鐨勫懡浠ら兘瑕佸湪杩欎釜鐩綍閲屾墽琛屻€?
 
-### 3. 用 Conda 启动（推荐）
+### 3. 鐢?Conda 鍚姩锛堟帹鑽愶級
 
 ```powershell
 conda create -n buddy2api python=3.12 -y
 conda activate buddy2api
 python -m pip install --upgrade pip
 python -m pip install -r ops/requirements/base.txt
-python -m gateway.server
+python -m src.gateway.server
 ```
 
-看到监听信息后，浏览器打开：
+鐪嬪埌鐩戝惉淇℃伅鍚庯紝娴忚鍣ㄦ墦寮€锛?
 
 ```text
 http://127.0.0.1:8787
 ```
 
-停止服务：回到终端按 `Ctrl+C`。下次开机后：
+鍋滄鏈嶅姟锛氬洖鍒扮粓绔寜 `Ctrl+C`銆備笅娆″紑鏈哄悗锛?
 
 ```powershell
-cd <你的项目路径>\Buddy2api
+cd <浣犵殑椤圭洰璺緞>\Buddy2api
 conda activate buddy2api
-python -m gateway.server
+python -m src.gateway.server
 ```
 
-提示符前面应出现 `(buddy2api)`，再执行 `python -m pip`，避免装到系统 Python。
+鎻愮ず绗﹀墠闈㈠簲鍑虹幇 `(buddy2api)`锛屽啀鎵ц `python -m pip`锛岄伩鍏嶈鍒扮郴缁?Python銆?
 
-### 其他启动方式
+### 鍏朵粬鍚姩鏂瑰紡
 
-- **脚本：** Windows 安装 Python 时勾选 Add Python to PATH，在项目目录执行 `.\ops\start.bat`。Linux / macOS：`chmod +x ops/start.sh && ./ops/start.sh`。脚本优先用名为 `buddy2api` 的 Conda 环境，没有 Conda 才建 `.venv`。
-- **Docker：** `powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1`。本机没有 WorkBuddy 登录目录时脚本仍会启动。容器下拉里仍有六个通道（开 GMI 需 `CB_GATEWAY_PROVIDERS`），但 QClaw / QwenWork 请用上面的 `python -m gateway.server`。TraeWork 登录文件不是 DPAPI，本机 `python -m gateway.server` 导入后 Docker 也能用库里的 token。Trae SOLO 不读本机目录，登录闭环与 token 都在库里，容器内同样可用。GMI 走 Web 导入，容器内也直接可用。
+- **鑴氭湰锛?* Windows 瀹夎 Python 鏃跺嬀閫?Add Python to PATH锛屽湪椤圭洰鐩綍鎵ц `.\ops\start.bat`銆侺inux / macOS锛歚chmod +x ops/start.sh && ./ops/start.sh`銆傝剼鏈紭鍏堢敤鍚嶄负 `buddy2api` 鐨?Conda 鐜锛屾病鏈?Conda 鎵嶅缓 `.venv`銆?
+- **Docker锛?* `powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1`銆傛湰鏈烘病鏈?WorkBuddy 鐧诲綍鐩綍鏃惰剼鏈粛浼氬惎鍔ㄣ€傚鍣ㄤ笅鎷夐噷浠嶆湁鍏釜閫氶亾锛堝紑 GMI 闇€ `CB_GATEWAY_PROVIDERS`锛夛紝浣?QClaw / QwenWork 璇风敤涓婇潰鐨?`python -m src.gateway.server`銆俆raeWork 鐧诲綍鏂囦欢涓嶆槸 DPAPI锛屾湰鏈?`python -m src.gateway.server` 瀵煎叆鍚?Docker 涔熻兘鐢ㄥ簱閲岀殑 token銆俆rae SOLO 涓嶈鏈満鐩綍锛岀櫥褰曢棴鐜笌 token 閮藉湪搴撻噷锛屽鍣ㄥ唴鍚屾牱鍙敤銆侴MI 璧?Web 瀵煎叆锛屽鍣ㄥ唴涔熺洿鎺ュ彲鐢ㄣ€?
 
-### 第一次打开网页之后
+### 绗竴娆℃墦寮€缃戦〉涔嬪悗
 
-管理页不再自动发 Cookie。第一次打开网页后，到「设置」把启动日志里的 Admin Token 粘进「管理页登录」保存一次，之后浏览器凭 HttpOnly Cookie 访问。
+绠＄悊椤典笉鍐嶈嚜鍔ㄥ彂 Cookie銆傜涓€娆℃墦寮€缃戦〉鍚庯紝鍒般€岃缃€嶆妸鍚姩鏃ュ織閲岀殑 Admin Token 绮樿繘銆岀鐞嗛〉鐧诲綍銆嶄繚瀛樹竴娆★紝涔嬪悗娴忚鍣ㄥ嚟 HttpOnly Cookie 璁块棶銆?
 
-1. 打开「账号」。下拉里选 WorkBuddy / QClaw / 千问办公 / TraeWork，点「重新检测」，再点「一键导入本机登录」。选 **Trae SOLO** 时改用「发起网页登录」：新窗口完成 TRAE 登录后自动跳回入库；远程够不到 `127.0.0.1` 回调时，把浏览器地址栏的完整 URL 粘进「手动完成」。
-2. 点该账号的「测试」，能返回一句话就说明这条通道通了。
-3. 打开「API Keys」，**先选同一个通道**再创建。给 Codex 用时 Key 类型选 Codex，接口用 `/v1/responses`。创建后可以再显示、复制完整 Key。
-4. 在客户端里填：
-   - Base URL：`http://127.0.0.1:8787/v1`
-   - API Key：刚复制的 Key
-   - 模型：WorkBuddy 用 `auto` 即可；QClaw 用 `auto`；千问办公用 `auto` 或 `qwork-advanced`；TraeWork 用 `auto` 或 `qwen-3.7-plus`；Trae SOLO 用 `auto` 或 `glm-5.2`（`auto` 在 SOLO 上落到 `glm-5.2`）
+1. 鎵撳紑銆岃处鍙枫€嶃€備笅鎷夐噷閫?WorkBuddy / QClaw / 鍗冮棶鍔炲叕 / TraeWork锛岀偣銆岄噸鏂版娴嬨€嶏紝鍐嶇偣銆屼竴閿鍏ユ湰鏈虹櫥褰曘€嶃€傞€?**Trae SOLO** 鏃舵敼鐢ㄣ€屽彂璧风綉椤电櫥褰曘€嶏細鏂扮獥鍙ｅ畬鎴?TRAE 鐧诲綍鍚庤嚜鍔ㄨ烦鍥炲叆搴擄紱杩滅▼澶熶笉鍒?`127.0.0.1` 鍥炶皟鏃讹紝鎶婃祻瑙堝櫒鍦板潃鏍忕殑瀹屾暣 URL 绮樿繘銆屾墜鍔ㄥ畬鎴愩€嶃€?
+2. 鐐硅璐﹀彿鐨勩€屾祴璇曘€嶏紝鑳借繑鍥炰竴鍙ヨ瘽灏辫鏄庤繖鏉￠€氶亾閫氫簡銆?
+3. 鎵撳紑銆孉PI Keys銆嶏紝**鍏堥€夊悓涓€涓€氶亾**鍐嶅垱寤恒€傜粰 Codex 鐢ㄦ椂 Key 绫诲瀷閫?Codex锛屾帴鍙ｇ敤 `/v1/responses`銆傚垱寤哄悗鍙互鍐嶆樉绀恒€佸鍒跺畬鏁?Key銆?
+4. 鍦ㄥ鎴风閲屽～锛?
+   - Base URL锛歚http://127.0.0.1:8787/v1`
+   - API Key锛氬垰澶嶅埗鐨?Key
+   - 妯″瀷锛歐orkBuddy 鐢?`auto` 鍗冲彲锛決Claw 鐢?`auto`锛涘崈闂姙鍏敤 `auto` 鎴?`qwork-advanced`锛汿raeWork 鐢?`auto` 鎴?`qwen-3.7-plus`锛汿rae SOLO 鐢?`auto` 鎴?`glm-5.2`锛坄auto` 鍦?SOLO 涓婅惤鍒?`glm-5.2`锛?
 
-管理页打不开或要远程访问时：
+绠＄悊椤垫墦涓嶅紑鎴栬杩滅▼璁块棶鏃讹細
 
 ```powershell
-$env:CB_GATEWAY_ADMIN_TOKEN="cb-admin-请换成足够长的随机值"
-python -m gateway.server
+$env:CB_GATEWAY_ADMIN_TOKEN="cb-admin-璇锋崲鎴愯冻澶熼暱鐨勯殢鏈哄€?
+python -m src.gateway.server
 ```
 
-### 更新
+### 鏇存柊
 
-先 `Ctrl+C` 停掉正在跑的服务：
+鍏?`Ctrl+C` 鍋滄帀姝ｅ湪璺戠殑鏈嶅姟锛?
 
 ```powershell
-cd <你的项目路径>\Buddy2api
+cd <浣犵殑椤圭洰璺緞>\Buddy2api
 git pull --ff-only
 conda activate buddy2api
 python -m pip install -r ops/requirements/base.txt
-python -m gateway.server
+python -m src.gateway.server
 ```
 
-## 常见问题
+## 甯歌闂
 
-- `git` 或 `conda` 不是内部命令：关掉终端重开；Conda 用户改用 Miniconda Prompt。
-- `No module named ...`：先 `conda activate buddy2api`，再 `python -m pip install -r ops/requirements/base.txt`。
-- 下载依赖很慢：确认能访问 PyPI，不要混用好几个 Python。
-- 端口 8787 被占用：关掉旧的 Buddy2api，或 `python -m gateway.server --port 8788`。
-- 网页里一个账号都没有：还没导入。选对通道再检测；登录目录不对就设 `CB_AUTH_DIR` / `CB_QCLAW_AUTH_DIR` / `CB_QWENWORK_AUTH_DIR`。
-- 创建 Key 失败：没选通道。
-- 客户端 503 `channel_unavailable`：这个 Key 绑定的通道还没有可用账号。
-- 客户端 403 `key_channel_mismatch`：模型带了别的通道前缀，和当前 Key 不一致。
-- 客户端 400 `unknown_model`：模型不属于这把 Key 的通道。换 Key，或改成该通道认识的 id。
+- `git` 鎴?`conda` 涓嶆槸鍐呴儴鍛戒护锛氬叧鎺夌粓绔噸寮€锛汣onda 鐢ㄦ埛鏀圭敤 Miniconda Prompt銆?
+- `No module named ...`锛氬厛 `conda activate buddy2api`锛屽啀 `python -m pip install -r ops/requirements/base.txt`銆?
+- 涓嬭浇渚濊禆寰堟參锛氱‘璁よ兘璁块棶 PyPI锛屼笉瑕佹贩鐢ㄥソ鍑犱釜 Python銆?
+- 绔彛 8787 琚崰鐢細鍏虫帀鏃х殑 Buddy2api锛屾垨 `python -m src.gateway.server --port 8788`銆?
+- 缃戦〉閲屼竴涓处鍙烽兘娌℃湁锛氳繕娌″鍏ャ€傞€夊閫氶亾鍐嶆娴嬶紱鐧诲綍鐩綍涓嶅灏辫 `CB_AUTH_DIR` / `CB_QCLAW_AUTH_DIR` / `CB_QWENWORK_AUTH_DIR`銆?
+- 鍒涘缓 Key 澶辫触锛氭病閫夐€氶亾銆?
+- 瀹㈡埛绔?503 `channel_unavailable`锛氳繖涓?Key 缁戝畾鐨勯€氶亾杩樻病鏈夊彲鐢ㄨ处鍙枫€?
+- 瀹㈡埛绔?403 `key_channel_mismatch`锛氭ā鍨嬪甫浜嗗埆鐨勯€氶亾鍓嶇紑锛屽拰褰撳墠 Key 涓嶄竴鑷淬€?
+- 瀹㈡埛绔?400 `unknown_model`锛氭ā鍨嬩笉灞炰簬杩欐妸 Key 鐨勯€氶亾銆傛崲 Key锛屾垨鏀规垚璇ラ€氶亾璁よ瘑鐨?id銆?
 
-## 从 1.4.x 升级
+## 浠?1.4.x 鍗囩骇
 
-启动时会自动改数据库。旧 Key 视为绑在 `workbuddy` 上，原来的 `auto` / `glm-5.2` 还能用。
+鍚姩鏃朵細鑷姩鏀规暟鎹簱銆傛棫 Key 瑙嗕负缁戝湪 `workbuddy` 涓婏紝鍘熸潵鐨?`auto` / `glm-5.2` 杩樿兘鐢ㄣ€?
 
-和 1.4 不同的地方：启动不再自动导入账号；空仓是 503 而不是普通 `server_error`；新建 Key 必须选通道；官方余额只显示积分，不把各厂数字加在一起。
+鍜?1.4 涓嶅悓鐨勫湴鏂癸細鍚姩涓嶅啀鑷姩瀵煎叆璐﹀彿锛涚┖浠撴槸 503 鑰屼笉鏄櫘閫?`server_error`锛涙柊寤?Key 蹇呴』閫夐€氶亾锛涘畼鏂逛綑棰濆彧鏄剧ず绉垎锛屼笉鎶婂悇鍘傛暟瀛楀姞鍦ㄤ竴璧枫€?
 
-## 客户端接入
+## 瀹㈡埛绔帴鍏?
 
-| 字段 | 值 |
+| 瀛楁 | 鍊?|
 |---|---|
 | Base URL | `http://127.0.0.1:8787/v1` |
-| API Key | 管理页创建，已绑定通道 |
-| 模型 | WorkBuddy：`auto` / `glm-5.2`。QClaw：`auto` 或 `qclaw/default`。QwenWork：`auto` 或 `qwork-advanced`。TraeWork：`auto` 或 `qwen-3.7-plus`。Trae SOLO：`auto` / `glm-5.2` / `traesolo/...`（完整列表见 `/v1/models`） |
-| Stream | 建议开 |
+| API Key | 绠＄悊椤靛垱寤猴紝宸茬粦瀹氶€氶亾 |
+| 妯″瀷 | WorkBuddy锛歚auto` / `glm-5.2`銆俀Claw锛歚auto` 鎴?`qclaw/default`銆俀wenWork锛歚auto` 鎴?`qwork-advanced`銆俆raeWork锛歚auto` 鎴?`qwen-3.7-plus`銆俆rae SOLO锛歚auto` / `glm-5.2` / `traesolo/...`锛堝畬鏁村垪琛ㄨ `/v1/models`锛?|
+| Stream | 寤鸿寮€ |
 
-接口：`/v1/chat/completions`、`/v1/responses`、`/v1/models`。没加前缀的 `auto` 走这把 Key 绑定的通道。Codex 用 Responses 接口；管理页选 Codex 类型的 Key 会按 Codex 特征 prompt 做清洗（其它客户端借用这把 Key、但没有 Codex 特征时不改写）。
+鎺ュ彛锛歚/v1/chat/completions`銆乣/v1/responses`銆乣/v1/models`銆傛病鍔犲墠缂€鐨?`auto` 璧拌繖鎶?Key 缁戝畾鐨勯€氶亾銆侰odex 鐢?Responses 鎺ュ彛锛涚鐞嗛〉閫?Codex 绫诲瀷鐨?Key 浼氭寜 Codex 鐗瑰緛 prompt 鍋氭竻娲楋紙鍏跺畠瀹㈡埛绔€熺敤杩欐妸 Key銆佷絾娌℃湁 Codex 鐗瑰緛鏃朵笉鏀瑰啓锛夈€?
 
-OpenCode 示例（WorkBuddy Key）：
+OpenCode 绀轰緥锛圵orkBuddy Key锛夛細
 
 ```json
 {
@@ -166,7 +166,7 @@ OpenCode 示例（WorkBuddy Key）：
       "npm": "@ai-sdk/openai-compatible",
       "options": {
         "baseURL": "http://127.0.0.1:8787/v1",
-        "apiKey": "sk-cb-你的key"
+        "apiKey": "sk-cb-浣犵殑key"
       },
       "models": {
         "auto": { "name": "WorkBuddy Auto" },
@@ -178,41 +178,41 @@ OpenCode 示例（WorkBuddy Key）：
 ```
 
 ```powershell
-opencode run -m workbuddy/auto "你好"
+opencode run -m workbuddy/auto "浣犲ソ"
 ```
 
 ```bash
 curl http://127.0.0.1:8787/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-cb-你的key" \
-  -d '{"model":"auto","messages":[{"role":"user","content":"你好"}]}'
+  -H "Authorization: Bearer sk-cb-浣犵殑key" \
+  -d '{"model":"auto","messages":[{"role":"user","content":"浣犲ソ"}]}'
 ```
 
-QwenWork、QClaw、TraeWork、Trae SOLO 各用自己那把 Key，不要混用。注意 `glm-5.2` 在 WorkBuddy 和 Trae SOLO 两个通道都存在：不带前缀时按 Key 绑定的通道解析，想明确指 SOLO 就用 `traesolo/glm-5.2`。
+QwenWork銆丵Claw銆乀raeWork銆乀rae SOLO 鍚勭敤鑷繁閭ｆ妸 Key锛屼笉瑕佹贩鐢ㄣ€傛敞鎰?`glm-5.2` 鍦?WorkBuddy 鍜?Trae SOLO 涓や釜閫氶亾閮藉瓨鍦細涓嶅甫鍓嶇紑鏃舵寜 Key 缁戝畾鐨勯€氶亾瑙ｆ瀽锛屾兂鏄庣‘鎸?SOLO 灏辩敤 `traesolo/glm-5.2`銆?
 
-### 按通道配置模型列表
+### 鎸夐€氶亾閰嶇疆妯″瀷鍒楄〃
 
-各通道的模型列表/别名可通过管理 API 配置（改完立即生效，无需重启）；不配置时用内置默认。
+鍚勯€氶亾鐨勬ā鍨嬪垪琛?鍒悕鍙€氳繃绠＄悊 API 閰嶇疆锛堟敼瀹岀珛鍗崇敓鏁堬紝鏃犻渶閲嶅惎锛夛紱涓嶉厤缃椂鐢ㄥ唴缃粯璁ゃ€?
 
 ```bash
-# 查看（含生效值、内置默认、是否自定义）
+# 鏌ョ湅锛堝惈鐢熸晥鍊笺€佸唴缃粯璁ゃ€佹槸鍚﹁嚜瀹氫箟锛?
 curl -H "Authorization: Bearer <admin-token>" http://127.0.0.1:8787/admin/channels/traework/models
 
-# 修改（models 整体替换；null 重置为默认）
+# 淇敼锛坢odels 鏁翠綋鏇挎崲锛沶ull 閲嶇疆涓洪粯璁わ級
 curl -X PUT -H "Authorization: Bearer <admin-token>" -H "Content-Type: application/json" \
   http://127.0.0.1:8787/admin/channels/traework/models \
   -d '{"models":["qwen-3.7-plus","glm-5"],"aliases":{"auto":"qwen-3.7-plus"}}'
 ```
 
-规则：`models` 为非空字符串数组（或 `{"id": "..."}` 对象），`aliases` 为 `别名 -> 模型id` 的非空对象；
-一次请求至少传一项。自定义列表是白名单，不在列表内的模型对该通道 400（QClaw 的 `pool-*` 前缀除外）。
-WorkBuddy 兼容历史设置键 `models` / `model_aliases`；其它通道存 `<channel>.models` / `<channel>.aliases`。
+瑙勫垯锛歚models` 涓洪潪绌哄瓧绗︿覆鏁扮粍锛堟垨 `{"id": "..."}` 瀵硅薄锛夛紝`aliases` 涓?`鍒悕 -> 妯″瀷id` 鐨勯潪绌哄璞★紱
+涓€娆¤姹傝嚦灏戜紶涓€椤广€傝嚜瀹氫箟鍒楄〃鏄櫧鍚嶅崟锛屼笉鍦ㄥ垪琛ㄥ唴鐨勬ā鍨嬪璇ラ€氶亾 400锛圦Claw 鐨?`pool-*` 鍓嶇紑闄ゅ锛夈€?
+WorkBuddy 鍏煎鍘嗗彶璁剧疆閿?`models` / `model_aliases`锛涘叾瀹冮€氶亾瀛?`<channel>.models` / `<channel>.aliases`銆?
 
-### 统一模型（跨平台翻译层）
+### 缁熶竴妯″瀷锛堣法骞冲彴缈昏瘧灞傦級
 
-同一个模型在不同平台名字不一样时，定义一次统一模型（统一名以 WorkBuddy 命名为准），
-客户端只请求统一名，网关按 Key 绑定平台翻译成该平台内部名；之后照旧走白名单校验
-（内部名不在白名单仍 400，统一模型不自动进白名单）。
+鍚屼竴涓ā鍨嬪湪涓嶅悓骞冲彴鍚嶅瓧涓嶄竴鏍锋椂锛屽畾涔変竴娆＄粺涓€妯″瀷锛堢粺涓€鍚嶄互 WorkBuddy 鍛藉悕涓哄噯锛夛紝
+瀹㈡埛绔彧璇锋眰缁熶竴鍚嶏紝缃戝叧鎸?Key 缁戝畾骞冲彴缈昏瘧鎴愯骞冲彴鍐呴儴鍚嶏紱涔嬪悗鐓ф棫璧扮櫧鍚嶅崟鏍￠獙
+锛堝唴閮ㄥ悕涓嶅湪鐧藉悕鍗曚粛 400锛岀粺涓€妯″瀷涓嶈嚜鍔ㄨ繘鐧藉悕鍗曪級銆?
 
 ```bash
 curl -X PUT -H "Authorization: Bearer <admin-token>" -H "Content-Type: application/json" \
@@ -220,46 +220,46 @@ curl -X PUT -H "Authorization: Bearer <admin-token>" -H "Content-Type: applicati
   -d '{"models":[{"name":"deepseek-v4-flash","mappings":{"traework":"DeepSeek-V4-Flash-Official","workbuddy":"deepseek-v4-flash"}}]}'
 ```
 
-网页管理页「模型配置」页提供图形界面：「统一模型」宽表（一行一个统一模型、每列一个平台，
-格子填内部名、留空 = 该平台没有）+「各平台设置」可切换列表（每平台的白名单与别名）。
+缃戦〉绠＄悊椤点€屾ā鍨嬮厤缃€嶉〉鎻愪緵鍥惧舰鐣岄潰锛氥€岀粺涓€妯″瀷銆嶅琛紙涓€琛屼竴涓粺涓€妯″瀷銆佹瘡鍒椾竴涓钩鍙帮紝
+鏍煎瓙濉唴閮ㄥ悕銆佺暀绌?= 璇ュ钩鍙版病鏈夛級+銆屽悇骞冲彴璁剧疆銆嶅彲鍒囨崲鍒楄〃锛堟瘡骞冲彴鐨勭櫧鍚嶅崟涓庡埆鍚嶏級銆?
 
-## 启动参数
+## 鍚姩鍙傛暟
 
-| 参数 | 默认 | 说明 |
+| 鍙傛暟 | 榛樿 | 璇存槑 |
 |---|---|---|
-| `--host` | `127.0.0.1` | 监听地址，本机用保持这个值 |
-| `--port` | `8787` | 端口 |
-| `--admin-token` | 自动生成（启动日志打印一次） | 管理 Token；在管理页「设置」粘贴一次即可拿到 Cookie |
-| `--no-admin-auth` | 关 | 关掉管理鉴权，只适合本机临时试 |
-| `--config` | 读 `config.toml` 的 `[default]` 块；带路径则当作 TOML 文件路径；不带路径则当作 profile 名（参见 [配置文件](#配置文件)） |
-| `--config-name` | `default` | TOML 文件内要加载的 profile 表名（`[dev]` / `[prod]` 等） |
+| `--host` | `127.0.0.1` | 鐩戝惉鍦板潃锛屾湰鏈虹敤淇濇寔杩欎釜鍊?|
+| `--port` | `8787` | 绔彛 |
+| `--admin-token` | 鑷姩鐢熸垚锛堝惎鍔ㄦ棩蹇楁墦鍗颁竴娆★級 | 绠＄悊 Token锛涘湪绠＄悊椤点€岃缃€嶇矘璐翠竴娆″嵆鍙嬁鍒?Cookie |
+| `--no-admin-auth` | 鍏?| 鍏虫帀绠＄悊閴存潈锛屽彧閫傚悎鏈満涓存椂璇?|
+| `--config` | 璇?`config.toml` 鐨?`[default]` 鍧楋紱甯﹁矾寰勫垯褰撲綔 TOML 鏂囦欢璺緞锛涗笉甯﹁矾寰勫垯褰撲綔 profile 鍚嶏紙鍙傝 [閰嶇疆鏂囦欢](#閰嶇疆鏂囦欢)锛?|
+| `--config-name` | `default` | TOML 鏂囦欢鍐呰鍔犺浇鐨?profile 琛ㄥ悕锛坄[dev]` / `[prod]` 绛夛級 |
 
-## 配置文件
+## 閰嶇疆鏂囦欢
 
-`config.toml` 放在项目根目录，启动时被 `gateway.server` 自动加载。适合"我不想每次记一堆 CLI 参数 / 环境变量"的场景，把 `host` `port` `database.path` `admin.token` 写进文件，bare `python -m gateway.server` 就能直接用。
+`config.toml` 鏀惧湪椤圭洰鏍圭洰褰曪紝鍚姩鏃惰 `gateway.server` 鑷姩鍔犺浇銆傞€傚悎"鎴戜笉鎯虫瘡娆¤涓€鍫?CLI 鍙傛暟 / 鐜鍙橀噺"鐨勫満鏅紝鎶?`host` `port` `database.path` `admin.token` 鍐欒繘鏂囦欢锛宐are `python -m src.gateway.server` 灏辫兘鐩存帴鐢ㄣ€?
 
-**优先级**（later wins）：
+**浼樺厛绾?*锛坙ater wins锛夛細
 
 ```
-代码默认值  →  config.toml [default]  →  config.toml [<profile>]  →  环境变量  →  CLI 参数
+浠ｇ爜榛樿鍊? 鈫? config.toml [default]  鈫? config.toml [<profile>]  鈫? 鐜鍙橀噺  鈫? CLI 鍙傛暟
 ```
 
-**两种 profile 加载方式**：
+**涓ょ profile 鍔犺浇鏂瑰紡**锛?
 
 ```bash
-# 1) profile 写在同一个 config.toml 里
-python -m gateway.server                          # 用 [default] 块
-python -m gateway.server --config prod            # 用 [prod] 块
-CB_GATEWAY_CONFIG=prod python -m gateway.server   # 同上，但通过环境变量
+# 1) profile 鍐欏湪鍚屼竴涓?config.toml 閲?
+python -m src.gateway.server                          # 鐢?[default] 鍧?
+python -m src.gateway.server --config prod            # 鐢?[prod] 鍧?
+CB_GATEWAY_CONFIG=prod python -m src.gateway.server   # 鍚屼笂锛屼絾閫氳繃鐜鍙橀噺
 
-# 2) profile 在独立文件里
-python -m gateway.server --config config.prod.toml
+# 2) profile 鍦ㄧ嫭绔嬫枃浠堕噷
+python -m src.gateway.server --config config.prod.toml
 ```
 
-**完整示例**（dev / prod 共享同一份代码、各自一份配置）：
+**瀹屾暣绀轰緥**锛坉ev / prod 鍏变韩鍚屼竴浠戒唬鐮併€佸悇鑷竴浠介厤缃級锛?
 
 ```toml
-# config.toml · dev checkout 默认用 8787
+# config.toml 路 dev checkout 榛樿鐢?8787
 [default.server]
 host = "127.0.0.1"
 port = 8787
@@ -270,7 +270,7 @@ port = 8787
 ```
 
 ```toml
-# config.prod.toml · prod checkout 走 8788、自己的 data 目录
+# config.prod.toml 路 prod checkout 璧?8788銆佽嚜宸辩殑 data 鐩綍
 [default.server]
 host = "127.0.0.1"
 port = 8788
@@ -279,198 +279,196 @@ port = 8788
 path = "/var/lib/buddy2api/codebuddy_gateway.db"
 
 [default.admin]
-# 留空就自动生成；填了就固定下来（浏览器 Cookie 跨重启有效）
+# 鐣欑┖灏辫嚜鍔ㄧ敓鎴愶紱濉簡灏卞浐瀹氫笅鏉ワ紙娴忚鍣?Cookie 璺ㄩ噸鍚湁鏁堬級
 # token = "cb-admin-xxxxxxxxxxxxxxxxxxxxxxxx"
 ```
 
-`config.toml` 和 `config.*.toml` 都被 `.gitignore` 排除（per-deploy 配置不进 git），跟踪的只有 `config.example.toml` 模板。
+`config.toml` 鍜?`config.*.toml` 閮借 `.gitignore` 鎺掗櫎锛坧er-deploy 閰嶇疆涓嶈繘 git锛夛紝璺熻釜鐨勫彧鏈?`config.example.toml` 妯℃澘銆?
 
-**同时跑 dev + prod**：两个 checkout 各写一份 `config.toml`，端口和 db 路径必须错开（否则 WAL 锁会冲突）：
+**鍚屾椂璺?dev + prod**锛氫袱涓?checkout 鍚勫啓涓€浠?`config.toml`锛岀鍙ｅ拰 db 璺緞蹇呴』閿欏紑锛堝惁鍒?WAL 閿佷細鍐茬獊锛夛細
 
-| checkout | config.toml 端口 | config.toml db 路径 |
+| checkout | config.toml 绔彛 | config.toml db 璺緞 |
 |---|---|---|
-| `Buddy2api/`（dev） | 8787 | `data/codebuddy_gateway.db`（默认） |
-| `Buddy2api-prod/`（worktree 跑实例） | 8788 | `data/codebuddy_gateway.db`（相对 prod 自己的 cwd） |
+| `Buddy2api/`锛坉ev锛?| 8787 | `data/codebuddy_gateway.db`锛堥粯璁わ級 |
+| `Buddy2api-prod/`锛坵orktree 璺戝疄渚嬶級 | 8788 | `data/codebuddy_gateway.db`锛堢浉瀵?prod 鑷繁鐨?cwd锛?|
 
-固定 admin token：编辑 `config.toml` 的 `admin.token = "cb-admin-xxx"`。生成一个：`python -c "import secrets; print('cb-admin-' + secrets.token_urlsafe(24))"`。
+鍥哄畾 admin token锛氱紪杈?`config.toml` 鐨?`admin.token = "cb-admin-xxx"`銆傜敓鎴愪竴涓細`python -c "import secrets; print('cb-admin-' + secrets.token_urlsafe(24))"`銆?
 
-## 环境变量
+## 鐜鍙橀噺
 
-> 全部可选，都有合理的默认值；绝大多数场合**什么都不用设**。变量按用途分组，单说明里括号内为该变量的默认值，`*` 表示只在特殊场合用。
+> 鍏ㄩ儴鍙€夛紝閮芥湁鍚堢悊鐨勯粯璁ゅ€硷紱缁濆ぇ澶氭暟鍦哄悎**浠€涔堥兘涓嶇敤璁?*銆傚彉閲忔寜鐢ㄩ€斿垎缁勶紝鍗曡鏄庨噷鎷彿鍐呬负璇ュ彉閲忕殑榛樿鍊硷紝`*` 琛ㄧず鍙湪鐗规畩鍦哄悎鐢ㄣ€?
 
-### 核心 / 启动
-| 变量 | 说明 |
+### 鏍稿績 / 鍚姩
+| 鍙橀噺 | 璇存槑 |
 |---|---|
-| `CB_GATEWAY_PROVIDERS` | 启用哪些通道，逗号分隔。默认 `workbuddy,qclaw,qwenwork,traework,traesolo`。GMI 不在默认里，启用加在末尾：`workbuddy,qclaw,qwenwork,traework,traesolo,gmi` |
-| `CB_GATEWAY_AUTO_IMPORT` | 设 `1` 则启动时自动扫描导入账号。默认 `0` |
-| `CB_GATEWAY_CHECKIN_GAP_MS` | 一键领取时相邻账号的间隔毫秒（防风控，不可设太小）。默认 `800` |
-| `CB_GATEWAY_ADMIN_TOKEN` | 固定管理 Token。默认自动生成（启动日志打印一次，管理页「设置」粘贴一次即可拿 Cookie） |
-| `CB_GATEWAY_DB_PATH` | 数据库文件路径。默认项目下 `data/` 内 |
-| `CB_GATEWAY_MASTER_KEY` | 跨系统搬数据库时手动指定的加密主密钥。默认每实例自动生成（换机器或删 data 会失效，需迁移时用） |
-| `CB_GATEWAY_CREDENTIAL_KEY_FILE` * | 读取加密主密钥的文件路径（Docker 场景注入用）。默认空，即用 `CB_GATEWAY_MASTER_KEY` 或自动生成 |
-| `CB_GATEWAY_SECURE_COOKIE` | 设 `1` 强制管理 Cookie 走 Secure（https 或反向代理后）。默认跟随请求协议 |
-| `CB_GATEWAY_LOG_RETENTION_DAYS` | 日志保留天数。默认 `90` |
+| `CB_GATEWAY_PROVIDERS` | 鍚敤鍝簺閫氶亾锛岄€楀彿鍒嗛殧銆傞粯璁?`workbuddy,qclaw,qwenwork,traework,traesolo`銆侴MI 涓嶅湪榛樿閲岋紝鍚敤鍔犲湪鏈熬锛歚workbuddy,qclaw,qwenwork,traework,traesolo,gmi` |
+| `CB_GATEWAY_AUTO_IMPORT` | 璁?`1` 鍒欏惎鍔ㄦ椂鑷姩鎵弿瀵煎叆璐﹀彿銆傞粯璁?`0` |
+| `CB_GATEWAY_CHECKIN_GAP_MS` | 涓€閿鍙栨椂鐩搁偦璐﹀彿鐨勯棿闅旀绉掞紙闃查鎺э紝涓嶅彲璁惧お灏忥級銆傞粯璁?`800` |
+| `CB_GATEWAY_ADMIN_TOKEN` | 鍥哄畾绠＄悊 Token銆傞粯璁よ嚜鍔ㄧ敓鎴愶紙鍚姩鏃ュ織鎵撳嵃涓€娆★紝绠＄悊椤点€岃缃€嶇矘璐翠竴娆″嵆鍙嬁 Cookie锛?|
+| `CB_GATEWAY_DB_PATH` | 鏁版嵁搴撴枃浠惰矾寰勩€傞粯璁ら」鐩笅 `data/` 鍐?|
+| `CB_GATEWAY_MASTER_KEY` | 璺ㄧ郴缁熸惉鏁版嵁搴撴椂鎵嬪姩鎸囧畾鐨勫姞瀵嗕富瀵嗛挜銆傞粯璁ゆ瘡瀹炰緥鑷姩鐢熸垚锛堟崲鏈哄櫒鎴栧垹 data 浼氬け鏁堬紝闇€杩佺Щ鏃剁敤锛?|
+| `CB_GATEWAY_CREDENTIAL_KEY_FILE` * | 璇诲彇鍔犲瘑涓诲瘑閽ョ殑鏂囦欢璺緞锛圖ocker 鍦烘櫙娉ㄥ叆鐢級銆傞粯璁ょ┖锛屽嵆鐢?`CB_GATEWAY_MASTER_KEY` 鎴栬嚜鍔ㄧ敓鎴?|
+| `CB_GATEWAY_SECURE_COOKIE` | 璁?`1` 寮哄埗绠＄悊 Cookie 璧?Secure锛坔ttps 鎴栧弽鍚戜唬鐞嗗悗锛夈€傞粯璁よ窡闅忚姹傚崗璁?|
+| `CB_GATEWAY_LOG_RETENTION_DAYS` | 鏃ュ織淇濈暀澶╂暟銆傞粯璁?`90` |
 
-### 各通道登录目录
-| 通道 | 变量 | 说明 |
+### 鍚勯€氶亾鐧诲綍鐩綍
+| 閫氶亾 | 鍙橀噺 | 璇存槑 |
 |---|---|---|
-| WorkBuddy | `CB_AUTH_DIR` | 本机登录目录 |
-| QClaw | `CB_QCLAW_AUTH_DIR` | 本机登录目录 |
-| QwenWork | `CB_QWENWORK_AUTH_DIR` | 本机登录目录 |
-| TraeWork | `CB_TRAEWORK_AUTH_DIR` | `storage.json` 所在目录 |
-| Trae SOLO | `CB_TRAESOLO_CALLBACK_BASE` | 登录回调基地址（远程部署时指向能从外网访问服务的地址，默认用请求自身地址） |
-| Trae SOLO | `CB_TRAESOLO_AUTH_DIR` * | 凭证 JSON 扫描目录（可选；该通道默认不扫目录，走 Web 登录） |
+| WorkBuddy | `CB_AUTH_DIR` | 鏈満鐧诲綍鐩綍 |
+| QClaw | `CB_QCLAW_AUTH_DIR` | 鏈満鐧诲綍鐩綍 |
+| QwenWork | `CB_QWENWORK_AUTH_DIR` | 鏈満鐧诲綍鐩綍 |
+| TraeWork | `CB_TRAEWORK_AUTH_DIR` | `storage.json` 鎵€鍦ㄧ洰褰?|
+| Trae SOLO | `CB_TRAESOLO_CALLBACK_BASE` | 鐧诲綍鍥炶皟鍩哄湴鍧€锛堣繙绋嬮儴缃叉椂鎸囧悜鑳戒粠澶栫綉璁块棶鏈嶅姟鐨勫湴鍧€锛岄粯璁ょ敤璇锋眰鑷韩鍦板潃锛?|
+| Trae SOLO | `CB_TRAESOLO_AUTH_DIR` * | 鍑瘉 JSON 鎵弿鐩綍锛堝彲閫夛紱璇ラ€氶亾榛樿涓嶆壂鐩綍锛岃蛋 Web 鐧诲綍锛?|
 
-> `CB_HOST_AUTH_DIR` 仅 Docker 部署脚本内部使用（挂载的本机 WorkBuddy 目录），`CB_CONTAINER_AUTH_DIR` 是容器内的挂载点（默认 `/auth`），一般不用管。
+> `CB_HOST_AUTH_DIR` 浠?Docker 閮ㄧ讲鑴氭湰鍐呴儴浣跨敤锛堟寕杞界殑鏈満 WorkBuddy 鐩綍锛夛紝`CB_CONTAINER_AUTH_DIR` 鏄鍣ㄥ唴鐨勬寕杞界偣锛堥粯璁?`/auth`锛夛紝涓€鑸笉鐢ㄧ銆?
 
-### WorkBuddy 出站指纹（User-Agent / 版本头）
-| 变量 | 说明 |
+### WorkBuddy 鍑虹珯鎸囩汗锛圲ser-Agent / 鐗堟湰澶达級
+| 鍙橀噺 | 璇存槑 |
 |---|---|
-| `CB_GATEWAY_USER_AGENT` | 整体覆盖整个 User-Agent。默认 `CLI/2.109.2 CodeBuddy/2.109.2`，设 `codebuddy2openai/2.0` 可回退历史 UA。只影响 WorkBuddy 出站 |
-| `CB_GATEWAY_IDE_VERSION` | CLI 版本号，驱动 UA 与 X-IDE-Version。默认 `2.109.2` |
-| `CB_GATEWAY_STAINLESS_OS` * | 上报的操作系统字符串。默认按当前平台推断 |
-| `CB_GATEWAY_STAINLESS_PACKAGE_VERSION` * | `stainless` 包版本。默认 `5.10.1` |
-| `CB_GATEWAY_NODE_VERSION` * | Node 运行时版本。默认 `v22.13.1` |
+| `CB_GATEWAY_USER_AGENT` | 鏁翠綋瑕嗙洊鏁翠釜 User-Agent銆傞粯璁?`CLI/2.109.2 CodeBuddy/2.109.2`锛岃 `codebuddy2openai/2.0` 鍙洖閫€鍘嗗彶 UA銆傚彧褰卞搷 WorkBuddy 鍑虹珯 |
+| `CB_GATEWAY_IDE_VERSION` | CLI 鐗堟湰鍙凤紝椹卞姩 UA 涓?X-IDE-Version銆傞粯璁?`2.109.2` |
+| `CB_GATEWAY_STAINLESS_OS` * | 涓婃姤鐨勬搷浣滅郴缁熷瓧绗︿覆銆傞粯璁ゆ寜褰撳墠骞冲彴鎺ㄦ柇 |
+| `CB_GATEWAY_STAINLESS_PACKAGE_VERSION` * | `stainless` 鍖呯増鏈€傞粯璁?`5.10.1` |
+| `CB_GATEWAY_NODE_VERSION` * | Node 杩愯鏃剁増鏈€傞粯璁?`v22.13.1` |
 
-### 请求 / 风险控制
-| 变量 | 说明 |
+### 璇锋眰 / 椋庨櫓鎺у埗
+| 鍙橀噺 | 璇存槑 |
 |---|---|
-| `CB_GATEWAY_CORS_ORIGINS` | 允许的 CORS 来源，逗号分隔。默认 `http://127.0.0.1:8787,http://localhost:8787` |
-| `CB_GATEWAY_ALLOW_UNAUTHENTICATED_API` | 设 `1` 允许无 API key 请求（只适合本机临时测）。默认 `0` |
-| `CB_GATEWAY_MAX_BODY_BYTES` | 请求体上限字节。默认 `10MiB` |
-| `CB_GATEWAY_USAGE_RATE_LIMIT` | /usage 接口秒级限流，设 `0` 关闭。默认 `30` |
-| `CB_GATEWAY_TOOL_STALL_RETRY` | 工具停转时自动用 `tool_choice=required` 重试一次。默认 `1` |
-| `CB_GATEWAY_TOOL_STALL_FAIL_STREAM` * | 流式工具停转且重试也失败时，把回合标记为失败而不是返回正文。默认 `0` |
+| `CB_GATEWAY_CORS_ORIGINS` | 鍏佽鐨?CORS 鏉ユ簮锛岄€楀彿鍒嗛殧銆傞粯璁?`http://127.0.0.1:8787,http://localhost:8787` |
+| `CB_GATEWAY_ALLOW_UNAUTHENTICATED_API` | 璁?`1` 鍏佽鏃?API key 璇锋眰锛堝彧閫傚悎鏈満涓存椂娴嬶級銆傞粯璁?`0` |
+| `CB_GATEWAY_MAX_BODY_BYTES` | 璇锋眰浣撲笂闄愬瓧鑺傘€傞粯璁?`10MiB` |
+| `CB_GATEWAY_USAGE_RATE_LIMIT` | /usage 鎺ュ彛绉掔骇闄愭祦锛岃 `0` 鍏抽棴銆傞粯璁?`30` |
+| `CB_GATEWAY_TOOL_STALL_RETRY` | 宸ュ叿鍋滆浆鏃惰嚜鍔ㄧ敤 `tool_choice=required` 閲嶈瘯涓€娆°€傞粯璁?`1` |
+| `CB_GATEWAY_TOOL_STALL_FAIL_STREAM` * | 娴佸紡宸ュ叿鍋滆浆涓旈噸璇曚篃澶辫触鏃讹紝鎶婂洖鍚堟爣璁颁负澶辫触鑰屼笉鏄繑鍥炴鏂囥€傞粯璁?`0` |
 
-### 思考档位（按模型）
+### 鎬濊€冩。浣嶏紙鎸夋ā鍨嬶級
 
-不再用环境变量，改为在管理页「通道与模型 → 各平台设置」里**按模型**配置（存数据库，即时生效）：
+涓嶅啀鐢ㄧ幆澧冨彉閲忥紝鏀逛负鍦ㄧ鐞嗛〉銆岄€氶亾涓庢ā鍨?鈫?鍚勫钩鍙拌缃€嶉噷**鎸夋ā鍨?*閰嶇疆锛堝瓨鏁版嵁搴擄紝鍗虫椂鐢熸晥锛夛細
 
-- 每个模型一个下拉：`默认（不注入）` / `none` / `minimal` / `low` / `medium` / `high` / `max`；另有「通道默认」档位作用于未单独设置的模型。
-- 优先级：客户端显式 `reasoning_effort` > 按模型配置 > 通道默认 > 不注入（跟随上游默认）。
-- 仅 WorkBuddy 通道上游（`copilot.tencent.com`）确认支持该参数；其它通道在 UI 显示「不支持」。
-- 实测原生接受值见 `docs/design/per-model-reasoning-effort.md`。注意：deepseek/glm/auto 默认不思考、选档位=开启思考（会变慢）；想最快可给 DeepSeek 选 `low` 或留空。`off` 上游不接受（11150）。
+- 姣忎釜妯″瀷涓€涓笅鎷夛細`榛樿锛堜笉娉ㄥ叆锛塦 / `none` / `minimal` / `low` / `medium` / `high` / `max`锛涘彟鏈夈€岄€氶亾榛樿銆嶆。浣嶄綔鐢ㄤ簬鏈崟鐙缃殑妯″瀷銆?
+- 浼樺厛绾э細瀹㈡埛绔樉寮?`reasoning_effort` > 鎸夋ā鍨嬮厤缃?> 閫氶亾榛樿 > 涓嶆敞鍏ワ紙璺熼殢涓婃父榛樿锛夈€?
+- 浠?WorkBuddy 閫氶亾涓婃父锛坄copilot.tencent.com`锛夌‘璁ゆ敮鎸佽鍙傛暟锛涘叾瀹冮€氶亾鍦?UI 鏄剧ず銆屼笉鏀寔銆嶃€?
+- 瀹炴祴鍘熺敓鎺ュ彈鍊艰 `docs/design/per-model-reasoning-effort.md`銆傛敞鎰忥細deepseek/glm/auto 榛樿涓嶆€濊€冦€侀€夋。浣?寮€鍚€濊€冿紙浼氬彉鎱級锛涙兂鏈€蹇彲缁?DeepSeek 閫?`low` 鎴栫暀绌恒€俙off` 涓婃父涓嶆帴鍙楋紙11150锛夈€?
 
-### content 精简（workbuddy 11128 拦截自愈）
-| 变量 | 说明 |
+### content 绮剧畝锛坵orkbuddy 11128 鎷︽埅鑷剤锛?
+| 鍙橀噺 | 璇存槑 |
 |---|---|
-| `CB_GATEWAY_COMPACT_CHARS` | 手动全局开启精简超大请求体，并指定单字段字符阈值。默认 `0`（关闭，走下方的按通道自愈） |
-| `CB_GATEWAY_COMPACT_ARMED_CHARS` * | 某通道真触发过一次 11128 后，该通道自动精简的单字段阈值。默认 `3000` |
-| `CB_GATEWAY_COMPACT_SYSTEM_CHARS` * | system 消息阈值（纯头部截断，实测其尾部 git/commit 块是 11128 触发源）。默认 `5000` |
+| `CB_GATEWAY_COMPACT_CHARS` | 鎵嬪姩鍏ㄥ眬寮€鍚簿绠€瓒呭ぇ璇锋眰浣擄紝骞舵寚瀹氬崟瀛楁瀛楃闃堝€笺€傞粯璁?`0`锛堝叧闂紝璧颁笅鏂圭殑鎸夐€氶亾鑷剤锛?|
+| `CB_GATEWAY_COMPACT_ARMED_CHARS` * | 鏌愰€氶亾鐪熻Е鍙戣繃涓€娆?11128 鍚庯紝璇ラ€氶亾鑷姩绮剧畝鐨勫崟瀛楁闃堝€笺€傞粯璁?`3000` |
+| `CB_GATEWAY_COMPACT_SYSTEM_CHARS` * | system 娑堟伅闃堝€硷紙绾ご閮ㄦ埅鏂紝瀹炴祴鍏跺熬閮?git/commit 鍧楁槸 11128 瑙﹀彂婧愶級銆傞粯璁?`5000` |
 
-> 详见 `docs/workbuddy-11128-troubleshoot.md`：正常请求默认不截断，某通道返回 11128 后自动武装并精简（system 纯头切 5000、超大 content/reasoning 头切、tools 描述精简，结构键与 `tool_calls` 永不截），`/admin/stats` 的 `compaction` 字段可看生效情况。
+> 璇﹁ `docs/workbuddy-11128-troubleshoot.md`锛氭甯歌姹傞粯璁や笉鎴柇锛屾煇閫氶亾杩斿洖 11128 鍚庤嚜鍔ㄦ瑁呭苟绮剧畝锛坰ystem 绾ご鍒?5000銆佽秴澶?content/reasoning 澶村垏銆乼ools 鎻忚堪绮剧畝锛岀粨鏋勯敭涓?`tool_calls` 姘镐笉鎴級锛宍/admin/stats` 鐨?`compaction` 瀛楁鍙湅鐢熸晥鎯呭喌銆?
 
-### 调试
-| 变量 | 说明 |
+### 璋冭瘯
+| 鍙橀噺 | 璇存槑 |
 |---|---|
-| `CB_DEBUG_DUMP` * | 把 responses 协议的请求/响应（脱敏 JSON）dump 到 `upstream/.debug/` 便于排查出站协议。默认关 |
-| `CB_DEBUG_DUMP_INCLUDE_CONTENT` * | dump 时连 content 一起写（默认脱敏不含正文）。默认关，仅随 `CB_DEBUG_DUMP` 一起用 |
-| `CB_DOCKER` * | 标记运行在 Docker 内（内部判断用）。默认空 |
+| `CB_DEBUG_DUMP` * | 鎶?responses 鍗忚鐨勮姹?鍝嶅簲锛堣劚鏁?JSON锛塪ump 鍒?`upstream/.debug/` 渚夸簬鎺掓煡鍑虹珯鍗忚銆傞粯璁ゅ叧 |
+| `CB_DEBUG_DUMP_INCLUDE_CONTENT` * | dump 鏃惰繛 content 涓€璧峰啓锛堥粯璁よ劚鏁忎笉鍚鏂囷級銆傞粯璁ゅ叧锛屼粎闅?`CB_DEBUG_DUMP` 涓€璧风敤 |
+| `CB_DOCKER` * | 鏍囪杩愯鍦?Docker 鍐咃紙鍐呴儴鍒ゆ柇鐢級銆傞粯璁ょ┖ |
 
-## Credit 与 Token 统计
+## Credit 涓?Token 缁熻
 
-各通道的 token / credit 统计行为不一致：
+鍚勯€氶亾鐨?token / credit 缁熻琛屼负涓嶄竴鑷达細
 
-- **WorkBuddy** token 与 credit 都由上游直接报；
-- **Trae SOLO / QClaw / QwenWork** token 由上游报、credit 不报；
-- **TraeWork** token 与 credit 都不报（SSE 里 `token_usage` 事件被丢）。
+- **WorkBuddy** token 涓?credit 閮界敱涓婃父鐩存帴鎶ワ紱
+- **Trae SOLO / QClaw / QwenWork** token 鐢变笂娓告姤銆乧redit 涓嶆姤锛?
+- **TraeWork** token 涓?credit 閮戒笉鎶ワ紙SSE 閲?`token_usage` 浜嬩欢琚涪锛夈€?
 
-从 v2.2.0 起，traesolo/qclaw/qwenwork 三家可启用**网关侧 token→credit 估算**（每通道在
-「模型配置 → 各平台设置」里设 `credit_rate`，默认 1000 token / 1 credit）。这是**估算值不是真实扣费**，
-只用于看趋势和做内部估算，不要拿它和上游真实余额做差额对账。
-TraeWork 想算需要先单独修它的 SSE 解析，未做。详见 `docs/credit-and-token-tracking.md`。
+浠?v2.2.0 璧凤紝traesolo/qclaw/qwenwork 涓夊鍙惎鐢?*缃戝叧渚?token鈫抍redit 浼扮畻**锛堟瘡閫氶亾鍦?
+銆屾ā鍨嬮厤缃?鈫?鍚勫钩鍙拌缃€嶉噷璁?`credit_rate`锛岄粯璁?1000 token / 1 credit锛夈€傝繖鏄?*浼扮畻鍊间笉鏄湡瀹炴墸璐?*锛?
+鍙敤浜庣湅瓒嬪娍鍜屽仛鍐呴儴浼扮畻锛屼笉瑕佹嬁瀹冨拰涓婃父鐪熷疄浣欓鍋氬樊棰濆璐︺€?
+TraeWork 鎯崇畻闇€瑕佸厛鍗曠嫭淇畠鐨?SSE 瑙ｆ瀽锛屾湭鍋氥€傝瑙?`docs/credit-and-token-tracking.md`銆?
 
-## 数据和安全
+## 鏁版嵁鍜屽畨鍏?
 
-- 账号 Token 写入前会加密。Windows 用系统 DPAPI。
-- 不要把 `*.db`、登录目录、日志、带 Key 的截图发出去。
-- 不要把服务绑到公网。保持 `127.0.0.1`。
+- 璐﹀彿 Token 鍐欏叆鍓嶄細鍔犲瘑銆俉indows 鐢ㄧ郴缁?DPAPI銆?
+- 涓嶈鎶?`*.db`銆佺櫥褰曠洰褰曘€佹棩蹇椼€佸甫 Key 鐨勬埅鍥惧彂鍑哄幓銆?
+- 涓嶈鎶婃湇鍔＄粦鍒板叕缃戙€備繚鎸?`127.0.0.1`銆?
 
-## 项目结构
+## 椤圭洰缁撴瀯
 
-v2.2 把三个巨石模块按域拆开；v2.3 把 6 个源模块统一进 `src/`、`redesign-audit/` 进 `docs/redesign/`。目录布局如下：
+v2.2 鎶婁笁涓法鐭虫ā鍧楁寜鍩熸媶寮€锛泇2.3 鎶?6 涓簮妯″潡缁熶竴杩?`src/`銆乣redesign-audit/` 杩?`docs/redesign/`銆傜洰褰曞竷灞€濡備笅锛?
 
 ```text
 Buddy2api/
-├── src/                    # 全部 Python 与前端源
-│   ├── gateway/            # HTTP 入口（FastAPI 应用 + 路由 + 版本号）
-│   │   ├── server.py       # app 工厂、lifespan、StaticFiles 挂载
-│   │   ├── router.py       # 绑定请求到通道、做模型翻译（工具）
-│   │   ├── deps.py         # 共享鉴权依赖
-│   │   ├── routers/
-│   │   │   ├── admin.py        # /admin/* 端点
-│   │   │   ├── v1.py           # /v1/chat/completions、/v1/responses、/v1/models
-│   │   │   └── static_router.py# /admin/meta 等元信息
-│   │   └── version.py
-│   ├── accounts/           # 账号与通道管理
-│   │   ├── auth_manager.py     # 账号选择、token 管理、checkin
-│   │   └── control_plane.py    # 启动扫描、一键领取、模型配置
-│   ├── upstream/           # 上游对接
-│   │   ├── proxy.py        # pipeline 主流程（proxy_chat_completions 等）
-│   │   ├── aliases.py      # 模型别名表、默认模型、思考档位
-│   │   ├── moderation.py   # 内容审核、工具停转检测
-│   │   ├── compaction.py   # 请求体精简、11128 自愈
-│   │   └── responses.py    # OpenAI Responses ↔ Chat Completions 翻译
-│   ├── storage/            # 基础设施层（DB、加密、指纹、缓存）
-│   │   ├── database.py     # 兼容门面（re-export 自 storage.repos）
-│   │   ├── backup.py       # db 快照 / rotation / 凭据同步
-│   │   ├── repos/
-│   │   │   ├── accounts.py     # 账号 CRUD
-│   │   │   ├── api_keys.py     # API Key CRUD
-│   │   │   ├── logs.py         # 请求日志、查询
-│   │   │   ├── settings.py     # 通道配置、KV
-│   │   │   ├── stats.py        # dashboard 聚合
-│   │   │   └── _common.py      # 共享连接 / Schema
-│   │   ├── credit_cache.py     # 各通道 credit 缓存
-│   │   ├── http_pool.py        # 上游 httpx 客户端池
-│   │   ├── credential_crypto.py
-│   │   └── fingerprint.py
-│   ├── providers/          # 通道适配
-│   │   ├── workbuddy/
-│   │   ├── qclaw/
-│   │   ├── qwenwork/
-│   │   ├── traework/
-│   │   ├── traesolo/
-│   │   └── gmi/            # v2.2 新增，opt-in
-│   └── web/                # 管理页 UI
-│       ├── index.html
-│       ├── css/app.css
-│       ├── js/
-│       │   ├── app.js      # 入口
-│       │   ├── api.js      # 后台 API 客户端
-│       │   ├── icons.js    # 自绘 SVG 图标
-│       │   └── pages/      # dashboard / accounts / quota / keys / channels / usage / logs / setup / settings
-│       └── vendor/         # Vue 3.4.21 + SortableJS 1.15.6（本地，断网可用）
-├── docs/                   # 设计与使用文档
-│   ├── *.md                # credit-and-token-tracking / dashboard-slow-query / provider-model-usage / traesolo-usage / traework-usage / workbuddy-11128 / cache-tracking
-│   ├── design/             # per-model-reasoning-effort 等设计稿
-│   ├── maintenance/        # 维护手册
-│   ├── releases/           # 发布说明
-│   └── redesign/           # v2.2 重构设计文档（00-baseline / 01-audit / 02-strategy / 03-tokens / 04-prod-worktree）
-├── tests/                  # pytest
-│   ├── conftest.py
-│   ├── pytest.ini
-│   ├── test_*.py           # 业务与通道测试
-│   └── test_web_assets.py  # 前端 ESM 解析 + vendor/CDN 守卫（v2.2 新增）
-├── ops/                    # 启动 / 部署 / 构建 / 一次性脚本
-│   ├── start.bat / start.sh             # 本机启动脚本
-│   ├── start-docker-win.ps1 / start-docker-wsl.sh
-│   ├── Dockerfile
-│   ├── docker-compose.yml / docker-compose.windows.yml
-│   ├── docker-entrypoint.sh
-│   ├── requirements/{base.txt, dev.txt}
-│   ├── scripts/backup-db.py             # 手动拍 db 快照
-│   ├── scripts/copy-dev-to-prod.py      # dev → prod 配置复制
-│   └── scripts/oneoff/                  # 一次性分析与回填脚本（归档；不要 import）
-├── data/                   # 运行时数据（DB + 凭据，.gitignore）
-├── pyproject.toml          # pythonpath=["src"] 让 pytest 找到 src/
-├── config.example.toml     # 配置模板（config.toml 自身被 gitignore）
-└── README.md / README_EN.md / SECURITY.md / LICENSE / .gitignore / .dockerignore / .mailmap
+鈹溾攢鈹€ src/                    # 鍏ㄩ儴 Python 涓庡墠绔簮
+鈹?  鈹溾攢鈹€ gateway/            # HTTP 鍏ュ彛锛團astAPI 搴旂敤 + 璺敱 + 鐗堟湰鍙凤級
+鈹?  鈹?  鈹溾攢鈹€ server.py       # app 宸ュ巶銆乴ifespan銆丼taticFiles 鎸傝浇
+鈹?  鈹?  鈹溾攢鈹€ router.py       # 缁戝畾璇锋眰鍒伴€氶亾銆佸仛妯″瀷缈昏瘧锛堝伐鍏凤級
+鈹?  鈹?  鈹溾攢鈹€ deps.py         # 鍏变韩閴存潈渚濊禆
+鈹?  鈹?  鈹溾攢鈹€ routers/
+鈹?  鈹?  鈹?  鈹溾攢鈹€ admin.py        # /admin/* 绔偣
+鈹?  鈹?  鈹?  鈹溾攢鈹€ v1.py           # /v1/chat/completions銆?v1/responses銆?v1/models
+鈹?  鈹?  鈹?  鈹斺攢鈹€ static_router.py# /admin/meta 绛夊厓淇℃伅
+鈹?  鈹?  鈹斺攢鈹€ version.py
+鈹?  鈹溾攢鈹€ accounts/           # 璐﹀彿涓庨€氶亾绠＄悊
+鈹?  鈹?  鈹溾攢鈹€ auth_manager.py     # 璐﹀彿閫夋嫨銆乼oken 绠＄悊銆乧heckin
+鈹?  鈹?  鈹斺攢鈹€ control_plane.py    # 鍚姩鎵弿銆佷竴閿鍙栥€佹ā鍨嬮厤缃?
+鈹?  鈹溾攢鈹€ upstream/           # 涓婃父瀵规帴
+鈹?  鈹?  鈹溾攢鈹€ proxy.py        # pipeline 涓绘祦绋嬶紙proxy_chat_completions 绛夛級
+鈹?  鈹?  鈹溾攢鈹€ aliases.py      # 妯″瀷鍒悕琛ㄣ€侀粯璁ゆā鍨嬨€佹€濊€冩。浣?
+鈹?  鈹?  鈹溾攢鈹€ moderation.py   # 鍐呭瀹℃牳銆佸伐鍏峰仠杞娴?
+鈹?  鈹?  鈹溾攢鈹€ compaction.py   # 璇锋眰浣撶簿绠€銆?1128 鑷剤
+鈹?  鈹?  鈹斺攢鈹€ responses.py    # OpenAI Responses 鈫?Chat Completions 缈昏瘧
+鈹?  鈹溾攢鈹€ storage/            # 鍩虹璁炬柦灞傦紙DB銆佸姞瀵嗐€佹寚绾广€佺紦瀛橈級
+鈹?  鈹?  鈹溾攢鈹€ database.py     # 鍏煎闂ㄩ潰锛坮e-export 鑷?storage.repos锛?
+鈹?  鈹?  鈹溾攢鈹€ backup.py       # db 蹇収 / rotation / 鍑嵁鍚屾
+鈹?  鈹?  鈹溾攢鈹€ repos/
+鈹?  鈹?  鈹?  鈹溾攢鈹€ accounts.py     # 璐﹀彿 CRUD
+鈹?  鈹?  鈹?  鈹溾攢鈹€ api_keys.py     # API Key CRUD
+鈹?  鈹?  鈹?  鈹溾攢鈹€ logs.py         # 璇锋眰鏃ュ織銆佹煡璇?
+鈹?  鈹?  鈹?  鈹溾攢鈹€ settings.py     # 閫氶亾閰嶇疆銆並V
+鈹?  鈹?  鈹?  鈹溾攢鈹€ stats.py        # dashboard 鑱氬悎
+鈹?  鈹?  鈹?  鈹斺攢鈹€ _common.py      # 鍏变韩杩炴帴 / Schema
+鈹?  鈹?  鈹溾攢鈹€ credit_cache.py     # 鍚勯€氶亾 credit 缂撳瓨
+鈹?  鈹?  鈹溾攢鈹€ http_pool.py        # 涓婃父 httpx 瀹㈡埛绔睜
+鈹?  鈹?  鈹溾攢鈹€ credential_crypto.py
+鈹?  鈹?  鈹斺攢鈹€ fingerprint.py
+鈹?  鈹溾攢鈹€ providers/          # 閫氶亾閫傞厤
+鈹?  鈹?  鈹溾攢鈹€ workbuddy/
+鈹?  鈹?  鈹溾攢鈹€ qclaw/
+鈹?  鈹?  鈹溾攢鈹€ qwenwork/
+鈹?  鈹?  鈹溾攢鈹€ traework/
+鈹?  鈹?  鈹溾攢鈹€ traesolo/
+鈹?  鈹?  鈹斺攢鈹€ gmi/            # v2.2 鏂板锛宱pt-in
+鈹?  鈹斺攢鈹€ web/                # 绠＄悊椤?UI
+鈹?      鈹溾攢鈹€ index.html
+鈹?      鈹溾攢鈹€ css/app.css
+鈹?      鈹溾攢鈹€ js/
+鈹?      鈹?  鈹溾攢鈹€ app.js      # 鍏ュ彛
+鈹?      鈹?  鈹溾攢鈹€ api.js      # 鍚庡彴 API 瀹㈡埛绔?
+鈹?      鈹?  鈹溾攢鈹€ icons.js    # 鑷粯 SVG 鍥炬爣
+鈹?      鈹?  鈹斺攢鈹€ pages/      # dashboard / accounts / quota / keys / channels / usage / logs / setup / settings
+鈹?      鈹斺攢鈹€ vendor/         # Vue 3.4.21 + SortableJS 1.15.6锛堟湰鍦帮紝鏂綉鍙敤锛?
+鈹溾攢鈹€ docs/                   # 璁捐涓庝娇鐢ㄦ枃妗?
+鈹?  鈹溾攢鈹€ *.md                # credit-and-token-tracking / dashboard-slow-query / provider-model-usage / traesolo-usage / traework-usage / workbuddy-11128 / cache-tracking
+鈹?  鈹溾攢鈹€ design/             # per-model-reasoning-effort 绛夎璁＄
+鈹?  鈹溾攢鈹€ maintenance/        # 缁存姢鎵嬪唽
+鈹?  鈹溾攢鈹€ releases/           # 鍙戝竷璇存槑
+鈹?  鈹斺攢鈹€ redesign/           # v2.2 閲嶆瀯璁捐鏂囨。锛?0-baseline / 01-audit / 02-strategy / 03-tokens / 04-prod-worktree锛?
+鈹溾攢鈹€ tests/                  # pytest
+鈹?  鈹溾攢鈹€ conftest.py
+鈹?  鈹溾攢鈹€ pytest.ini
+鈹?  鈹溾攢鈹€ test_*.py           # 涓氬姟涓庨€氶亾娴嬭瘯
+鈹?  鈹斺攢鈹€ test_web_assets.py  # 鍓嶇 ESM 瑙ｆ瀽 + vendor/CDN 瀹堝崼锛坴2.2 鏂板锛?
+鈹溾攢鈹€ ops/                    # 鍚姩 / 閮ㄧ讲 / 鏋勫缓 / 涓€娆℃€ц剼鏈?
+鈹?  鈹溾攢鈹€ start.bat / start.sh             # 鏈満鍚姩鑴氭湰
+鈹?  鈹溾攢鈹€ start-docker-win.ps1 / start-docker-wsl.sh
+鈹?  鈹溾攢鈹€ Dockerfile
+鈹?  鈹溾攢鈹€ docker-compose.yml / docker-compose.windows.yml
+鈹?  鈹溾攢鈹€ docker-entrypoint.sh
+鈹?  鈹溾攢鈹€ requirements/{base.txt, dev.txt}
+鈹?  鈹溾攢鈹€ scripts/backup-db.py             # 鎵嬪姩鎷?db 蹇収
+鈹?  鈹溾攢鈹€ scripts/copy-dev-to-prod.py      # dev 鈫?prod 閰嶇疆澶嶅埗
+鈹?  鈹斺攢鈹€ scripts/oneoff/                  # 涓€娆℃€у垎鏋愪笌鍥炲～鑴氭湰锛堝綊妗ｏ紱涓嶈 import锛?
+鈹溾攢鈹€ data/                   # 杩愯鏃舵暟鎹紙DB + 鍑嵁锛?gitignore锛?
+鈹溾攢鈹€ config.example.toml     # 閰嶇疆妯℃澘锛坈onfig.toml 鑷韩琚?gitignore锛?
+鈹斺攢鈹€ README.md / README_EN.md / SECURITY.md / LICENSE / .gitignore / .dockerignore / .mailmap
 ```
 
-启动方式：`python -m gateway.server`（从根目录；src/ 由 pyproject.toml 提供 sys.path）。
 
-启动脚本：
+鍚姩鑴氭湰锛?
 
 ```powershell
 # Windows
@@ -479,7 +477,7 @@ Buddy2api/
 chmod +x ops/start.sh && ./ops/start.sh
 ```
 
-Docker 启动：
+Docker 鍚姩锛?
 
 ```powershell
 # Windows
@@ -488,20 +486,20 @@ powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1
 ./ops/start-docker-wsl.sh
 ```
 
-## v2.2 更新内容
+## v2.2 鏇存柊鍐呭
 
-相对 1.4 / 2.0 / 2.1 的主要变化：
+鐩稿 1.4 / 2.0 / 2.1 鐨勪富瑕佸彉鍖栵細
 
-- **GMI 通道**：新增 opt-in 通道（OpenAI 兼容，走 Web 导入 API Key）。不在默认通道列表里，启用需在 `CB_GATEWAY_PROVIDERS` 末尾追加 `gmi`。
-- **管理页 vendor 本地化**：Vue 3.4.21 与 SortableJS 1.15.6 从 jsdelivr CDN 落到 `web/vendor/`，由 FastAPI StaticFiles 直接服务。断网仍可打开管理页。`tests/test_web_assets.py` 守卫 CDN 引用永不回归。
-- **后端三巨石模块拆分**：
-  - `storage/database.py` 退化为 re-export 兼容门面，子模块在 `storage/repos/{accounts, api_keys, logs, settings, stats, _common}.py`。
-  - `gateway/server.py` 留 app 工厂、lifespan、StaticFiles 挂载；端点按域拆到 `gateway/routers/{admin.py, v1.py, static_router.py}`；共享鉴权依赖收口到 `gateway/deps.py`。
-  - `upstream/proxy.py` 留 pipeline 主流程；模型别名、审核、精简、Responses 翻译拆到 `upstream/{aliases.py, moderation.py, compaction.py, responses.py}`。
-  - 56 个端点路径、契约、行为全部保持不变；`pytest` 与基线一致（pre-existing 失败不在重构范围）。
-- **管理页 Overhaul**：8 个 lever（依赖本地化、版本号单一来源、CSS 单一令牌体系重建、组件层重做、图表令牌化、重点页重排、移动端断点收敛、一次性脚本归档）。版本号现在从 `/admin/meta` 拉，不再写死。`em-dash` 全部清理为中文标点。
-- **一次 commits 走完**：每个 lever 一个 commit（`refactor(web): ...` / `refactor(storage): ...` / `refactor(gateway): ...` / `refactor(upstream): ...`），所有 commit 已 push 到 `refactor/web-console-ia`。详细设计见 `docs/redesign/`。
-- **配置文件 `config.toml`**：新增。`gateway.server` 启动时自动加载，支持 `[default]` / `[dev]` / `[prod]` profile 与 `--config <profile>` / `CB_GATEWAY_CONFIG=<profile>` 切换。dev / prod 双 checkout 各自一份 `config.toml`（`.gitignore`d，per-deploy 私有），端口和 db 路径已写死，bare `python -m gateway.server` 走对端。详见 [配置文件](#配置文件) 一节。
+- **GMI 閫氶亾**锛氭柊澧?opt-in 閫氶亾锛圤penAI 鍏煎锛岃蛋 Web 瀵煎叆 API Key锛夈€備笉鍦ㄩ粯璁ら€氶亾鍒楄〃閲岋紝鍚敤闇€鍦?`CB_GATEWAY_PROVIDERS` 鏈熬杩藉姞 `gmi`銆?
+- **绠＄悊椤?vendor 鏈湴鍖?*锛歏ue 3.4.21 涓?SortableJS 1.15.6 浠?jsdelivr CDN 钀藉埌 `web/vendor/`锛岀敱 FastAPI StaticFiles 鐩存帴鏈嶅姟銆傛柇缃戜粛鍙墦寮€绠＄悊椤点€俙tests/test_web_assets.py` 瀹堝崼 CDN 寮曠敤姘镐笉鍥炲綊銆?
+- **鍚庣涓夊法鐭虫ā鍧楁媶鍒?*锛?
+  - `storage/database.py` 閫€鍖栦负 re-export 鍏煎闂ㄩ潰锛屽瓙妯″潡鍦?`storage/repos/{accounts, api_keys, logs, settings, stats, _common}.py`銆?
+  - `gateway/server.py` 鐣?app 宸ュ巶銆乴ifespan銆丼taticFiles 鎸傝浇锛涚鐐规寜鍩熸媶鍒?`gateway/routers/{admin.py, v1.py, static_router.py}`锛涘叡浜壌鏉冧緷璧栨敹鍙ｅ埌 `gateway/deps.py`銆?
+  - `upstream/proxy.py` 鐣?pipeline 涓绘祦绋嬶紱妯″瀷鍒悕銆佸鏍搞€佺簿绠€銆丷esponses 缈昏瘧鎷嗗埌 `upstream/{aliases.py, moderation.py, compaction.py, responses.py}`銆?
+  - 56 涓鐐硅矾寰勩€佸绾︺€佽涓哄叏閮ㄤ繚鎸佷笉鍙橈紱`pytest` 涓庡熀绾夸竴鑷达紙pre-existing 澶辫触涓嶅湪閲嶆瀯鑼冨洿锛夈€?
+- **绠＄悊椤?Overhaul**锛? 涓?lever锛堜緷璧栨湰鍦板寲銆佺増鏈彿鍗曚竴鏉ユ簮銆丆SS 鍗曚竴浠ょ墝浣撶郴閲嶅缓銆佺粍浠跺眰閲嶅仛銆佸浘琛ㄤ护鐗屽寲銆侀噸鐐归〉閲嶆帓銆佺Щ鍔ㄧ鏂偣鏀舵暃銆佷竴娆℃€ц剼鏈綊妗ｏ級銆傜増鏈彿鐜板湪浠?`/admin/meta` 鎷夛紝涓嶅啀鍐欐銆俙em-dash` 鍏ㄩ儴娓呯悊涓轰腑鏂囨爣鐐广€?
+- **涓€娆?commits 璧板畬**锛氭瘡涓?lever 涓€涓?commit锛坄refactor(web): ...` / `refactor(storage): ...` / `refactor(gateway): ...` / `refactor(upstream): ...`锛夛紝鎵€鏈?commit 宸?push 鍒?`refactor/web-console-ia`銆傝缁嗚璁¤ `docs/redesign/`銆?
+- **閰嶇疆鏂囦欢 `config.toml`**锛氭柊澧炪€俙gateway.server` 鍚姩鏃惰嚜鍔ㄥ姞杞斤紝鏀寔 `[default]` / `[dev]` / `[prod]` profile 涓?`--config <profile>` / `CB_GATEWAY_CONFIG=<profile>` 鍒囨崲銆俤ev / prod 鍙?checkout 鍚勮嚜涓€浠?`config.toml`锛坄.gitignore`d锛宲er-deploy 绉佹湁锛夛紝绔彛鍜?db 璺緞宸插啓姝伙紝bare `python -m src.gateway.server` 璧板绔€傝瑙?[閰嶇疆鏂囦欢](#閰嶇疆鏂囦欢) 涓€鑺傘€?
 
 ## License
 
