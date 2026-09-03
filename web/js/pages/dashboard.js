@@ -36,7 +36,7 @@ export default {props:['token','toast'],setup(p){
     const elapsed=rows.filter(row=>Number(row.hour)<=currentHour),max=Math.max(...elapsed.map(row=>row.value),0);
     return{...config,kind,currentHour,max,maxLabel:heatValue(kind,max),activeHours:elapsed.filter(row=>row.value>0).length,rows}
   });
-  function heatClass(v,max){if(!v)return'heat-0';const r=Math.max(0,Math.min(1,Number(v||0)/Math.max(Number(max||1),1));if(r<.25)return'heat-1';if(r<.5)return'heat-2';if(r<.75)return'heat-3';if(r<.9)return'heat-4';return'heat-5'}
+  function heatClass(v,max){if(!v)return'heat-0';const r=Math.max(0,Math.min(1,Number(v||0)/Math.max(Number(max||1),1)));if(r<.25)return'heat-1';if(r<.5)return'heat-2';if(r<.75)return'heat-3';if(r<.9)return'heat-4';return'heat-5'}
   function heatValue(kind,v){return kind==='tokens'?tok(v):(kind==='credit'||kind==='tw'?money(v):n(v))}
   function cacheStatusLabel(s){return ({accurate:'含 cache 实测',partial:'部分实测+反推',approx:'cache 反推',empty:'无数据'})[s]||'未知'}
   function cacheStatusClass(s){return ({accurate:'cache-ok',partial:'cache-partial',approx:'cache-approx',empty:'cache-empty'})[s]||'cache-empty'}
