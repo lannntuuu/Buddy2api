@@ -454,7 +454,7 @@ def test_windows_start_script_bootstraps_portable_buddy2api_environment():
 
     assert "create -n buddy2api python=3.12 -y" in script
     assert "run -n buddy2api python -m pip install -r ops/requirements/base.txt" in script
-    assert "run --no-capture-output -n buddy2api python -m gateway.server" in script
+    assert "run --no-capture-output -n buddy2api python -m src.gateway.server" in script
     assert "-m venv .venv" in script
     assert "cd /d \"%~dp0\\..\"" in script  # 切到项目根
 
