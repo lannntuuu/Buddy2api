@@ -5,6 +5,7 @@ const{ref,reactive,computed,onMounted,onBeforeUnmount,nextTick,watch}=Vue;
 export default {props:['token','toast','saveToken'],setup(p){
   const defaults={backend_url:'https://copilot.tencent.com',default_domain:'www.codebuddy.cn',timeout:300};
   const s=ref({...defaults,base_url:'http://127.0.0.1:8787/v1',admin_auth:'本机 Cookie 自动验证'}),ld=ref(true),saving=ref(false),adminToken=ref(p.token||'');
+  const hostOverrides=reactive({gmi:{base_url:''},qwenwork:{gateway:''}});
 
   // Channels panel -- collapsed by default. Native <details> for a11y.
   const chs=ref([]),chLd=ref(false),chBusy=ref(false),chErr=ref(''),
@@ -12,8 +13,13 @@ export default {props:['token','toast','saveToken'],setup(p){
         chListEl=ref(null);
   let sortable=null;
 
-  async function load(){ld.value=true;try{const cfg=await api.get('/admin/settings',p.token);s.value={...s.value,...cfg}}catch(e){p.toast(apiErr(e,'加载失败'),'err')}ld.value=false}
-  async function save(){if(saving.value)return;saving.value=true;try{await api.put('/admin/settings',{backend_url:s.value.backend_url,default_domain:s.value.default_domain,timeout:Number(s.value.timeout)||300},p.token);p.toast('已保存')}catch(e){p.toast(apiErr(e,'保存失败'),'err')}saving.value=false}
+  function fillHosts(){
+    const ch=s.value.channel_hosts||{};
+    hostOverrides.gmi.base_url=ch.gmi?.base_url||'';
+    hostOverrides.qwenwork.gateway=ch.qwenwork?.gateway||'';
+  }
+  async function load(){ld.value=true;try{const cfg=await api.get('/admin/settings',p.token);s.value={...s.value,...cfg};fillHosts()}catch(e){p.toast(apiErr(e,'加载失败'),'err')}ld.value=false}
+  async function save(){if(saving.value)return;saving.value=true;try{await api.put('/admin/settings',{backend_url:s.value.backend_url,default_domain:s.value.default_domain,timeout:Number(s.value.timeout)||300,channel_hosts:{gmi:{base_url:hostOverrides.gmi.base_url.trim()},qwenwork:{gateway:hostOverrides.qwenwork.gateway.trim()}}},p.token);p.toast('已保存')}catch(e){p.toast(apiErr(e,'保存失败'),'err')}saving.value=false}
   function resetDefaults(){s.value={...s.value,backend_url:defaults.backend_url,default_domain:defaults.default_domain,timeout:defaults.timeout};p.toast('已恢复默认','info')}
   async function saveAdminToken(){
     const t=adminToken.value.trim();
@@ -99,7 +105,7 @@ export default {props:['token','toast','saveToken'],setup(p){
   // browser re-lays out the children.
   watch(chOpen, async (open)=>{if(open){await nextTick();initSortable()}});
 
-  return{s,ld,saving,adminToken,load,save,resetDefaults,saveAdminToken,clearAdminToken,
+  return{s,ld,saving,adminToken,hostOverrides,load,save,resetDefaults,saveAdminToken,clearAdminToken,
          chs,chLd,chBusy,chEnvLocked,chErr,chOpen,chDirty,chSummary,chListEl,
          loadChannels,toggleChannel,saveChannels,I}
 },template:`
@@ -115,6 +121,12 @@ export default {props:['token','toast','saveToken'],setup(p){
         <div class="field"><label>默认域名</label><input v-model="s.default_domain" placeholder="www.codebuddy.cn"/><div class="hint">账号 auth 中没有 domain 时使用。</div></div>
         <div class="field"><label>请求超时（秒）</label><input v-model="s.timeout" type="number" min="30" max="900" placeholder="300"/><div class="hint">长上下文或慢模型建议保持 300。</div></div>
         <div class="field"><label>管理鉴权</label><input v-model="s.admin_auth" disabled/><div class="hint">本机 Web UI 自动使用 HttpOnly Cookie。</div></div>
+        <div class="field"><label>GMI Cloud Base URL</label>
+          <input v-model="hostOverrides.gmi.base_url" placeholder="留空使用默认 https://api.gmi-serving.com/v1"/>
+          <div class="hint">自定义 GMI 上游地址（镜像/反代）。留空 = 默认。</div></div>
+        <div class="field"><label>QwenWork 网关</label>
+          <input v-model="hostOverrides.qwenwork.gateway" placeholder="留空使用默认 https://gateway.qwenwork.cn"/>
+          <div class="hint">自定义 QwenWork 网关地址。留空 = 默认。</div></div>
       </div>
     </div>
 
