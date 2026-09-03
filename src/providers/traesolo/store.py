@@ -29,6 +29,7 @@ from providers.traesolo.constants import (
     ENV_AUTH_DIR,
     OAUTH_HOST,
 )
+from providers.host_override import channel_host
 
 
 def _first(body: dict, *keys: str, default: str = "") -> str:
@@ -78,7 +79,7 @@ def parse_credentials(body: dict) -> dict:
     expires = _first_int(nested_auth, "expiresAt") or _first_int(body, "expiresAt", "expires_at")
     refresh_expires = _first_int(nested_auth, "refreshExpiresAt") or _first_int(body, "refreshExpiresAt", "refresh_expires_at")
     domain = _first(nested_auth, "domain") or _first(body, "domain") or DOMAIN
-    api_host = _first(nested_auth, "apiHost") or _first(body, "apiHost", "api_host") or OAUTH_HOST
+    api_host = _first(nested_auth, "apiHost") or _first(body, "apiHost", "api_host") or channel_host(CHANNEL_ID, "oauth_host", OAUTH_HOST)
     machine_id = _first(nested_auth, "machineId") or _first(body, "machineId", "machine_id")
     device_id = _first(nested_auth, "deviceId") or _first(body, "deviceId", "device_id")
 

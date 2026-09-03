@@ -16,11 +16,12 @@ from providers.traework.constants import (
 )
 from providers.traework.token import auth_headers, extra_of
 from storage.http_pool import get_client
+from providers.host_override import channel_host
 
 
 def _host(account: dict) -> str:
     extra = extra_of(account)
-    return str(extra.get("host") or UG_API).rstrip("/") or UG_API
+    return str(extra.get("host") or channel_host(CHANNEL_ID, "ug_host", UG_API)).rstrip("/") or UG_API
 
 
 def _checkin_row(account: dict, **kwargs) -> dict:

@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from providers.traework.constants import (
+    CHANNEL_ID,
     CLIENT_ID,
     EXCHANGE_PATH,
     IDE_VERSION,
@@ -16,6 +17,7 @@ from providers.traework.constants import (
     UG_API,
 )
 from providers.traework.store import iso_to_ms
+from providers.host_override import channel_host
 
 
 class TraeWorkAuthError(RuntimeError):
@@ -54,7 +56,7 @@ def oauth_headers(token: str) -> dict[str, str]:
 
 def _host(account: dict) -> str:
     extra = extra_of(account)
-    host = str(extra.get("host") or UG_API).rstrip("/")
+    host = str(extra.get("host") or channel_host(CHANNEL_ID, "ug_host", UG_API)).rstrip("/")
     return host or UG_API
 
 

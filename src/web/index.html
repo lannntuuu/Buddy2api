@@ -4,6 +4,17 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Buddy 2 API</title>
+<script>
+  // Buddy2API theme bootstrap (no flash)
+  (function(){
+    var saved=null;
+    try{saved=localStorage.getItem('cb_gw_theme')}catch(_){}
+    var valid=(saved==='light'||saved==='dark');
+    var mode=valid?saved:'light'; /* LS 无值 => light 默认 */
+    document.documentElement.setAttribute('data-theme',mode);
+    document.documentElement.style.backgroundColor=mode==='dark'?'#0d0c0b':'#fafaf8';
+  })();
+</script>
 <link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body>

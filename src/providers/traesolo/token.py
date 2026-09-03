@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from providers.traesolo.constants import (
     APP_ID,
+    CHANNEL_ID,
     CLIENT_ID,
     CONSOLE_HOST,
     DEVICE_BRAND,
@@ -28,6 +29,7 @@ from providers.traesolo.constants import (
     REFRESH_SKEW_S,
     USER_AGENT,
 )
+from providers.host_override import channel_host
 
 
 class TraeSoloAuthError(RuntimeError):
@@ -45,7 +47,8 @@ def extra_of(account: dict) -> dict:
 
 
 def _oauth_base(account: dict) -> str:
-    host = str(extra_of(account).get("api_host") or OAUTH_HOST).rstrip("/")
+    host = str(extra_of(account).get("api_host") or
+               channel_host(CHANNEL_ID, "oauth_host", OAUTH_HOST)).rstrip("/")
     return host or OAUTH_HOST
 
 
@@ -171,7 +174,7 @@ async def exchange(
     """
     if not str(refresh_token or "").strip():
         raise TraeSoloAuthError("no refreshToken")
-    base = (host or OAUTH_HOST).rstrip("/")
+    base = (host or channel_host(CHANNEL_ID, "oauth_host", OAUTH_HOST)).rstrip("/")
     body = {
         "ClientID": CLIENT_ID,
         "RefreshToken": refresh_token,
@@ -275,7 +278,7 @@ def build_login_url(machine_id: str, device_id: str, callback_url: str) -> str:
     }
     # 与 Go url.Values.Encode() 一致：按键名排序
     encoded = urlencode(sorted(params.items()), quote_via=quote)
-    return f"{CONSOLE_HOST}/authorization?{encoded}"
+    return f"{channel_host(CHANNEL_ID, 'console_host', CONSOLE_HOST)}/authorization?{encoded}"
 
 
 def _parse_json_param(raw: str) -> dict:

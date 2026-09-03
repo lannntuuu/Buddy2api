@@ -25,6 +25,7 @@ from providers.traework.constants import (
     UG_API,
 )
 from providers.traework.crypto import decrypt_tc_b64
+from providers.host_override import channel_host
 
 
 def traework_user_data_dir() -> Path:
@@ -87,7 +88,7 @@ def session_to_account(document: dict, storage: dict | None = None, source: str 
     name = str(account.get("username") or document.get("username") or "")
     access = str(document.get("token") or document.get("access_token") or "")
     refresh = str(document.get("refreshToken") or document.get("refresh_token") or "")
-    host = str(document.get("host") or UG_API)
+    host = str(document.get("host") or channel_host(CHANNEL_ID, "ug_host", UG_API))
     device_id = public_pem = private_pem = machine_id = ""
     if storage:
         device_id, public_pem, private_pem, machine_id = _device_keys(storage)
@@ -127,7 +128,7 @@ def parse_credentials(body: dict) -> dict:
         "expiredAt": body.get("expiredAt") or body.get("expires_at"),
         "refreshExpiredAt": body.get("refreshExpiredAt") or body.get("refresh_expires_at"),
         "userId": body.get("userId") or body.get("uid") or nested.get("userId") or "",
-        "host": body.get("host") or UG_API,
+        "host": body.get("host") or channel_host(CHANNEL_ID, "ug_host", UG_API),
         "account": {
             "username": nested.get("username") or body.get("nickname") or body.get("name") or "",
             "userTag": nested.get("userTag") or "",
