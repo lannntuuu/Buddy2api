@@ -1,0 +1,34 @@
+# config.example.toml — template for per-deploy config profiles.
+#
+# Copy this file to `config.toml` (uses the [default] profile) or
+# `config.<name>.toml` (uses a named profile) and edit. The gateway
+# auto-loads config.toml on startup.
+#
+#   python -m gateway.server                        # uses config.toml [default]
+#   python -m gateway.server --config prod          # uses config.toml [prod]
+#   python -m gateway.server --config config.dev.toml
+#   CB_GATEWAY_CONFIG=dev python -m gateway.server
+#
+# Resolution order (later wins):
+#   code default  ->  [default]  ->  [<profile>]  ->  env  ->  CLI flag
+
+[default]
+
+[server]
+host = "127.0.0.1"
+port = 8787
+
+[admin]
+# Auto-generate a token on startup if empty. Set to a fixed value if you
+# want the browser cookie to stay valid across restarts.
+# token = "cb-admin-xxxxxxxxxxxxxxxxxxxxxxxx"
+no_auth = false
+
+[database]
+# Leave empty to use the storage default (data/codebuddy_gateway.db).
+# When running multiple checkouts (dev + prod) on the same machine, set
+# this to a checkout-specific path so they don't race on the same WAL.
+# path = "C:/path/to/checkout/data/codebuddy_gateway.db"
+
+[logging]
+level = "warning"  # debug | info | warning | error

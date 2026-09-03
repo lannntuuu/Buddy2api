@@ -39,6 +39,12 @@ secrets/
 credentials/
 .lab-agent/
 
+# Per-deploy gateway config profiles (port, db path, admin token, etc.).
+# Keep config.example.toml tracked so users have a starting point.
+config.toml
+config.*.toml
+!config.example.toml
+
 # Local databases and runtime state
 *.db
 *.sqlite

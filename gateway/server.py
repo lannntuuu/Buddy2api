@@ -19,6 +19,7 @@ import logging
 import os
 import secrets
 import sys
+import tomllib
 import types
 from pathlib import Path
 
@@ -206,19 +207,96 @@ from gateway.routers.v1 import health, meta  # noqa: E402,F401
 # CLI entry point
 # ============================================================
 
+def _load_config(path: Path, profile: str) -> dict:
+    """Read a TOML config file and return the merged dict for one profile.
+
+    Resolution order (later wins):
+      [default]  ->  [<profile>]  ->  None if file missing.
+
+    Each top-level table is returned as its own dict. Returns empty dict
+    on any read/parse failure so the caller can fall through to defaults.
+    """
+    if not path.exists():
+        return {}
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        logging.getLogger("buddy2api.server").warning(
+            "config: failed to load %s: %s", path, exc
+        )
+        return {}
+    merged: dict = {}
+    default = data.get("default") or {}
+    if isinstance(default, dict):
+        merged.update(default)
+    if profile and profile != "default":
+        prof = data.get(profile) or {}
+        if isinstance(prof, dict):
+            merged.update(prof)
+    return merged
+
+
 def main():
     global ADMIN_TOKEN, ALLOW_NO_ADMIN_AUTH
 
+    # First pass: only --config, so we can load TOML defaults before the
+    # full argparse parse.
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", default=os.environ.get("CB_GATEWAY_CONFIG", ""),
+                     help="Path to config.toml (default: ./config.toml) or profile name "
+                          "if --config-name is also set.")
+    pre.add_argument("--config-name", default="",
+                     help="Profile inside config.toml: 'dev', 'prod', or 'default'.")
+    pre_args, _ = pre.parse_known_args()
+
+    # Resolve the config file path. If --config was given with no
+    # directory separator, treat it as a profile name shortcut:
+    #   --config prod  ->  ./config.toml with profile=prod
+    config_path = None
+    profile = pre_args.config_name or "default"
+    if pre_args.config:
+        if "/" in pre_args.config or "\\" in pre_args.config:
+            config_path = Path(pre_args.config)
+        else:
+            profile = pre_args.config
+            config_path = Path("config.toml")
+    if config_path is None:
+        config_path = Path("config.toml")
+
+    cfg = _load_config(config_path, profile)
+    server_cfg = cfg.get("server") if isinstance(cfg.get("server"), dict) else {}
+    admin_cfg = cfg.get("admin") if isinstance(cfg.get("admin"), dict) else {}
+    db_cfg = cfg.get("database") if isinstance(cfg.get("database"), dict) else {}
+    logging_cfg = cfg.get("logging") if isinstance(cfg.get("logging"), dict) else {}
+
     ap = argparse.ArgumentParser(description="Buddy 2 API")
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8787)
-    ap.add_argument("--admin-token", default=os.environ.get("CB_GATEWAY_ADMIN_TOKEN", ""),
-                    help="Admin API token. Defaults to CB_GATEWAY_ADMIN_TOKEN or a generated startup token.")
-    ap.add_argument("--no-admin-auth", action="store_true",
-                    help="Disable Admin API authentication. Only use on trusted local machines.")
-    ap.add_argument("--log-level", default="warning", choices=["debug","info","warning","error"],
-                    help="Log level")
+    ap.add_argument("--host", default=server_cfg.get("host", "127.0.0.1"))
+    ap.add_argument("--port", type=int, default=server_cfg.get("port", 8787))
+    ap.add_argument(
+        "--admin-token",
+        default=admin_cfg.get("token") or os.environ.get("CB_GATEWAY_ADMIN_TOKEN", ""),
+        help="Admin API token. Defaults to admin.token in config.toml, "
+             "then CB_GATEWAY_ADMIN_TOKEN, then a generated startup token.",
+    )
+    ap.add_argument(
+        "--no-admin-auth",
+        action="store_true",
+        default=bool(admin_cfg.get("no_auth", False)),
+        help="Disable Admin API authentication. Only use on trusted local machines.",
+    )
+    ap.add_argument(
+        "--log-level",
+        default=logging_cfg.get("level", "warning"),
+        choices=["debug", "info", "warning", "error"],
+    )
     args = ap.parse_args()
+
+    # If config.toml set a database.path, export it as an env var so the
+    # storage layer picks it up. (CB_GATEWAY_DB_PATH is the canonical name.)
+    db_path = db_cfg.get("path")
+    if db_path and not os.environ.get("CB_GATEWAY_DB_PATH"):
+        os.environ["CB_GATEWAY_DB_PATH"] = str(db_path)
 
     if args.no_admin_auth and args.host not in {"127.0.0.1", "localhost", "::1"}:
         ap.error("--no-admin-auth can only be used with a loopback host")
