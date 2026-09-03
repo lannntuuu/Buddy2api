@@ -117,7 +117,7 @@ export default {props:['token','toast'],setup(p){
   <div class="phead"><h1>通道与模型</h1><p>通道视角集中管理：统一模型翻译 · 各通道白名单与别名 · 改动即时生效</p></div>
   <div class="card"><div class="card-h">统一模型<span class="sub">统一名以 WorkBuddy 命名为准 · 纯翻译层 · 各平台白名单仍是最终闸门</span><div style="margin-left:auto;display:flex;gap:6px"><button class="btn s" @click="addUM"><span v-html="I.plus"></span>添加统一模型</button><button class="btn s pri" @click="saveUM" :disabled="umBusy">{{umBusy?'保存中…':'保存统一模型'}}</button></div></div>
     <div v-if="umLd" class="load"><div class="spin"></div></div>
-    <div v-else-if="umErr" style="padding:16px;color:var(--red);font-size:12px">{{umErr}}</div>
+    <div v-else-if="umErr" style="padding:16px;color:var(--err);font-size:12px">{{umErr}}</div>
     <div v-else class="table-scroll"><table>
       <thead><tr><th style="min-width:190px">统一模型名（客户端请求这个）</th><th v-for="ch in channels" :key="ch" style="min-width:170px">{{ch}}</th><th style="width:64px"></th></tr></thead>
       <tbody>
@@ -129,11 +129,11 @@ export default {props:['token','toast'],setup(p){
         <tr v-if="!um.length"><td :colspan="channels.length+2" class="empty">暂无统一模型。添加后客户端直接请求统一名，网关自动翻译成各平台内部名（例：请求 deepseek-v4-flash → TraeWork 实际打 DeepSeek-V4-Flash-Official）</td></tr>
       </tbody>
     </table></div>
-    <div style="padding:10px 16px;font-size:11px;color:var(--fg3);border-top:1px solid var(--border2)">格子 = 该平台内部模型名（该平台没有则留空）；<span style="color:var(--red)">红框</span> = 内部名不在该平台当前白名单内，请求会 400</div>
+    <div style="padding:10px 16px;font-size:11px;color:var(--fg3);border-top:1px solid var(--border-strong)">格子 = 该平台内部模型名（该平台没有则留空）；<span style="color:var(--err)">红框</span> = 内部名不在该平台当前白名单内，请求会 400</div>
   </div>
   <div class="card" style="margin-top:16px"><div class="card-h">各平台设置<span class="sub">每平台独立的模型白名单与别名</span><select v-if="chs.length" v-model="activeCh" class="selectctl" style="margin-left:auto"><option v-for="c in chs" :key="c.channel" :value="c.channel">{{c.channel}}</option></select></div>
     <div v-if="!chLoaded" class="load"><div class="spin"></div></div>
-    <div v-else-if="chErr" style="padding:16px;color:var(--red);font-size:12px">{{chErr}}</div>
+    <div v-else-if="chErr" style="padding:16px;color:var(--err);font-size:12px">{{chErr}}</div>
     <div v-else-if="!chOf()" class="empty">没有已加载的通道</div>
     <div v-else class="card-p">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:8px;flex-wrap:wrap">
@@ -148,7 +148,7 @@ export default {props:['token','toast'],setup(p){
           <button class="btn s" @click="resetChActive" :disabled="chBusyOf(chOf())">重置默认</button>
         </div>
       </div>
-      <div style="margin-bottom:14px"><label style="font-size:12px;color:var(--fg2);display:block;margin-bottom:6px">模型白名单（保存 = 按列表整体保存；空白名单保存 = 该平台所有模型请求 400；列表外的模型 400）<span v-if="canRefreshOfficial(chOf())&&chOf().channel==='traesolo'" style="margin-left:8px;color:var(--fg3)">· 倍率来自官方 consumption_rate（原值）</span><span v-else-if="canRefreshOfficial(chOf())" style="margin-left:8px;color:var(--fg3)">· 倍率来自上游 /v1/models</span><span v-else style="margin-left:8px;color:var(--fg3)">· 该通道上游不提供倍率，显示「-」</span></label>
+      <div style="margin-bottom:14px"><label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">模型白名单（保存 = 按列表整体保存；空白名单保存 = 该平台所有模型请求 400；列表外的模型 400）<span v-if="canRefreshOfficial(chOf())&&chOf().channel==='traesolo'" style="margin-left:8px;color:var(--fg3)">· 倍率来自官方 consumption_rate（原值）</span><span v-else-if="canRefreshOfficial(chOf())" style="margin-left:8px;color:var(--fg3)">· 倍率来自上游 /v1/models</span><span v-else style="margin-left:8px;color:var(--fg3)">· 该通道上游不提供倍率，显示「-」</span></label>
         <div v-if="chOf().modelRows.length" class="table-scroll" style="margin-bottom:8px">
           <table style="font-size:12px">
             <thead><tr><th style="text-align:left;padding:4px 8px">模型 ID</th><th style="text-align:left;padding:4px 8px;min-width:90px">展示名</th><th style="text-align:right;padding:4px 8px;min-width:64px">倍率</th><th v-if="chOf().reasoningSupported" style="text-align:left;padding:4px 8px;min-width:118px">思考档位</th><th style="width:56px"></th></tr></thead>
@@ -159,7 +159,7 @@ export default {props:['token','toast'],setup(p){
                 <td style="padding:3px 8px;text-align:right;font-family:var(--mono)">
                   <span v-if="r.rate!==null&&r.rate!==undefined">{{r.rate}}</span>
                   <span v-else style="color:var(--fg3)">-</span>
-                  <span v-if="r.official" title="官方接口提供" style="color:var(--green);font-size:10px;margin-left:4px">●</span>
+                  <span v-if="r.official" title="官方接口提供" style="color:var(--ok);font-size:10px;margin-left:4px">●</span>
                 </td>
                 <td v-if="chOf().reasoningSupported" style="padding:3px 8px">
                   <select v-model="r.reasoning" class="selectctl" style="padding:4px 6px;font-size:12px">
@@ -182,7 +182,7 @@ export default {props:['token','toast'],setup(p){
         </div>
       </div>
       <div v-if="chOf().reasoningSupported" style="margin-top:14px;border-top:1px dashed var(--border);padding-top:12px">
-        <label style="font-size:12px;color:var(--fg2);display:block;margin-bottom:6px">思考档位（通道默认）</label>
+        <label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">思考档位（通道默认）</label>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <select v-model="chOf().reasoningDefault" class="selectctl" style="padding:4px 6px;font-size:12px">
             <option value="">默认（不注入，跟随上游）</option>
@@ -192,7 +192,7 @@ export default {props:['token','toast'],setup(p){
         </div>
         <div style="font-size:11px;color:var(--fg3);margin-top:6px">客户端显式传 <code style="font:inherit">reasoning_effort</code> 始终优先；上方每模型下拉可单独覆盖。实测：deepseek/glm/auto 默认不思考、选档位=开启思考；kimi 默认轻思考、选 low 可减少；想要最快可给 DeepSeek 选 low 或留空。</div>
       </div>
-      <div><label style="font-size:12px;color:var(--fg2);display:block;margin-bottom:6px">别名（别名 → 模型 ID；保存 = 按列表整体保存；删空后保存 = 该平台无任何别名）</label>
+      <div><label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">别名（别名 → 模型 ID；保存 = 按列表整体保存；删空后保存 = 该平台无任何别名）</label>
         <div v-for="(r,i) in chOf().aliasRows" :key="i" style="display:flex;gap:8px;margin-bottom:6px;align-items:center">
           <input v-model="r.k" placeholder="别名 (如 auto)" style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:4px;font:inherit;font-size:12px;font-family:var(--mono);background:#fff;outline:none"/>
           <span style="color:var(--fg3)">→</span>
@@ -204,7 +204,7 @@ export default {props:['token','toast'],setup(p){
           <div class="hint" style="margin:0">内置默认别名：{{Object.entries((chOf().defaults&&chOf().defaults.aliases)||{}).map(([k,v])=>k+'→'+v).join(', ')||'无'}}</div>
         </div>
       </div>
-      <div style="margin-top:14px;border-top:1px dashed var(--border);padding-top:12px"><label style="font-size:12px;color:var(--fg2);display:block;margin-bottom:6px">相对消耗缩放因子（tokens ÷ 该值 × 模型倍率）</label>
+      <div style="margin-top:14px;border-top:1px dashed var(--border);padding-top:12px"><label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">相对消耗缩放因子（tokens ÷ 该值 × 模型倍率）</label>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <input class="tcell" style="width:120px" v-model="chOf().credit_rate" type="number" min="0" step="1"/>
           <span class="hint" style="margin:0" v-if="chOf().channel==='traesolo'">TRAE SOLO 已改用<strong>官方三档标价公式</strong>（input/cache_read/output 分别计价，反解自官方 session 真值，46/51 行误差<1%，见 pricing.py）。本栏缩放因子仅在请求无 token 数据时兜底使用。注意：标价≠实际扣费，订阅内官方实际扣费远低于标价（见 docs §10.5）。</span>
@@ -213,7 +213,7 @@ export default {props:['token','toast'],setup(p){
         </div>
         <div v-if="chOf().credit_rate_customized" class="tag" style="margin-top:6px">已自定义换算率</div>
       </div>
-      <div v-if="chOf().error" style="margin-top:10px;font-size:12px;color:var(--red)">{{chOf().error}}</div>
+      <div v-if="chOf().error" style="margin-top:10px;font-size:12px;color:var(--err)">{{chOf().error}}</div>
     </div>
   </div>
 </div>`};
