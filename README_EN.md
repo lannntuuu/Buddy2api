@@ -2,15 +2,15 @@
 
 [English](README_EN.md) | [中文](README.md)
 
-> Turn consumer AI clients you're already signed into locally into one OpenAI-compatible API for Codex, OpenCode, Cherry Studio, NextChat, and similar agents. Work Buddy / CodeBuddy, QClaw, QwenWork, TraeWork, and Trae SOLO are enabled by default; pick one in the admin UI dropdown. Each request stays on one channel.
+> Turn consumer AI clients you're already signed into locally into one OpenAI-compatible API for Codex, OpenCode, Cherry Studio, NextChat, and similar agents. Work Buddy / CodeBuddy, QClaw, QwenWork, TraeWork, and Trae SOLO are enabled by default; GMI is a new opt-in channel in v2.2 and must be listed in `CB_GATEWAY_PROVIDERS` to show up. Pick one in the admin UI dropdown. Each request stays on one channel.
 
-Current release **2.2.0**. This project is for local, personal use only. Do not deploy it on the public internet, and do not send login credentials, API keys, or the database file to anyone.
+Current release **2.2.0**. This project is for local, personal use only. Do not deploy it on the public internet, and do not send login credentials, API keys, or the database file to anyone. v2.2 highlights: the admin UI no longer loads anything from a CDN (Vue and Sortable are vendored locally, so the console works offline); the three Python monoliths (`storage/database.py`, `gateway/server.py`, `upstream/proxy.py`) are split by domain; a new GMI opt-in channel is available. See "What's new in v2.2" at the bottom for the full list.
 
 ## What is this?
 
 Buddy2api serves `http://127.0.0.1:8787/v1` on your machine. You stay signed into the official clients and still have quota; this gateway imports those local sessions and forwards requests to the matching vendor. Normal clients use Chat Completions; Codex uses `/v1/responses`, and when you set the key type to Codex in the admin UI it runs a round of prompt sanitization.
 
-All five channels are on by default. A channel you haven't installed or signed into shows empty on the Accounts page and is not auto-imported. Trae SOLO does not read a local login directory — import it via the admin UI's **Web login** or by pasting a callback URL (see below).
+Five channels are on by default and a sixth (GMI) is opt-in. A channel you haven't installed or signed into shows empty on the Accounts page and is not auto-imported. Trae SOLO does not read a local login directory — import it via the admin UI's **Web login** or by pasting a callback URL (see below). GMI doesn't read a local directory either; paste its API key on the Accounts page.
 
 ```powershell
 python -m gateway.server
@@ -31,7 +31,7 @@ If the paths are wrong you can point them with `CB_AUTH_DIR`, `CB_QCLAW_AUTH_DIR
 Just follow "Install and run" below. These are the easiest things to trip over in 2.0:
 
 1. **An empty Accounts page right after startup is normal.** It no longer auto-imports by default. Go to the **Accounts** page: pick a channel → Re-detect → Import all. All four local channels are available; **for Trae SOLO click "Start web login"** after selecting it, finish the TRAE login in the new window, and the browser redirects back to the server to complete the import (if the remote side can't reach the callback, paste the full address-bar URL into "Manual complete").
-2. **One API key hits exactly one channel.** You must pick a channel when creating it. A WorkBuddy key sends `auto` / `glm-5.2`; a QwenWork key sends `auto` or `qwork-advanced`; a TraeWork key sends `auto` or `qwen-3.7-plus`; a Trae SOLO key sends `auto` or `glm-5.2` (SOLO's model list is large and surfaced under the `traesolo/` prefix in `/v1/models`). A channel/model mismatch returns 400 or 403 — it won't forward you to another vendor.
+2. **One API key hits exactly one channel.** You must pick a channel when creating it. A WorkBuddy key sends `auto` / `glm-5.2`; a QwenWork key sends `auto` or `qwork-advanced`; a TraeWork key sends `auto` or `qwen-3.7-plus`; a Trae SOLO key sends `auto` or `glm-5.2`; a GMI key sends any model the upstream lists (SOLO's model list is large and surfaced under the `traesolo/` prefix in `/v1/models`). A channel/model mismatch returns 400 or 403; the gateway won't forward you to another vendor.
 3. **A channel returns 503 `channel_unavailable`:** that channel has no imported, usable account yet.
 4. **Run QClaw / QwenWork with `python -m gateway.server` directly on Windows.** A Linux Docker container can't decrypt the DPAPI-encrypted local files those two use; the admin UI says so. WorkBuddy can keep using Docker.
 5. This project and the chat client should run on the same machine. If the client runs inside Docker, set Base URL to `http://host.docker.internal:8787/v1`, not the container's own `127.0.0.1`.
@@ -93,8 +93,8 @@ The prompt should show `(buddy2api)` before you run `python -m pip`, so you don'
 
 ### Other ways to start
 
-- **Script:** On Windows, with Python added to PATH during install, run `.\start.bat` in the project directory. Linux / macOS: `chmod +x ops/start.sh && ./ops/start.sh`. The script prefers a Conda environment named `buddy2api`, and only creates a `.venv` if Conda isn't present.
-- **Docker:** `powershell -ExecutionPolicy Bypass -File .\start-docker-win.ps1`. The script still starts even when there's no WorkBuddy login directory on the host. All five channels are still in the dropdown, but use the `python -m gateway.server` method above for QClaw / QwenWork. TraeWork's login file isn't DPAPI, so once imported via local `python -m gateway.server`, Docker can use the tokens from the database. Trae SOLO doesn't read a local directory — its login loop and tokens live in the database, so it works inside the container too.
+- **Script:** On Windows, with Python added to PATH during install, run `.\ops\start.bat` in the project directory. Linux / macOS: `chmod +x ops/start.sh && ./ops/start.sh`. The script prefers a Conda environment named `buddy2api`, and only creates a `.venv` if Conda isn't present.
+- **Docker:** `powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1`. The script still starts even when there's no WorkBuddy login directory on the host. All six channels are still in the dropdown when GMI is enabled via `CB_GATEWAY_PROVIDERS`, but use the `python -m gateway.server` method above for QClaw / QwenWork. TraeWork's login file isn't DPAPI, so once imported via local `python -m gateway.server`, Docker can use the tokens from the database. Trae SOLO doesn't read a local directory — its login loop and tokens live in the database, so it works inside the container too. GMI is Web-imported and works inside the container as well.
 
 ### After opening the web UI for the first time
 
@@ -233,7 +233,7 @@ The admin UI's "Model config" page provides a graphical interface: a wide "Unifi
 ### Core / startup
 | Variable | Description |
 |---|---|
-| `CB_GATEWAY_PROVIDERS` | Which channels to enable, comma-separated. Default `workbuddy,qclaw,qwenwork,traework,traesolo`. Change to keep only one |
+| `CB_GATEWAY_PROVIDERS` | Which channels to enable, comma-separated. Default `workbuddy,qclaw,qwenwork,traework,traesolo`. GMI is opt-in; enable by appending `gmi`: `workbuddy,qclaw,qwenwork,traework,traesolo,gmi` |
 | `CB_GATEWAY_AUTO_IMPORT` | Set `1` to auto-scan and import accounts on startup. Default `0` |
 | `CB_GATEWAY_CHECKIN_GAP_MS` | Milliseconds between adjacent accounts during one-click checkin (anti-risk; don't set too small). Default `800` |
 | `CB_GATEWAY_ADMIN_TOKEN` | Fixed admin token. Default auto-generated (printed once at startup; paste into admin UI "Settings" once to get a cookie) |
@@ -322,33 +322,66 @@ The core Python code is split into three packages by responsibility; the root ho
 ```text
 Buddy2api/
 ├── gateway/                # HTTP entry (FastAPI app + routes + version)
-│   ├── server.py           # All @app.get / @app.post endpoints
-│   ├── router.py           # Bind request to channel, model translation
+│   ├── server.py           # app factory, lifespan, StaticFiles mount
+│   ├── router.py           # Bind request to channel, model translation (helper)
+│   ├── deps.py             # Shared auth dependencies
+│   ├── routers/
+│   │   ├── admin.py        # /admin/* endpoints
+│   │   ├── v1.py           # /v1/chat/completions, /v1/responses, /v1/models
+│   │   └── static_router.py# /admin/meta and other metadata
 │   └── version.py
 ├── accounts/               # Account and channel management
 │   ├── auth_manager.py     # Account selection, token management, checkin
 │   └── control_plane.py    # Startup scan, one-click claim, model config
 ├── upstream/               # Upstream adapters
-│   ├── proxy.py            # HTTP upstream forward (proxy_chat_completions)
+│   ├── proxy.py            # Pipeline orchestration (proxy_chat_completions, etc.)
+│   ├── aliases.py          # Model alias table, default model list, reasoning effort
+│   ├── moderation.py       # Content moderation, tool-stall detection
+│   ├── compaction.py       # Request body compaction, 11128 self-heal
 │   └── responses.py        # OpenAI Responses ↔ Chat Completions translation
-├── storage/                # Infrastructure layer (DB, crypto, fingerprint)
-│   ├── database.py         # SQLite CRUD
+├── storage/                # Infrastructure layer (DB, crypto, fingerprint, cache)
+│   ├── database.py         # Compat facade (re-exports from storage.repos)
+│   ├── repos/
+│   │   ├── accounts.py     # Account CRUD
+│   │   ├── api_keys.py     # API key CRUD
+│   │   ├── logs.py         # Request log + queries
+│   │   ├── settings.py     # Channel config, KV
+│   │   ├── stats.py        # Dashboard aggregations
+│   │   └── _common.py      # Shared connection / schema
+│   ├── credit_cache.py     # Per-channel credit cache
+│   ├── http_pool.py        # Upstream httpx client pool
 │   ├── credential_crypto.py
 │   └── fingerprint.py
-├── providers/              # Channel adapters (workbuddy / qclaw / qwenwork / traework / traesolo)
-├── web/                    # Admin UI (Vue 3 via CDN)
+├── providers/              # Channel adapters
+│   ├── workbuddy/
+│   ├── qclaw/
+│   ├── qwenwork/
+│   ├── traework/
+│   ├── traesolo/
+│   └── gmi/                # v2.2 new, opt-in
+├── web/                    # Admin UI
+│   ├── index.html
+│   ├── css/app.css
+│   ├── js/
+│   │   ├── app.js          # Entry
+│   │   ├── api.js          # Backend API client
+│   │   ├── icons.js        # Inline SVG icons
+│   │   └── pages/          # dashboard / accounts / quota / keys / channels / usage / logs / setup / settings
+│   └── vendor/             # Vue 3.4.21 + SortableJS 1.15.6 (local, works offline)
 ├── docs/                   # Design and usage docs
-├── tests/                  # pytest (incl. pytest.ini)
-├── ops/                    # Launch / deploy / build
-│   ├── start.bat / start.sh         # Native launch scripts
-│   ├── start-docker-win.ps1 / start-docker-wsl.sh   # Docker launch wrappers
+├── tests/                  # pytest
+│   ├── test_*.py           # Business and per-channel tests
+│   └── test_web_assets.py  # SPA ESM parse + vendor/CDN guards (new in v2.2)
+├── ops/                    # Launch / deploy / build / one-off scripts
+│   ├── start.bat / start.sh             # Native launch scripts
+│   ├── start-docker-win.ps1 / start-docker-wsl.sh
 │   ├── Dockerfile
 │   ├── docker-compose.yml / docker-compose.windows.yml
 │   ├── docker-entrypoint.sh
-│   └── requirements/
-│       ├── base.txt                 # Runtime deps (was requirements.txt)
-│       └── dev.txt                  # Dev / test deps (was requirements-dev.txt)
+│   ├── requirements/{base.txt, dev.txt}
+│   └── scripts/oneoff/                  # Archived one-off analysis and backfill scripts
 ├── data/                   # Runtime data (DB + credentials, .gitignore)
+├── redesign-audit/         # v2.2 refactor design docs (baseline / audit / strategy / tokens)
 └── README.md / README_EN.md / SECURITY.md / LICENSE / .gitignore / .dockerignore / .mailmap
 ```
 
@@ -371,6 +404,20 @@ powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1
 # WSL
 ./ops/start-docker-wsl.sh
 ```
+
+## What's new in v2.2
+
+Compared to 1.4 / 2.0 / 2.1:
+
+- **GMI channel**: new opt-in channel (OpenAI-compatible, Web-imported API key). Off by default; enable by appending `gmi` to `CB_GATEWAY_PROVIDERS`.
+- **Admin UI vendoring**: Vue 3.4.21 and SortableJS 1.15.6 moved off jsdelivr CDN into `web/vendor/`, served by the FastAPI StaticFiles mount. The admin UI now works fully offline. `tests/test_web_assets.py` guards against any future CDN reference creeping back in.
+- **Backend monolith split**:
+  - `storage/database.py` is now a re-export facade; modules live in `storage/repos/{accounts, api_keys, logs, settings, stats, _common}.py`.
+  - `gateway/server.py` keeps the app factory, lifespan, and StaticFiles mount; endpoints split by domain into `gateway/routers/{admin.py, v1.py, static_router.py}`; shared auth dependencies live in `gateway/deps.py`.
+  - `upstream/proxy.py` keeps the pipeline orchestration; model aliases, moderation, compaction, and the Responses bridge live in `upstream/{aliases.py, moderation.py, compaction.py, responses.py}`.
+  - All 56 endpoint paths, contracts, and behavior are unchanged; the test suite shows the same pre-existing pass/fail as the v2.1 baseline (no new regressions).
+- **Admin UI overhaul**: eight levers, one commit each (vendor local, version from `/admin/meta`, CSS token rebuild, component layer, chart palette tokenization, key page reflow, responsive breakpoint consolidation, one-off script archive). Version is now fetched from the backend instead of hard-coded. `em-dash` characters were replaced with Chinese punctuation throughout the SPA.
+- **One lever, one commit**: every refactor commit is independently reviewable (`refactor(web): ...`, `refactor(storage): ...`, `refactor(gateway): ...`, `refactor(upstream): ...`); all commits are pushed to `refactor/web-console-ia`. See `redesign-audit/` for the design baseline, audit findings, strategy, and token spec.
 
 ## License
 

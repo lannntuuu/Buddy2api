@@ -2,15 +2,15 @@
 
 [English](README_EN.md) | 中文
 
-> 把本机已经登录的消费级 AI 客户端，接成 OpenAI 兼容接口，给 Codex、OpenCode、Cherry Studio、NextChat 等用。默认打开 Work Buddy / CodeBuddy、QClaw、千问办公（QwenWork）、TraeWork、Trae SOLO 五个通道；管理页下拉选其中一个。一次请求只走一个通道。
+> 把本机已经登录的消费级 AI 客户端，接成 OpenAI 兼容接口，给 Codex、OpenCode、Cherry Studio、NextChat 等用。默认打开 Work Buddy / CodeBuddy、QClaw、千问办公（QwenWork）、TraeWork、Trae SOLO 五个通道；GMI 是 v2.2 新增的 opt-in 通道，需要在 `CB_GATEWAY_PROVIDERS` 里启用。管理页下拉选其中一个，一次请求只走一个通道。
 
-当前版本 **2.2.0**。这个项目只适合本机自用，不要公开部署，也不要把登录凭据、API Key、数据库文件发给别人。
+当前版本 **2.2.0**。这个项目只适合本机自用，不要公开部署，也不要把登录凭据、API Key、数据库文件发给别人。v2.2 重点变化：管理页不再依赖 CDN（Vue 与 Sortable 全部本地 vendor 化，断网也能打开）；后端三个巨石模块（`storage/database.py`、`gateway/server.py`、`upstream/proxy.py`）按域拆分；新增 GMI opt-in 通道。完整更新见「v2.2 更新内容」。
 
 ## 这是什么？
 
 Buddy2api 在本机提供 `http://127.0.0.1:8787/v1`。你在官方客户端里登录并且还有额度，这个网关把本机登录导入进来，把请求转到对应厂商。普通客户端走 Chat Completions；Codex 走 `/v1/responses`，管理页把 Key 类型选成 Codex 时会做一轮内容清洗。
 
-五个通道默认都开。没装、没登录的通道，账号页检测为空，不会自动入库。Trae SOLO 不走本机登录目录，走管理页「Web 登录」或粘贴回调 URL（见下）。
+五个通道默认都开，第六个 GMI 默认关（opt-in）。没装、没登录的通道，账号页检测为空，不会自动入库。Trae SOLO 不走本机登录目录，走管理页「Web 登录」或粘贴回调 URL（见下）。
 
 ```powershell
 python -m gateway.server
@@ -23,8 +23,9 @@ python -m gateway.server
 | 千问办公 QwenWork | 开 | `%APPDATA%\QwenWorkCN` |
 | TraeWork | 开 | `%APPDATA%\TRAE SOLO CN\User\globalStorage` |
 | Trae SOLO | 开 | 无（Web 登录闭环 / 凭证 JSON 导入） |
+| GMI | 关（opt-in） | Web 配置：账号页选 GMI 通道后粘 API Key 即可 |
 
-路径不对时可用 `CB_AUTH_DIR`、`CB_QCLAW_AUTH_DIR`、`CB_QWENWORK_AUTH_DIR`、`CB_TRAEWORK_AUTH_DIR` 指定。四个通道的登录文件不要混在同一个目录。Trae SOLO 的凭证 JSON 可用 `CB_TRAESOLO_AUTH_DIR` 指定扫描目录（可选）。
+路径不对时可用 `CB_AUTH_DIR`、`CB_QCLAW_AUTH_DIR`、`CB_QWENWORK_AUTH_DIR`、`CB_TRAEWORK_AUTH_DIR` 指定。四个通道的登录文件不要混在同一个目录。Trae SOLO 的凭证 JSON 可用 `CB_TRAESOLO_AUTH_DIR` 指定扫描目录（可选）。GMI 不读本机登录目录，靠管理页导入 API Key。
 
 ## 注意事项
 
@@ -93,8 +94,8 @@ python -m gateway.server
 
 ### 其他启动方式
 
-- **脚本：** Windows 安装 Python 时勾选 Add Python to PATH，在项目目录执行 `.\start.bat`。Linux / macOS：`chmod +x ops/start.sh && ./ops/start.sh`。脚本优先用名为 `buddy2api` 的 Conda 环境，没有 Conda 才建 `.venv`。
-- **Docker：** `powershell -ExecutionPolicy Bypass -File .\start-docker-win.ps1`。本机没有 WorkBuddy 登录目录时脚本仍会启动。容器下拉里仍有五个通道，但 QClaw / QwenWork 请用上面的 `python -m gateway.server`。TraeWork 登录文件不是 DPAPI，本机 `python -m gateway.server` 导入后 Docker 也能用库里的 token。Trae SOLO 不读本机目录，登录闭环与 token 都在库里，容器内同样可用。
+- **脚本：** Windows 安装 Python 时勾选 Add Python to PATH，在项目目录执行 `.\ops\start.bat`。Linux / macOS：`chmod +x ops/start.sh && ./ops/start.sh`。脚本优先用名为 `buddy2api` 的 Conda 环境，没有 Conda 才建 `.venv`。
+- **Docker：** `powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1`。本机没有 WorkBuddy 登录目录时脚本仍会启动。容器下拉里仍有六个通道（开 GMI 需 `CB_GATEWAY_PROVIDERS`），但 QClaw / QwenWork 请用上面的 `python -m gateway.server`。TraeWork 登录文件不是 DPAPI，本机 `python -m gateway.server` 导入后 Docker 也能用库里的 token。Trae SOLO 不读本机目录，登录闭环与 token 都在库里，容器内同样可用。GMI 走 Web 导入，容器内也直接可用。
 
 ### 第一次打开网页之后
 
@@ -238,7 +239,7 @@ curl -X PUT -H "Authorization: Bearer <admin-token>" -H "Content-Type: applicati
 ### 核心 / 启动
 | 变量 | 说明 |
 |---|---|
-| `CB_GATEWAY_PROVIDERS` | 启用哪些通道，逗号分隔。默认 `workbuddy,qclaw,qwenwork,traework,traesolo`。只想留一家时改 |
+| `CB_GATEWAY_PROVIDERS` | 启用哪些通道，逗号分隔。默认 `workbuddy,qclaw,qwenwork,traework,traesolo`。GMI 不在默认里，启用加在末尾：`workbuddy,qclaw,qwenwork,traework,traesolo,gmi` |
 | `CB_GATEWAY_AUTO_IMPORT` | 设 `1` 则启动时自动扫描导入账号。默认 `0` |
 | `CB_GATEWAY_CHECKIN_GAP_MS` | 一键领取时相邻账号的间隔毫秒（防风控，不可设太小）。默认 `800` |
 | `CB_GATEWAY_ADMIN_TOKEN` | 固定管理 Token。默认自动生成（启动日志打印一次，管理页「设置」粘贴一次即可拿 Cookie） |
@@ -285,7 +286,7 @@ curl -X PUT -H "Authorization: Bearer <admin-token>" -H "Content-Type: applicati
 
 - 每个模型一个下拉：`默认（不注入）` / `none` / `minimal` / `low` / `medium` / `high` / `max`；另有「通道默认」档位作用于未单独设置的模型。
 - 优先级：客户端显式 `reasoning_effort` > 按模型配置 > 通道默认 > 不注入（跟随上游默认）。
-- 仅 WorkBuddy 通道上游（`copilot.tencent.com`）确认支持该参数；其它通道在 UI 显示「—」。
+- 仅 WorkBuddy 通道上游（`copilot.tencent.com`）确认支持该参数；其它通道在 UI 显示「不支持」。
 - 实测原生接受值见 `docs/design/per-model-reasoning-effort.md`。注意：deepseek/glm/auto 默认不思考、选档位=开启思考（会变慢）；想最快可给 DeepSeek 选 `low` 或留空。`off` 上游不接受（11150）。
 
 ### content 精简（workbuddy 11128 拦截自愈）
@@ -325,38 +326,71 @@ TraeWork 想算需要先单独修它的 SSE 解析，未做。详见 `docs/credi
 
 ## 项目结构
 
-按职责把核心 Python 代码分成三个包，根目录只剩入口/部署/文档：
+v2.2 把三个巨石模块按域拆开，目录布局如下：
 
 ```text
 Buddy2api/
 ├── gateway/                # HTTP 入口（FastAPI 应用 + 路由 + 版本号）
-│   ├── server.py           # 所有 @app.get / @app.post 端点
-│   ├── router.py           # 绑定请求到通道、做模型翻译
+│   ├── server.py           # app 工厂、lifespan、StaticFiles 挂载
+│   ├── router.py           # 绑定请求到通道、做模型翻译（工具）
+│   ├── deps.py             # 共享鉴权依赖
+│   ├── routers/
+│   │   ├── admin.py        # /admin/* 端点
+│   │   ├── v1.py           # /v1/chat/completions、/v1/responses、/v1/models
+│   │   └── static_router.py# /admin/meta 等元信息
 │   └── version.py
 ├── accounts/               # 账号与通道管理
 │   ├── auth_manager.py     # 账号选择、token 管理、checkin
 │   └── control_plane.py    # 启动扫描、一键领取、模型配置
 ├── upstream/               # 上游对接
-│   ├── proxy.py            # HTTP 上游转发（proxy_chat_completions）
+│   ├── proxy.py            # pipeline 主流程（proxy_chat_completions 等）
+│   ├── aliases.py          # 模型别名表、默认模型、思考档位
+│   ├── moderation.py       # 内容审核、工具停转检测
+│   ├── compaction.py       # 请求体精简、11128 自愈
 │   └── responses.py        # OpenAI Responses ↔ Chat Completions 翻译
-├── storage/                # 基础设施层（DB、加密、指纹）
-│   ├── database.py         # SQLite CRUD
+├── storage/                # 基础设施层（DB、加密、指纹、缓存）
+│   ├── database.py         # 兼容门面（re-export 自 storage.repos）
+│   ├── repos/
+│   │   ├── accounts.py     # 账号 CRUD
+│   │   ├── api_keys.py     # API Key CRUD
+│   │   ├── logs.py         # 请求日志、查询
+│   │   ├── settings.py     # 通道配置、KV
+│   │   ├── stats.py        # dashboard 聚合
+│   │   └── _common.py      # 共享连接 / Schema
+│   ├── credit_cache.py     # 各通道 credit 缓存
+│   ├── http_pool.py        # 上游 httpx 客户端池
 │   ├── credential_crypto.py
 │   └── fingerprint.py
-├── providers/              # 通道适配（workbuddy / qclaw / qwenwork / traework / traesolo）
-├── web/                    # 管理页 UI（Vue 3 CDN）
+├── providers/              # 通道适配
+│   ├── workbuddy/
+│   ├── qclaw/
+│   ├── qwenwork/
+│   ├── traework/
+│   ├── traesolo/
+│   └── gmi/                # v2.2 新增，opt-in
+├── web/                    # 管理页 UI
+│   ├── index.html
+│   ├── css/app.css
+│   ├── js/
+│   │   ├── app.js          # 入口
+│   │   ├── api.js          # 后台 API 客户端
+│   │   ├── icons.js        # 自绘 SVG 图标
+│   │   └── pages/          # dashboard / accounts / quota / keys / channels / usage / logs / setup / settings
+│   └── vendor/             # Vue 3.4.21 + SortableJS 1.15.6（本地，断网可用）
 ├── docs/                   # 设计与使用文档
-├── tests/                  # pytest（含 pytest.ini）
-├── ops/                    # 启动 / 部署 / 构建
-│   ├── start.bat / start.sh         # 本机启动脚本
-│   ├── start-docker-win.ps1 / start-docker-wsl.sh   # Docker 启动包装
+├── tests/                  # pytest
+│   ├── test_*.py           # 业务与通道测试
+│   └── test_web_assets.py  # 前端 ESM 解析 + vendor/CDN 守卫（v2.2 新增）
+├── ops/                    # 启动 / 部署 / 构建 / 一次性脚本
+│   ├── start.bat / start.sh             # 本机启动脚本
+│   ├── start-docker-win.ps1 / start-docker-wsl.sh
 │   ├── Dockerfile
 │   ├── docker-compose.yml / docker-compose.windows.yml
 │   ├── docker-entrypoint.sh
-│   └── requirements/
-│       ├── base.txt                 # 运行依赖（原 requirements.txt）
-│       └── dev.txt                  # 开发/测试依赖（原 requirements-dev.txt）
+│   ├── requirements/{base.txt, dev.txt}
+│   └── scripts/oneoff/                  # 一次性分析与回填脚本（归档）
 ├── data/                   # 运行时数据（DB + 凭据，.gitignore）
+├── redesign-audit/         # v2.2 重构设计文档（基线 / 审计 / 策略 / 令牌）
 └── README.md / README_EN.md / SECURITY.md / LICENSE / .gitignore / .dockerignore / .mailmap
 ```
 
@@ -379,6 +413,20 @@ powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1
 # WSL
 ./ops/start-docker-wsl.sh
 ```
+
+## v2.2 更新内容
+
+相对 1.4 / 2.0 / 2.1 的主要变化：
+
+- **GMI 通道**：新增 opt-in 通道（OpenAI 兼容，走 Web 导入 API Key）。不在默认通道列表里，启用需在 `CB_GATEWAY_PROVIDERS` 末尾追加 `gmi`。
+- **管理页 vendor 本地化**：Vue 3.4.21 与 SortableJS 1.15.6 从 jsdelivr CDN 落到 `web/vendor/`，由 FastAPI StaticFiles 直接服务。断网仍可打开管理页。`tests/test_web_assets.py` 守卫 CDN 引用永不回归。
+- **后端三巨石模块拆分**：
+  - `storage/database.py` 退化为 re-export 兼容门面，子模块在 `storage/repos/{accounts, api_keys, logs, settings, stats, _common}.py`。
+  - `gateway/server.py` 留 app 工厂、lifespan、StaticFiles 挂载；端点按域拆到 `gateway/routers/{admin.py, v1.py, static_router.py}`；共享鉴权依赖收口到 `gateway/deps.py`。
+  - `upstream/proxy.py` 留 pipeline 主流程；模型别名、审核、精简、Responses 翻译拆到 `upstream/{aliases.py, moderation.py, compaction.py, responses.py}`。
+  - 56 个端点路径、契约、行为全部保持不变；`pytest` 与基线一致（pre-existing 失败不在重构范围）。
+- **管理页 Overhaul**：8 个 lever（依赖本地化、版本号单一来源、CSS 单一令牌体系重建、组件层重做、图表令牌化、重点页重排、移动端断点收敛、一次性脚本归档）。版本号现在从 `/admin/meta` 拉，不再写死。`em-dash` 全部清理为中文标点。
+- **一次 commits 走完**：每个 lever 一个 commit（`refactor(web): ...` / `refactor(storage): ...` / `refactor(gateway): ...` / `refactor(upstream): ...`），所有 commit 已 push 到 `refactor/web-console-ia`。详细设计见 `redesign-audit/`。
 
 ## License
 
