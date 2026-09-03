@@ -29,3 +29,11 @@
 - commit: 17badad feat(web): restyle dashboard hero into status + KPI band, dark-tuned charts
 - 说明: dashboard.js 的 `.dash-hero` 子结构由 `.health-main+health-kpis` 重写为 `.hero-left(hero-statusline+hero-state+hero-sub+status-line)` + `.hero-kpis(3 × .hero-kpi)`。数据绑定 `healthClass/healthText/n/pct/ms` 与所有 s 字段完全保留，KPI 三个 `.v` 加 `state-number` class 复用 tabular-nums。`.today-value` 增加 `font-feature-settings:'tnum' 1`。app.css 的 `.dash-hero` 重写：grid `1.4fr/.6fr`、padding 加大、内含 `::after` 260×260 radial-gradient 橙软光斑。新增 `.hero-left/.hero-statusline/.hero-state/.hero-sub/.hero-kpis/.hero-kpi/.hero-kpi .k/.hero-kpi .v`。`.hero-kpi .v` 加入 §3 的 mono 列表。`.health-*` 旧段保留（页面其它处不引用、无副作用）。图表深色配色已在 Lever 1 `--chart-* --heat-* --cache-*` token 自翻转覆盖。pytest 通过 (14 passed)、零 em-dash。
 - screenshot: 未截屏
+
+## Lever 5 — entrance stagger + hover/press motion
+- 状态: ✔ done
+- 改动文件: web/css/app.css
+- commit: (pending) feat(web): tasteful entrance stagger + hover/press motion (reduced-motion safe)
+- 说明: 追加 `@keyframes riseIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}`。`.content > .card/.dash-hero/.today-usage` 各 stagger 0/0.04s/0.08s 入场，`.content > .dash-grid` 0.12s。`.card:hover` 加 `box-shadow:0 4px 20px rgba(0,0,0,.06)`。按压：`.iconbtn:active/.refresh-cta:active/.rail-item:active{transform:scale(.97)}`（`.btn:active{translateY(1px)}` 原有保留，避免 cascade 覆盖；spec §6.2 选择器里去掉 `.btn`）。三处 transition 加 `transform var(--dur-fast) var(--ease)`。prefers-reduced-motion 已在 L114 全局 0ms 兜底（`*` animation/transition 0ms）。pytest 通过 (14 passed)、零 em-dash。
+- screenshot: 未截屏
+- screenshot: 未截屏

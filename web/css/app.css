@@ -143,7 +143,7 @@ button{font-family:inherit}
 .railnav{display:flex;flex-direction:column;gap:4px;flex:1;width:100%;align-items:center}
 .rail-item{width:40px;height:40px;display:grid;place-items:center;color:var(--fg-3);
   border-radius:var(--r-m);cursor:pointer;position:relative;
-  transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease)}
+  transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease),transform var(--dur-fast) var(--ease)}
 .rail-item svg{width:19px;height:19px}
 .rail-item:hover{color:var(--fg);background:var(--bg-elevated)}
 .rail-item.on{color:var(--accent);background:var(--accent-soft)}
@@ -167,14 +167,14 @@ button{font-family:inherit}
 .refresh-cta{height:36px;border:1px solid var(--accent);background:var(--accent);color:#fff;
   border-radius:var(--r-m);padding:0 14px;font:inherit;font-size:var(--fs-b);font-weight:700;
   display:inline-flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap;
-  transition:background var(--dur-fast) var(--ease)}
+  transition:background var(--dur-fast) var(--ease),transform var(--dur-fast) var(--ease)}
 .refresh-cta:hover{background:var(--accent-strong);border-color:var(--accent-strong)}
 .refresh-cta svg{width:14px;height:14px}
 .refresh-cta:disabled{opacity:.5;cursor:not-allowed}
 .iconbtn{height:36px;min-width:36px;padding:0 10px;border:1px solid var(--border-strong);
   background:var(--bg-elevated);color:var(--fg-2);border-radius:var(--r-m);
   display:inline-flex;align-items:center;justify-content:center;cursor:pointer;
-  transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease)}
+  transition:background var(--dur-fast) var(--ease),color var(--dur-fast) var(--ease),border-color var(--dur-fast) var(--ease),transform var(--dur-fast) var(--ease)}
 .iconbtn:hover{background:var(--bg-sunken);color:var(--fg)}
 .iconbtn svg{width:16px;height:16px}
 
@@ -743,3 +743,12 @@ tr:hover td{background:var(--accent-soft)}
   .toasts{top:64px;right:var(--sp-2);left:var(--sp-2)}
   .toast{width:100%}
 }
+
+/* ---- motion: entrance stagger + hover/press (Lever 5) ----- */
+@keyframes riseIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.content > .card,.content > .dash-hero,.content > .today-usage{animation:riseIn var(--dur-base) var(--ease) both}
+.content > .dash-hero{animation-delay:.04s}
+.content > .today-usage{animation-delay:.08s}
+.content > .dash-grid{animation:riseIn var(--dur-base) var(--ease) both;animation-delay:.12s}
+.card:hover{box-shadow:0 4px 20px rgba(0,0,0,.06)}
+.iconbtn:active,.refresh-cta:active,.rail-item:active{transform:scale(.97)}
