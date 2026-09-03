@@ -50,7 +50,7 @@ if not defined CB_GATEWAY_PORT set "CB_GATEWAY_PORT=8787"
 echo  [Start] http://127.0.0.1:%CB_GATEWAY_PORT%
 echo  [Stop] Ctrl+C
 echo.
-call "%CONDA_EXE%" run --no-capture-output -n buddy2api python -m gateway.server --port %CB_GATEWAY_PORT% %*
+call "%CONDA_EXE%" run --no-capture-output -n buddy2api python -m src.gateway.server --port %CB_GATEWAY_PORT% %*
 goto end
 
 :use_venv
@@ -78,7 +78,7 @@ if not defined CB_GATEWAY_PORT set "CB_GATEWAY_PORT=8787"
 echo  [Start] http://127.0.0.1:%CB_GATEWAY_PORT%
 echo  [Stop] Ctrl+C
 echo.
-.venv\Scripts\python.exe -m gateway.server --port %CB_GATEWAY_PORT% %*
+.venv\Scripts\python.exe -m src.gateway.server --port %CB_GATEWAY_PORT% %*
 goto end
 
 :conda_error
