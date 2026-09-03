@@ -231,6 +231,68 @@ curl -X PUT -H "Authorization: Bearer <admin-token>" -H "Content-Type: applicati
 | `--port` | `8787` | 端口 |
 | `--admin-token` | 自动生成（启动日志打印一次） | 管理 Token；在管理页「设置」粘贴一次即可拿到 Cookie |
 | `--no-admin-auth` | 关 | 关掉管理鉴权，只适合本机临时试 |
+| `--config` | 读 `config.toml` 的 `[default]` 块；带路径则当作 TOML 文件路径；不带路径则当作 profile 名（参见 [配置文件](#配置文件)） |
+| `--config-name` | `default` | TOML 文件内要加载的 profile 表名（`[dev]` / `[prod]` 等） |
+
+## 配置文件
+
+`config.toml` 放在项目根目录，启动时被 `gateway.server` 自动加载。适合"我不想每次记一堆 CLI 参数 / 环境变量"的场景，把 `host` `port` `database.path` `admin.token` 写进文件，bare `python -m gateway.server` 就能直接用。
+
+**优先级**（later wins）：
+
+```
+代码默认值  →  config.toml [default]  →  config.toml [<profile>]  →  环境变量  →  CLI 参数
+```
+
+**两种 profile 加载方式**：
+
+```bash
+# 1) profile 写在同一个 config.toml 里
+python -m gateway.server                          # 用 [default] 块
+python -m gateway.server --config prod            # 用 [prod] 块
+CB_GATEWAY_CONFIG=prod python -m gateway.server   # 同上，但通过环境变量
+
+# 2) profile 在独立文件里
+python -m gateway.server --config config.prod.toml
+```
+
+**完整示例**（dev / prod 共享同一份代码、各自一份配置）：
+
+```toml
+# config.toml · dev checkout 默认用 8787
+[default.server]
+host = "127.0.0.1"
+port = 8787
+
+[dev.server]
+host = "127.0.0.1"
+port = 8787
+```
+
+```toml
+# config.prod.toml · prod checkout 走 8788、自己的 data 目录
+[default.server]
+host = "127.0.0.1"
+port = 8788
+
+[default.database]
+path = "/var/lib/buddy2api/codebuddy_gateway.db"
+
+[default.admin]
+# 留空就自动生成；填了就固定下来（浏览器 Cookie 跨重启有效）
+# token = "cb-admin-xxxxxxxxxxxxxxxxxxxxxxxx"
+```
+
+`config.toml` 和 `config.*.toml` 都被 `.gitignore` 排除（per-deploy 配置不进 git），跟踪的只有 `config.example.toml` 模板。
+
+**同时跑 dev + prod**：两个 checkout 各写一份 `config.toml`，端口和 db 路径必须错开（否则 WAL 锁会冲突）：
+
+| checkout | config.toml 端口 | config.toml db 路径 |
+|---|---|---|
+| `Buddy2api/`（dev） | 8787 | `data/codebuddy_gateway.db`（默认） |
+| `Buddy2api-prod/`（worktree 跑实例） | 8788 | `data/codebuddy_gateway.db`（相对 prod 自己的 cwd） |
+
+固定 admin token：编辑 `config.toml` 的 `admin.token = "cb-admin-xxx"`。生成一个：`python -c "import secrets; print('cb-admin-' + secrets.token_urlsafe(24))"`。
 
 ## 环境变量
 
@@ -427,6 +489,7 @@ powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1
   - 56 个端点路径、契约、行为全部保持不变；`pytest` 与基线一致（pre-existing 失败不在重构范围）。
 - **管理页 Overhaul**：8 个 lever（依赖本地化、版本号单一来源、CSS 单一令牌体系重建、组件层重做、图表令牌化、重点页重排、移动端断点收敛、一次性脚本归档）。版本号现在从 `/admin/meta` 拉，不再写死。`em-dash` 全部清理为中文标点。
 - **一次 commits 走完**：每个 lever 一个 commit（`refactor(web): ...` / `refactor(storage): ...` / `refactor(gateway): ...` / `refactor(upstream): ...`），所有 commit 已 push 到 `refactor/web-console-ia`。详细设计见 `redesign-audit/`。
+- **配置文件 `config.toml`**：新增。`gateway.server` 启动时自动加载，支持 `[default]` / `[dev]` / `[prod]` profile 与 `--config <profile>` / `CB_GATEWAY_CONFIG=<profile>` 切换。dev / prod 双 checkout 各自一份 `config.toml`（`.gitignore`d，per-deploy 私有），端口和 db 路径已写死，bare `python -m gateway.server` 走对端。详见 [配置文件](#配置文件) 一节。
 
 ## License
 
