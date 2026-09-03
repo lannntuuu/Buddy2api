@@ -27,27 +27,35 @@ createApp({
     return{page,token,toasts,meta,metaTag,theme,toggleTheme,tf,go,saveToken,hardRefresh,nav,I}
   },
   template:`
-  <div class="layout">
-    <header class="topbar">
-      <div class="brand-block"><div class="brand-symbol">B2</div><div class="brand-copy"><div class="brand-title">{{meta.title}}</div><div class="brand-meta">{{metaTag}}<span v-if="meta.version"> · v{{meta.version}}</span></div></div></div>
-      <nav class="topnav"><div v-for="n in nav" :key="n.k" class="nav-item" :class="{on:page===n.k}" @click="go(n.k)" v-html="n.i+'<span>'+n.l+'</span>'"></div></nav>
-      <div class="top-actions">
-        <button class="iconbtn" @click="toggleTheme" :title="theme==='dark'?'切到浅色':'切到深色'">
-          <span v-html="theme==='dark'?I.sun:I.moon"></span>
-        </button>
-        <button class="refresh-cta" @click="hardRefresh"><span v-html="I.refresh"></span><span>刷新</span></button>
+  <div class="shell">
+    <aside class="rail">
+      <div class="rail-brand" v-html="I.logo"></div>
+      <nav class="railnav">
+        <div v-for="n in nav" :key="n.k" class="rail-item" :class="{on:page===n.k}" @click="go(n.k)" :title="n.l" v-html="n.i"></div>
+      </nav>
+      <div class="rail-foot">
+        <button class="rail-icon" @click="toggleTheme" :title="theme==='dark'?'切到浅色':'切到深色'" v-html="theme==='dark'?I.sun:I.moon"></button>
       </div>
-    </header>
-    <div class="main">
-      <div class="content" v-if="page==='dashboard'"><dash :token="token" :toast="tf"/></div>
-      <div class="content" v-if="page==='accounts'"><accs :token="token" :toast="tf"/></div>
-      <div class="content" v-if="page==='quota'"><quota :token="token" :toast="tf"/></div>
-      <div class="content" v-if="page==='keys'"><keys :token="token" :toast="tf"/></div>
-      <div class="content" v-if="page==='channels'"><chns :token="token" :toast="tf"/></div>
-      <div class="content" v-if="page==='usage'"><usg :token="token" :toast="tf"/></div>
-      <div class="content" v-if="page==='logs'"><lgs :token="token"/></div>
-      <div class="content" v-if="page==='setup'"><setup :token="token" :toast="tf"/></div>
-      <div class="content" v-if="page==='settings'"><stgs :token="token" :toast="tf" :save-token="saveToken"/></div>
+    </aside>
+    <div class="shell-body">
+      <div class="shell-head">
+        <div class="shell-title">{{meta.title}}<span class="shell-ver" v-if="meta.version"> v{{meta.version}}</span></div>
+        <div class="shell-actions">
+          <span class="tag">{{metaTag}}</span>
+          <button class="refresh-cta" @click="hardRefresh"><span v-html="I.refresh"></span><span>刷新</span></button>
+        </div>
+      </div>
+      <main class="main">
+        <div class="content" v-if="page==='dashboard'"><dash :token="token" :toast="tf"/></div>
+        <div class="content" v-if="page==='accounts'"><accs :token="token" :toast="tf"/></div>
+        <div class="content" v-if="page==='quota'"><quota :token="token" :toast="tf"/></div>
+        <div class="content" v-if="page==='keys'"><keys :token="token" :toast="tf"/></div>
+        <div class="content" v-if="page==='channels'"><chns :token="token" :toast="tf"/></div>
+        <div class="content" v-if="page==='usage'"><usg :token="token" :toast="tf"/></div>
+        <div class="content" v-if="page==='logs'"><lgs :token="token"/></div>
+        <div class="content" v-if="page==='setup'"><setup :token="token" :toast="tf"/></div>
+        <div class="content" v-if="page==='settings'"><stgs :token="token" :toast="tf" :save-token="saveToken"/></div>
+      </main>
     </div>
     <div class="toasts"><div class="toast" :class="x.t" v-for="x in toasts" :key="x.id">{{x.m}}</div></div>
   </div>`
