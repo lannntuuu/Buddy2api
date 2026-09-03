@@ -148,7 +148,7 @@ export default {props:['token','toast'],setup(p){
           <button class="btn s" @click="resetChActive" :disabled="chBusyOf(chOf())">重置默认</button>
         </div>
       </div>
-      <div style="margin-bottom:14px"><label style="font-size:12px;color:var(--fg2);display:block;margin-bottom:6px">模型白名单（保存 = 按列表整体保存；空白名单保存 = 该平台所有模型请求 400；列表外的模型 400）<span v-if="canRefreshOfficial(chOf())&&chOf().channel==='traesolo'" style="margin-left:8px;color:var(--fg3)">· 倍率来自官方 consumption_rate（原值）</span><span v-else-if="canRefreshOfficial(chOf())" style="margin-left:8px;color:var(--fg3)">· 倍率来自上游 /v1/models</span><span v-else style="margin-left:8px;color:var(--fg3)">· 该通道上游不提供倍率，显示「—」</span></label>
+      <div style="margin-bottom:14px"><label style="font-size:12px;color:var(--fg2);display:block;margin-bottom:6px">模型白名单（保存 = 按列表整体保存；空白名单保存 = 该平台所有模型请求 400；列表外的模型 400）<span v-if="canRefreshOfficial(chOf())&&chOf().channel==='traesolo'" style="margin-left:8px;color:var(--fg3)">· 倍率来自官方 consumption_rate（原值）</span><span v-else-if="canRefreshOfficial(chOf())" style="margin-left:8px;color:var(--fg3)">· 倍率来自上游 /v1/models</span><span v-else style="margin-left:8px;color:var(--fg3)">· 该通道上游不提供倍率，显示「-」</span></label>
         <div v-if="chOf().modelRows.length" class="table-scroll" style="margin-bottom:8px">
           <table style="font-size:12px">
             <thead><tr><th style="text-align:left;padding:4px 8px">模型 ID</th><th style="text-align:left;padding:4px 8px;min-width:90px">展示名</th><th style="text-align:right;padding:4px 8px;min-width:64px">倍率</th><th v-if="chOf().reasoningSupported" style="text-align:left;padding:4px 8px;min-width:118px">思考档位</th><th style="width:56px"></th></tr></thead>
@@ -158,7 +158,7 @@ export default {props:['token','toast'],setup(p){
                 <td style="padding:3px 8px;color:var(--fg3);font-family:var(--mono)">{{r.display_name&&r.display_name!==r.id?r.display_name:''}}</td>
                 <td style="padding:3px 8px;text-align:right;font-family:var(--mono)">
                   <span v-if="r.rate!==null&&r.rate!==undefined">{{r.rate}}</span>
-                  <span v-else style="color:var(--fg3)">—</span>
+                  <span v-else style="color:var(--fg3)">-</span>
                   <span v-if="r.official" title="官方接口提供" style="color:var(--green);font-size:10px;margin-left:4px">●</span>
                 </td>
                 <td v-if="chOf().reasoningSupported" style="padding:3px 8px">
@@ -207,7 +207,7 @@ export default {props:['token','toast'],setup(p){
       <div style="margin-top:14px;border-top:1px dashed var(--border);padding-top:12px"><label style="font-size:12px;color:var(--fg2);display:block;margin-bottom:6px">相对消耗缩放因子（tokens ÷ 该值 × 模型倍率）</label>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <input class="tcell" style="width:120px" v-model="chOf().credit_rate" type="number" min="0" step="1"/>
-          <span class="hint" style="margin:0" v-if="chOf().channel==='traesolo'">TRAE SOLO 已改用<strong>官方三档标价公式</strong>（input/cache_read/output 分别计价，反解自官方 session 真值，46/51 行误差<1%，见 pricing.py）。本栏缩放因子仅在请求无 token 数据时兜底使用。注意：标价≠实际扣费——订阅内官方实际扣费远低于标价（见 docs §10.5）。</span>
+          <span class="hint" style="margin:0" v-if="chOf().channel==='traesolo'">TRAE SOLO 已改用<strong>官方三档标价公式</strong>（input/cache_read/output 分别计价，反解自官方 session 真值，46/51 行误差<1%，见 pricing.py）。本栏缩放因子仅在请求无 token 数据时兜底使用。注意：标价≠实际扣费，订阅内官方实际扣费远低于标价（见 docs §10.5）。</span>
           <span class="hint" style="margin:0" v-else-if="chOf().channel==='traework'">TraeWork 消耗已改用<strong>官方 session 真值</strong>（query_user_usage_group_by_session，每小时自动同步），不再走 token 估算。本栏缩放因子对 TraeWork 不生效；dashboard 的 TraeWork 每日 credit 显示的是官方真积分。</span>
           <span class="hint" style="margin:0" v-else>上游不回报 credit 的通道（qclaw/qwenwork）用「token 数 ÷ 该值」近似统计消耗；留 0 或不填 = 不做估算。内置默认 {{chOf().credit_rate_default}}。</span>
         </div>

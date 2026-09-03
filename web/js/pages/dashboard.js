@@ -24,7 +24,7 @@ export default {props:['token','toast'],setup(p){
     function points(kind){const key=kind==='credit'?'credits':kind;const values=daily.map(d=>({date:d.date,value:Number(d[key]||0)}));return{values,max:Math.max(...values.map(x=>x.value),1)}}
     const creditPoints=points('credit'),requestPoints=points('requests'),tokenPoints=points('tokens');
     return[
-      {kind:'credit',label:'今日 Credit(官方标价估算)',value:money(t.credit),unit:'Credit',meta:n(requests)+' 次调用 · 单次 '+money(requests?Number(t.credit||0)/requests:0)+'（按官方三档标价公式；订阅内实际扣费远低于此，见文档§10）',foot:credit.value?.channels?.length?credit.value.channels.map(c=>c.id+' '+(c.unit==='credit'&&c.remaining!=null?money(c.remaining):'—')).join(' · '):'累计标价估算 '+money(s.value?.total_credit),footLabel:credit.value?.channels?.length?'按通道积分余额':'累计标价估算',icon:I.wallet,...creditPoints},
+      {kind:'credit',label:'今日 Credit(官方标价估算)',value:money(t.credit),unit:'Credit',meta:n(requests)+' 次调用 · 单次 '+money(requests?Number(t.credit||0)/requests:0)+'（按官方三档标价公式；订阅内实际扣费远低于此，见文档§10）',foot:credit.value?.channels?.length?credit.value.channels.map(c=>c.id+' '+(c.unit==='credit'&&c.remaining!=null?money(c.remaining):'-')).join(' · '):'累计标价估算 '+money(s.value?.total_credit),footLabel:credit.value?.channels?.length?'按通道积分余额':'累计标价估算',icon:I.wallet,...creditPoints},
       {kind:'requests',label:'今日调用次数',value:n(requests),unit:'次',meta:'成功 '+n(t.success)+' · 异常 '+n(Number(t.errors||0)+Number(t.filtered||0)),foot:pct(t.success_rate),footLabel:'成功率',icon:I.activity,...requestPoints},
       {kind:'tokens',label:'今日 Token',value:tok(t.tokens),unit:'Tokens',meta:'单次平均 '+tok(requests?Math.round(Number(t.tokens||0)/requests):0),foot:'累计 '+tok(s.value?.total_tokens),footLabel:'全部时间',icon:I.tokens,...tokenPoints},
     ]
@@ -94,8 +94,8 @@ export default {props:['token','toast'],setup(p){
         <div class="card-h">官方额度概览<span class="sub">{{credit.ok_accounts}}/{{credit.active_accounts}} 账号已读取 · 缓存 {{credit.stale_accounts}}</span></div>
         <div class="card-p">
           <div class="metric-row">
-            <div class="metric" v-for="ch in (credit.channels||[])" :key="ch.id"><div class="m-label">{{ch.display_name||ch.id}}</div><div class="m-value">{{ch.unit==='credit'&&ch.remaining!=null?money(ch.remaining):'—'}}</div><div class="m-sub">积分 · {{ch.accounts||0}} 账号{{ch.unsupported?' · 无积分接口':''}}</div></div>
-            <div class="metric" v-if="!(credit.channels||[]).length"><div class="m-label">官方额度</div><div class="m-value">—</div><div class="m-sub">按通道分别统计，不跨厂加总</div></div>
+            <div class="metric" v-for="ch in (credit.channels||[])" :key="ch.id"><div class="m-label">{{ch.display_name||ch.id}}</div><div class="m-value">{{ch.unit==='credit'&&ch.remaining!=null?money(ch.remaining):'-'}}</div><div class="m-sub">积分 · {{ch.accounts||0}} 账号{{ch.unsupported?' · 无积分接口':''}}</div></div>
+            <div class="metric" v-if="!(credit.channels||[]).length"><div class="m-label">官方额度</div><div class="m-value">-</div><div class="m-sub">按通道分别统计，不跨厂加总</div></div>
             <div class="metric"><div class="m-label">7 天内到期</div><div class="m-value" :class="{'warn-text':Number(credit.expiring_7d_total)>0}">{{money(credit.expiring_7d_total)}}</div><div class="m-sub">仅 WorkBuddy</div></div>
             <div class="metric"><div class="m-label">30 天内到期</div><div class="m-value" :class="{'warn-text':Number(credit.expiring_30d_total)>0}">{{money(credit.expiring_30d_total)}}</div><div class="m-sub">{{credit.package_count}} 个额度包</div></div>
           </div>

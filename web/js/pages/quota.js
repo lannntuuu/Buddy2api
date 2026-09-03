@@ -44,8 +44,8 @@ export default {props:['token','toast'],setup(p){
         <div class="card-h">官方额度概览<span class="sub">{{creditSum?.ok_accounts||0}}/{{creditSum?.active_accounts||0}} 账号已读取 · 缓存 {{creditSum?.stale_accounts||0}}</span></div>
         <div class="card-p">
           <div class="metric-row">
-            <div class="metric" v-for="ch in (creditSum?.channels||[])" :key="ch.id"><div class="m-label">{{ch.display_name||ch.id}}</div><div class="m-value">{{ch.unit==='credit'&&ch.remaining!=null?credit(ch.remaining):'—'}}</div><div class="m-sub">积分 · {{ch.accounts||0}} 账号{{ch.unsupported?' · 无积分接口':''}}</div></div>
-            <div class="metric" v-if="!(creditSum?.channels||[]).length"><div class="m-label">官方额度</div><div class="m-value">—</div><div class="m-sub">按通道分别统计，不跨厂加总</div></div>
+            <div class="metric" v-for="ch in (creditSum?.channels||[])" :key="ch.id"><div class="m-label">{{ch.display_name||ch.id}}</div><div class="m-value">{{ch.unit==='credit'&&ch.remaining!=null?credit(ch.remaining):'-'}}</div><div class="m-sub">积分 · {{ch.accounts||0}} 账号{{ch.unsupported?' · 无积分接口':''}}</div></div>
+            <div class="metric" v-if="!(creditSum?.channels||[]).length"><div class="m-label">官方额度</div><div class="m-value">-</div><div class="m-sub">按通道分别统计，不跨厂加总</div></div>
             <div class="metric"><div class="m-label">7 天内到期</div><div class="m-value" :class="{'warn-text':Number(credit?.expiring_7d_total)>0}">{{credit(creditSum?.expiring_7d_total)}}</div><div class="m-sub">仅 WorkBuddy</div></div>
             <div class="metric"><div class="m-label">30 天内到期</div><div class="m-value" :class="{'warn-text':Number(credit?.expiring_30d_total)>0}">{{credit(creditSum?.expiring_30d_total)}}</div><div class="m-sub">{{creditSum?.package_count||0}} 个额度包</div></div>
           </div>

@@ -61,7 +61,7 @@ export default {props:['token','toast'],setup(p){
   function creditPct(a){return Math.max(0,Math.min(100,Number(a.credit_used_pct||0)))+'%'}
   function tokenLife(a){
     // api_key 类通道（gmi 等）无过期概念，不显示误导性的 "0h"。
-    if(a.account_type==='api_key'||a.provider&&APIKEY_CHANNELS[a.provider])return '—';
+    if(a.account_type==='api_key'||a.provider&&APIKEY_CHANNELS[a.provider])return '-';
     if(a.token_expired)return '过期';const h=Number(a.remaining_hours||0);if(h>=72)return '约 '+Math.floor(h/24)+' 天';if(h>=24)return Math.floor(h/24)+' 天 '+(h%24)+'h';return h+'h'
   }
   const visibleAccounts=computed(()=>{

@@ -36,7 +36,7 @@ export default {props:['token','toast'],setup(p){
     <template v-if="res">
       <div class="field"><label>新 Key</label><div class="keybox">{{res}}</div><button class="btn s pri" style="margin-top:8px" @click="cp(res)">{{copied?'已复制':'复制 Key'}}</button><div class="hint" style="margin-top:6px">关闭后仍可在 API Keys 列表中查看和复制。各客户端（Codex / OpenCode / Cherry Studio 等）的接入配置见「接入指南」页。</div></div>
       <div v-if="f.preset==='codex'" class="callout" style="margin-top:12px;font-size:12px;background:var(--green-bg);border-color:var(--ok-border);color:var(--ok-fg)">
-        <strong>已为该 Key 自动启用 Codex 专用处理</strong> — 内容清洗（sandbox/filesystem/execute 等敏感词替换）、模型别名映射（gpt-5.5→glm-5.2 等）、工具过滤、Responses API 协议转换均自动生效，无需额外配置。一键写入 Codex 配置文件见「接入指南」页。
+        <strong>已为该 Key 自动启用 Codex 专用处理</strong>：内容清洗（sandbox/filesystem/execute 等敏感词替换）、模型别名映射（gpt-5.5→glm-5.2 等）、工具过滤、Responses API 协议转换均自动生效，无需额外配置。一键写入 Codex 配置文件见「接入指南」页。
       </div>
     </template>
     <template v-else>

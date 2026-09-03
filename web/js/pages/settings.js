@@ -6,7 +6,7 @@ export default {props:['token','toast','saveToken'],setup(p){
   const defaults={backend_url:'https://copilot.tencent.com',default_domain:'www.codebuddy.cn',timeout:300};
   const s=ref({...defaults,base_url:'http://127.0.0.1:8787/v1',admin_auth:'本机 Cookie 自动验证'}),ld=ref(true),saving=ref(false),adminToken=ref(p.token||'');
 
-  // Channels panel — collapsed by default. Native <details> for a11y.
+  // Channels panel -- collapsed by default. Native <details> for a11y.
   const chs=ref([]),chLd=ref(false),chBusy=ref(false),chErr=ref(''),
         chEnvLocked=ref(false),chOpen=ref(false),chDirty=ref(false),
         chListEl=ref(null);
