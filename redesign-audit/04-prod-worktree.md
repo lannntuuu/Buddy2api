@@ -17,19 +17,34 @@ git worktree list
 
 ## 启动 prod server
 
+**两个 checkout 各自带 `config.toml`（gitignored），端口/db 路径已写死**。所以 bare `python -m gateway.server` 不用任何参数就走对：
+
 ```powershell
 # 在 prod checkout 里
 Set-Location C:\Usr\Code\etc\Buddy2api-prod
-$env:CB_GATEWAY_DB_PATH = "C:\Usr\Code\etc\Buddy2api-prod\data\codebuddy_gateway.db"
 Start-Process -FilePath ".\.venv\Scripts\python.exe" `
-  -ArgumentList "-m","gateway.server","--host","127.0.0.1","--port","8788" `
+  -ArgumentList "-m","gateway.server" `
   -WorkingDirectory "C:\Usr\Code\etc\Buddy2api-prod" `
-  -RedirectStandardOutput "C:\Usr\Code\etc\Buddy2api-prod\.tmp\prod_server.log" `
-  -RedirectStandardError "C:\Usr\Code\etc\Buddy2api-prod\.tmp\prod_server.err" `
+  -RedirectStandardOutput ".tmp\prod_server.log" `
+  -RedirectStandardError ".tmp\prod_server.err" `
   -WindowStyle Hidden
 ```
 
+prod 走 8788（`config.toml` 决定）、dev 走 8787，两个 server 同时跑互不冲突。
+
+**或者**用 `ops\start.bat`（同样读 config / 默认 8787，要切 8788 提前 `set CB_GATEWAY_PORT=8788`）。
+
 admin token 在 stderr 里：`Get-Content .tmp\prod_server.err | Select-String "Admin Token"`。
+
+**配置文件 (`config.toml`) 的优先级**（later wins）：
+
+```
+code default  ->  config.toml [default]  ->  config.toml [<profile>]  ->  环境变量  ->  CLI 参数
+```
+
+切换 profile：`python -m gateway.server --config prod` 或 `CB_GATEWAY_CONFIG=prod python -m gateway.server`。
+
+固定 admin token 让浏览器 cookie 跨重启有效：编辑 `config.toml` 的 `admin.token = "cb-admin-xxx"`。
 
 ## 升级 prod（拉上游新版本）
 
