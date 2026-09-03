@@ -226,7 +226,11 @@ def main():
     ALLOW_NO_ADMIN_AUTH = args.no_admin_auth
     admin_token_source = args.admin_token or os.environ.get("CB_GATEWAY_ADMIN_TOKEN", "")
     admin_token_generated = bool(not ALLOW_NO_ADMIN_AUTH and not admin_token_source)
-    ADMIN_TOKEN = "" if ALLOW_NO_ADMIN_AUTH else (admin_token_source or f"cb-admin-{secrets.token_urlsafe(24)}")
+    # Assigning on the module (not as locals) lets _ServerModule.__setattr__
+    # mirror the value into gateway.deps. Otherwise the routers read the
+    # empty-string default from deps and every /admin/login 401s.
+    sys.modules[__name__].ALLOW_NO_ADMIN_AUTH = ALLOW_NO_ADMIN_AUTH
+    sys.modules[__name__].ADMIN_TOKEN = "" if ALLOW_NO_ADMIN_AUTH else (admin_token_source or f"cb-admin-{secrets.token_urlsafe(24)}")
 
     db.init_db()
 
