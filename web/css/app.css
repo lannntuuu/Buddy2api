@@ -229,7 +229,7 @@ tr:hover td{background:var(--accent-soft)}
 .mono{font-family:var(--mono);font-size:var(--fs-b);color:var(--fg-2)}
 .m-value,.today-value,.health-kpi .v,.metric .m-value,.pkg-kpi .v,
 .pkg-time,.credit-rem,.official-val,.rank-value,.hour-chart-meta strong,
-.state-number,table td{font-family:var(--mono);font-feature-settings:'tnum' 1}
+.state-number,.hero-kpi .v,table td{font-family:var(--mono);font-feature-settings:'tnum' 1}
 .mini-table td,.mini-table th{padding:7px var(--sp-3)}
 
 /* ---- badges ------------------------------------------------- */
@@ -245,10 +245,24 @@ tr:hover td{background:var(--accent-soft)}
 .tag.warn{background:var(--warn-bg);color:var(--warn);border-color:var(--accent-border)}
 
 /* ---- dashboard --------------------------------------------- */
-.dash-hero{grid-template-columns:minmax(0,1.35fr) minmax(360px,.65fr);gap:var(--sp-4);
-  padding:var(--sp-4) var(--sp-5);background:var(--bg-elevated);
+.dash-hero{grid-template-columns:minmax(0,1.4fr) minmax(340px,.6fr);gap:var(--sp-5);
+  padding:var(--sp-5) var(--sp-6);background:var(--bg-elevated);
   border:1px solid var(--border);border-radius:var(--r-l);margin-bottom:var(--sp-4);
-  display:grid;align-items:center}
+  display:grid;align-items:center;position:relative;overflow:hidden}
+.dash-hero::after{content:'';position:absolute;right:-120px;top:-120px;width:260px;height:260px;
+  border-radius:50%;background:radial-gradient(circle,var(--accent-soft),transparent 70%);
+  pointer-events:none;opacity:.5}
+.hero-left{min-width:0;position:relative;z-index:1}
+.hero-statusline{display:flex;align-items:center;gap:var(--sp-2);margin-bottom:6px}
+.hero-state{font-size:var(--fs-xl);font-weight:900;color:var(--fg);letter-spacing:-.01em}
+.hero-sub{font-size:var(--fs-b);color:var(--fg-2);line-height:1.6;margin-bottom:14px}
+.hero-kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--sp-2);
+  border:1px solid var(--border);border-radius:var(--r-m);overflow:hidden;
+  background:var(--bg-sunken);position:relative;z-index:1}
+.hero-kpi{padding:var(--sp-3);border-right:1px solid var(--border);min-width:0}
+.hero-kpi:last-child{border-right:0}
+.hero-kpi .k{font-size:var(--fs-xs);color:var(--fg-3);text-transform:uppercase;letter-spacing:.2px}
+.hero-kpi .v{font-size:var(--fs-l);font-weight:800;margin-top:5px}
 .health-main{display:flex;align-items:center;gap:var(--sp-3);margin-bottom:var(--sp-2)}
 .health-dot{width:10px;height:10px;border-radius:50%;background:var(--ok);
   box-shadow:0 0 0 4px var(--ok-bg);flex:0 0 auto}
@@ -318,7 +332,7 @@ tr:hover td{background:var(--accent-soft)}
 .today-metric-label{font-size:var(--fs-s);color:var(--fg-2);font-weight:700}
 .today-value-row{display:flex;align-items:baseline;gap:var(--sp-2);margin-top:10px;min-width:0}
 .today-value{font-family:var(--mono);font-size:var(--fs-hero);font-weight:800;line-height:1;
-  color:var(--fg);overflow:hidden;text-overflow:ellipsis}
+  color:var(--fg);overflow:hidden;text-overflow:ellipsis;font-feature-settings:'tnum' 1}
 .today-unit{font-size:var(--fs-xs);color:var(--fg-3);font-weight:700;
   text-transform:uppercase;white-space:nowrap}
 .today-meta{font-size:var(--fs-s);color:var(--fg-2);margin-top:6px;min-height:17px;
