@@ -15,3 +15,10 @@
 - commit: 683a8bd feat(web): self-host Geist/Geist Mono with tabular-nums numbers
 - 说明: 7 条 `@font-face`（Geist 4 字重 + Geist Mono 3 字重，`font-display:swap`）置于 `:root` 前。`--font` 前置 `'Geist'`，`--mono` 前置 `'Geist Mono'`，系统栈保留作 fallback。新增大范围规则：`.m-value/.today-value/.health-kpi .v/.metric .m-value/.pkg-kpi .v/.pkg-time/.credit-rem/.official-val/.rank-value/.hour-chart-meta strong/.state-number/table td` 全部 `font-family:var(--mono);font-feature-settings:'tnum' 1`。woff2 共 7 个文件落地 `web/fonts/`，通过 `/static/fonts/...` 提供。pytest -q tests/test_web_assets.py 通过 (14 passed)。零外链字体、零 em-dash。
 - screenshot: 未截屏
+
+## Lever 3 — rail sidebar (left 56px)
+- 状态: ✔ done
+- 改动文件: web/js/app.js, web/js/icons.js, web/css/app.css
+- commit: 0dc1fb6 feat(web): rebuild shell into left 56px rail nav with active state
+- 说明: `app.js` 外壳从 `.layout/.topbar/.topnav/.brand-block` 改为 `.shell` (grid 56px | 1fr) + `.rail`(深色 sunken、sticky 100vh、品牌 logo + 9 项竖向 nav + 底部主题切换) + `.shell-body/.shell-head/.main/.content`。`nav` 数组结构与 key 不变，仅渲染位置改；`go/k/l/i` 全部保留。`icons.js` 新增 `logo`（stroke 1.8，方框+折线）。`app.css` 删除/重写 `.topbar/.topnav/.nav-item/.brand-*/.top-actions/.layout` 段，新增 `.shell/.rail/.rail-brand/.railnav/.rail-item/.rail-foot/.rail-icon/.shell-head/.shell-title/.shell-ver/.shell-actions`，激活态 `::before` 左侧 3×22 橙竖条。两个 media query 重写：≤760 改 grid `1fr / 56px`，rail 沉底为 fixed 横排 tab，激活态指示条转顶部。dark 主题 `.topbar` 残留块改为 `.rail`。pytest -q tests/test_web_assets.py 通过 (14 passed)，零 em-dash。
+- screenshot: 未截屏
