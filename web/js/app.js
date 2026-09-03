@@ -24,16 +24,21 @@ createApp({
     const theme=ref(localStorage.getItem('cb_gw_theme')||'light');
     function toggleTheme(){theme.value=theme.value==='dark'?'light':'dark';document.documentElement.setAttribute('data-theme',theme.value);try{localStorage.setItem('cb_gw_theme',theme.value)}catch(_){}}
     const nav=[{k:'dashboard',l:'运行总览',i:I.dash},{k:'accounts',l:'账号管理',i:I.users},{k:'quota',l:'额度与积分',i:I.wallet},{k:'keys',l:'API Keys',i:I.key},{k:'channels',l:'通道与模型',i:I.cpu},{k:'usage',l:'用量统计',i:I.tokens},{k:'logs',l:'请求日志',i:I.log},{k:'setup',l:'接入指南',i:I.scan},{k:'settings',l:'设置',i:I.gear}];
-    return{page,token,toasts,meta,metaTag,theme,toggleTheme,tf,go,saveToken,hardRefresh,nav,I}
+    const railOpen=ref(localStorage.getItem('cb_gw_rail')==='expanded');
+    function toggleRail(){railOpen.value=!railOpen.value;try{localStorage.setItem('cb_gw_rail',railOpen.value?'expanded':'collapsed')}catch(_){}}
+    return{page,token,toasts,meta,metaTag,theme,toggleTheme,tf,go,saveToken,hardRefresh,nav,railOpen,toggleRail,I}
   },
   template:`
   <div class="shell">
-    <aside class="rail">
+    <aside class="rail" :class="{open:railOpen}">
       <div class="rail-brand" v-html="I.logo"></div>
       <nav class="railnav">
-        <div v-for="n in nav" :key="n.k" class="rail-item" :class="{on:page===n.k}" @click="go(n.k)" :title="n.l" v-html="n.i"></div>
+        <div v-for="n in nav" :key="n.k" class="rail-item" :class="{on:page===n.k}" @click="go(n.k)" :title="n.l">
+          <span class="rail-ic" v-html="n.i"></span><span class="rail-lbl" v-if="railOpen">{{n.l}}</span>
+        </div>
       </nav>
       <div class="rail-foot">
+        <button class="rail-icon" @click="toggleRail" :title="railOpen?'收起侧栏':'展开侧栏'" v-html="railOpen?I.chevronL:I.chevronR"></button>
         <button class="rail-icon" @click="toggleTheme" :title="theme==='dark'?'切到浅色':'切到深色'" v-html="theme==='dark'?I.sun:I.moon"></button>
       </div>
     </aside>
