@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 
-WEB_JS = Path(__file__).resolve().parent.parent / "web" / "js"
-REPO_ROOT = WEB_JS.parent.parent
+WEB_JS = Path(__file__).resolve().parent.parent / "src" / "web" / "js"
+REPO_ROOT = WEB_JS.parent.parent.parent
 
 # Every ES module that the SPA loads from <script type="module"> in index.html
 JS_FILES = sorted(
