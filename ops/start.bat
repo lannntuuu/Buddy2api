@@ -45,10 +45,12 @@ if errorlevel 1 (
     call "%CONDA_EXE%" run -n buddy2api python -m pip install -r ops/requirements/base.txt
     if errorlevel 1 goto dependency_error
 )
-echo  [Start] http://127.0.0.1:8787
+REM 端口走 CB_GATEWAY_PORT（默认 8787），由 config.toml 决定实际值。
+if not defined CB_GATEWAY_PORT set "CB_GATEWAY_PORT=8787"
+echo  [Start] http://127.0.0.1:%CB_GATEWAY_PORT%
 echo  [Stop] Ctrl+C
 echo.
-call "%CONDA_EXE%" run --no-capture-output -n buddy2api python -m gateway.server --port 8787 %*
+call "%CONDA_EXE%" run --no-capture-output -n buddy2api python -m gateway.server --port %CB_GATEWAY_PORT% %*
 goto end
 
 :use_venv
@@ -71,10 +73,12 @@ if errorlevel 1 (
     .venv\Scripts\python.exe -m pip install -r ops/requirements/base.txt
     if errorlevel 1 goto dependency_error
 )
-echo  [Start] http://127.0.0.1:8787
+REM 端口走 CB_GATEWAY_PORT（默认 8787），由 config.toml 决定实际值。
+if not defined CB_GATEWAY_PORT set "CB_GATEWAY_PORT=8787"
+echo  [Start] http://127.0.0.1:%CB_GATEWAY_PORT%
 echo  [Stop] Ctrl+C
 echo.
-.venv\Scripts\python.exe -m gateway.server --port 8787 %*
+.venv\Scripts\python.exe -m gateway.server --port %CB_GATEWAY_PORT% %*
 goto end
 
 :conda_error
