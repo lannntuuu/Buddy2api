@@ -380,59 +380,68 @@ Since v2.2.0, traesolo / qclaw / qwenwork can enable a **gateway-side token→cr
 
 ## Project layout
 
-The core Python code is split into three packages by responsibility; the root holds only entry / deployment / docs:
+The core Python code is split into three packages by responsibility; in v2.3 the six source modules are gathered under `src/`, and `redesign-audit/` moves under `docs/redesign/`. The root holds only entry / deployment / docs:
 
 ```text
 Buddy2api/
-├── gateway/                # HTTP entry (FastAPI app + routes + version)
-│   ├── server.py           # app factory, lifespan, StaticFiles mount
-│   ├── router.py           # Bind request to channel, model translation (helper)
-│   ├── deps.py             # Shared auth dependencies
-│   ├── routers/
-│   │   ├── admin.py        # /admin/* endpoints
-│   │   ├── v1.py           # /v1/chat/completions, /v1/responses, /v1/models
-│   │   └── static_router.py# /admin/meta and other metadata
-│   └── version.py
-├── accounts/               # Account and channel management
-│   ├── auth_manager.py     # Account selection, token management, checkin
-│   └── control_plane.py    # Startup scan, one-click claim, model config
-├── upstream/               # Upstream adapters
-│   ├── proxy.py            # Pipeline orchestration (proxy_chat_completions, etc.)
-│   ├── aliases.py          # Model alias table, default model list, reasoning effort
-│   ├── moderation.py       # Content moderation, tool-stall detection
-│   ├── compaction.py       # Request body compaction, 11128 self-heal
-│   └── responses.py        # OpenAI Responses ↔ Chat Completions translation
-├── storage/                # Infrastructure layer (DB, crypto, fingerprint, cache)
-│   ├── database.py         # Compat facade (re-exports from storage.repos)
-│   ├── repos/
-│   │   ├── accounts.py     # Account CRUD
-│   │   ├── api_keys.py     # API key CRUD
-│   │   ├── logs.py         # Request log + queries
-│   │   ├── settings.py     # Channel config, KV
-│   │   ├── stats.py        # Dashboard aggregations
-│   │   └── _common.py      # Shared connection / schema
-│   ├── credit_cache.py     # Per-channel credit cache
-│   ├── http_pool.py        # Upstream httpx client pool
-│   ├── credential_crypto.py
-│   └── fingerprint.py
-├── providers/              # Channel adapters
-│   ├── workbuddy/
-│   ├── qclaw/
-│   ├── qwenwork/
-│   ├── traework/
-│   ├── traesolo/
-│   └── gmi/                # v2.2 new, opt-in
-├── web/                    # Admin UI
-│   ├── index.html
-│   ├── css/app.css
-│   ├── js/
-│   │   ├── app.js          # Entry
-│   │   ├── api.js          # Backend API client
-│   │   ├── icons.js        # Inline SVG icons
-│   │   └── pages/          # dashboard / accounts / quota / keys / channels / usage / logs / setup / settings
-│   └── vendor/             # Vue 3.4.21 + SortableJS 1.15.6 (local, works offline)
+├── src/                    # All Python and frontend source
+│   ├── gateway/            # HTTP entry (FastAPI app + routes + version)
+│   │   ├── server.py       # app factory, lifespan, StaticFiles mount
+│   │   ├── router.py       # Bind request to channel, model translation (helper)
+│   │   ├── deps.py         # Shared auth dependencies
+│   │   ├── routers/
+│   │   │   ├── admin.py        # /admin/* endpoints
+│   │   │   ├── v1.py           # /v1/chat/completions, /v1/responses, /v1/models
+│   │   │   └── static_router.py# /admin/meta and other metadata
+│   │   └── version.py
+│   ├── accounts/           # Account and channel management
+│   │   ├── auth_manager.py     # Account selection, token management, checkin
+│   │   └── control_plane.py    # Startup scan, one-click claim, model config
+│   ├── upstream/           # Upstream adapters
+│   │   ├── proxy.py        # Pipeline orchestration (proxy_chat_completions, etc.)
+│   │   ├── aliases.py      # Model alias table, default model list, reasoning effort
+│   │   ├── moderation.py   # Content moderation, tool-stall detection
+│   │   ├── compaction.py   # Request body compaction, 11128 self-heal
+│   │   └── responses.py    # OpenAI Responses ↔ Chat Completions translation
+│   ├── storage/            # Infrastructure layer (DB, crypto, fingerprint, cache)
+│   │   ├── database.py     # Compat facade (re-exports from storage.repos)
+│   │   ├── backup.py       # db snapshot / rotation / credentials-key sync
+│   │   ├── repos/
+│   │   │   ├── accounts.py     # Account CRUD
+│   │   │   ├── api_keys.py     # API key CRUD
+│   │   │   ├── logs.py         # Request log + queries
+│   │   │   ├── settings.py     # Channel config, KV
+│   │   │   ├── stats.py        # Dashboard aggregations
+│   │   │   └── _common.py      # Shared connection / schema
+│   │   ├── credit_cache.py     # Per-channel credit cache
+│   │   ├── http_pool.py        # Upstream httpx client pool
+│   │   ├── credential_crypto.py
+│   │   └── fingerprint.py
+│   ├── providers/          # Channel adapters
+│   │   ├── workbuddy/
+│   │   ├── qclaw/
+│   │   ├── qwenwork/
+│   │   ├── traework/
+│   │   ├── traesolo/
+│   │   └── gmi/            # v2.2 new, opt-in
+│   └── web/                # Admin UI
+│       ├── index.html
+│       ├── css/app.css
+│       ├── js/
+│       │   ├── app.js      # Entry
+│       │   ├── api.js      # Backend API client
+│       │   ├── icons.js    # Inline SVG icons
+│       │   └── pages/      # dashboard / accounts / quota / keys / channels / usage / logs / setup / settings
+│       └── vendor/         # Vue 3.4.21 + SortableJS 1.15.6 (local, works offline)
 ├── docs/                   # Design and usage docs
+│   ├── *.md                # credit-and-token-tracking / dashboard-slow-query / provider-model-usage / traesolo-usage / traework-usage / workbuddy-11128 / cache-tracking
+│   ├── design/             # per-model-reasoning-effort and similar design notes
+│   ├── maintenance/        # Maintenance playbooks
+│   ├── releases/           # Release notes
+│   └── redesign/           # v2.2 refactor design docs (00-baseline / 01-audit / 02-strategy / 03-tokens / 04-prod-worktree)
 ├── tests/                  # pytest
+│   ├── conftest.py
+│   ├── pytest.ini
 │   ├── test_*.py           # Business and per-channel tests
 │   └── test_web_assets.py  # SPA ESM parse + vendor/CDN guards (new in v2.2)
 ├── ops/                    # Launch / deploy / build / one-off scripts
@@ -442,13 +451,16 @@ Buddy2api/
 │   ├── docker-compose.yml / docker-compose.windows.yml
 │   ├── docker-entrypoint.sh
 │   ├── requirements/{base.txt, dev.txt}
-│   └── scripts/oneoff/                  # Archived one-off analysis and backfill scripts
+│   ├── scripts/backup-db.py             # Manual db snapshot CLI
+│   ├── scripts/copy-dev-to-prod.py      # dev -> prod config copier
+│   └── scripts/oneoff/                  # Archived one-off analysis and backfill scripts (do not import)
 ├── data/                   # Runtime data (DB + credentials, .gitignore)
-├── redesign-audit/         # v2.2 refactor design docs (baseline / audit / strategy / tokens)
+├── pyproject.toml          # pythonpath=["src"] so pytest finds src/
+├── config.example.toml     # Config template (config.toml itself is .gitignore'd)
 └── README.md / README_EN.md / SECURITY.md / LICENSE / .gitignore / .dockerignore / .mailmap
 ```
 
-Start with `python -m gateway.server` (from the repo root).
+Start with `python -m gateway.server` (from the repo root; `pyproject.toml` provides `src/` on `sys.path`).
 
 Launch scripts:
 
@@ -480,7 +492,7 @@ Compared to 1.4 / 2.0 / 2.1:
   - `upstream/proxy.py` keeps the pipeline orchestration; model aliases, moderation, compaction, and the Responses bridge live in `upstream/{aliases.py, moderation.py, compaction.py, responses.py}`.
   - All 56 endpoint paths, contracts, and behavior are unchanged; the test suite shows the same pre-existing pass/fail as the v2.1 baseline (no new regressions).
 - **Admin UI overhaul**: eight levers, one commit each (vendor local, version from `/admin/meta`, CSS token rebuild, component layer, chart palette tokenization, key page reflow, responsive breakpoint consolidation, one-off script archive). Version is now fetched from the backend instead of hard-coded. `em-dash` characters were replaced with Chinese punctuation throughout the SPA.
-- **One lever, one commit**: every refactor commit is independently reviewable (`refactor(web): ...`, `refactor(storage): ...`, `refactor(gateway): ...`, `refactor(upstream): ...`); all commits are pushed to `refactor/web-console-ia`. See `redesign-audit/` for the design baseline, audit findings, strategy, and token spec.
+- **One lever, one commit**: every refactor commit is independently reviewable (`refactor(web): ...`, `refactor(storage): ...`, `refactor(gateway): ...`, `refactor(upstream): ...`); all commits are pushed to `refactor/web-console-ia`. See `docs/redesign/` for the design baseline, audit findings, strategy, and token spec.
 - **Config file `config.toml`**: added. `gateway.server` auto-loads it on startup, supports `[default]` / `[dev]` / `[prod]` profiles plus `--config <profile>` / `CB_GATEWAY_CONFIG=<profile>` to switch. A dev/prod worktree split keeps two `config.toml` files (`.gitignore`d, per-deploy private) pinning port and db path, so a bare `python -m gateway.server` lands on the right port in each checkout. See [Configuration file](#configuration-file) for details.
 
 ## License

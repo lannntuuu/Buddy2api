@@ -388,59 +388,68 @@ TraeWork 想算需要先单独修它的 SSE 解析，未做。详见 `docs/credi
 
 ## 项目结构
 
-v2.2 把三个巨石模块按域拆开，目录布局如下：
+v2.2 把三个巨石模块按域拆开；v2.3 把 6 个源模块统一进 `src/`、`redesign-audit/` 进 `docs/redesign/`。目录布局如下：
 
 ```text
 Buddy2api/
-├── gateway/                # HTTP 入口（FastAPI 应用 + 路由 + 版本号）
-│   ├── server.py           # app 工厂、lifespan、StaticFiles 挂载
-│   ├── router.py           # 绑定请求到通道、做模型翻译（工具）
-│   ├── deps.py             # 共享鉴权依赖
-│   ├── routers/
-│   │   ├── admin.py        # /admin/* 端点
-│   │   ├── v1.py           # /v1/chat/completions、/v1/responses、/v1/models
-│   │   └── static_router.py# /admin/meta 等元信息
-│   └── version.py
-├── accounts/               # 账号与通道管理
-│   ├── auth_manager.py     # 账号选择、token 管理、checkin
-│   └── control_plane.py    # 启动扫描、一键领取、模型配置
-├── upstream/               # 上游对接
-│   ├── proxy.py            # pipeline 主流程（proxy_chat_completions 等）
-│   ├── aliases.py          # 模型别名表、默认模型、思考档位
-│   ├── moderation.py       # 内容审核、工具停转检测
-│   ├── compaction.py       # 请求体精简、11128 自愈
-│   └── responses.py        # OpenAI Responses ↔ Chat Completions 翻译
-├── storage/                # 基础设施层（DB、加密、指纹、缓存）
-│   ├── database.py         # 兼容门面（re-export 自 storage.repos）
-│   ├── repos/
-│   │   ├── accounts.py     # 账号 CRUD
-│   │   ├── api_keys.py     # API Key CRUD
-│   │   ├── logs.py         # 请求日志、查询
-│   │   ├── settings.py     # 通道配置、KV
-│   │   ├── stats.py        # dashboard 聚合
-│   │   └── _common.py      # 共享连接 / Schema
-│   ├── credit_cache.py     # 各通道 credit 缓存
-│   ├── http_pool.py        # 上游 httpx 客户端池
-│   ├── credential_crypto.py
-│   └── fingerprint.py
-├── providers/              # 通道适配
-│   ├── workbuddy/
-│   ├── qclaw/
-│   ├── qwenwork/
-│   ├── traework/
-│   ├── traesolo/
-│   └── gmi/                # v2.2 新增，opt-in
-├── web/                    # 管理页 UI
-│   ├── index.html
-│   ├── css/app.css
-│   ├── js/
-│   │   ├── app.js          # 入口
-│   │   ├── api.js          # 后台 API 客户端
-│   │   ├── icons.js        # 自绘 SVG 图标
-│   │   └── pages/          # dashboard / accounts / quota / keys / channels / usage / logs / setup / settings
-│   └── vendor/             # Vue 3.4.21 + SortableJS 1.15.6（本地，断网可用）
+├── src/                    # 全部 Python 与前端源
+│   ├── gateway/            # HTTP 入口（FastAPI 应用 + 路由 + 版本号）
+│   │   ├── server.py       # app 工厂、lifespan、StaticFiles 挂载
+│   │   ├── router.py       # 绑定请求到通道、做模型翻译（工具）
+│   │   ├── deps.py         # 共享鉴权依赖
+│   │   ├── routers/
+│   │   │   ├── admin.py        # /admin/* 端点
+│   │   │   ├── v1.py           # /v1/chat/completions、/v1/responses、/v1/models
+│   │   │   └── static_router.py# /admin/meta 等元信息
+│   │   └── version.py
+│   ├── accounts/           # 账号与通道管理
+│   │   ├── auth_manager.py     # 账号选择、token 管理、checkin
+│   │   └── control_plane.py    # 启动扫描、一键领取、模型配置
+│   ├── upstream/           # 上游对接
+│   │   ├── proxy.py        # pipeline 主流程（proxy_chat_completions 等）
+│   │   ├── aliases.py      # 模型别名表、默认模型、思考档位
+│   │   ├── moderation.py   # 内容审核、工具停转检测
+│   │   ├── compaction.py   # 请求体精简、11128 自愈
+│   │   └── responses.py    # OpenAI Responses ↔ Chat Completions 翻译
+│   ├── storage/            # 基础设施层（DB、加密、指纹、缓存）
+│   │   ├── database.py     # 兼容门面（re-export 自 storage.repos）
+│   │   ├── backup.py       # db 快照 / rotation / 凭据同步
+│   │   ├── repos/
+│   │   │   ├── accounts.py     # 账号 CRUD
+│   │   │   ├── api_keys.py     # API Key CRUD
+│   │   │   ├── logs.py         # 请求日志、查询
+│   │   │   ├── settings.py     # 通道配置、KV
+│   │   │   ├── stats.py        # dashboard 聚合
+│   │   │   └── _common.py      # 共享连接 / Schema
+│   │   ├── credit_cache.py     # 各通道 credit 缓存
+│   │   ├── http_pool.py        # 上游 httpx 客户端池
+│   │   ├── credential_crypto.py
+│   │   └── fingerprint.py
+│   ├── providers/          # 通道适配
+│   │   ├── workbuddy/
+│   │   ├── qclaw/
+│   │   ├── qwenwork/
+│   │   ├── traework/
+│   │   ├── traesolo/
+│   │   └── gmi/            # v2.2 新增，opt-in
+│   └── web/                # 管理页 UI
+│       ├── index.html
+│       ├── css/app.css
+│       ├── js/
+│       │   ├── app.js      # 入口
+│       │   ├── api.js      # 后台 API 客户端
+│       │   ├── icons.js    # 自绘 SVG 图标
+│       │   └── pages/      # dashboard / accounts / quota / keys / channels / usage / logs / setup / settings
+│       └── vendor/         # Vue 3.4.21 + SortableJS 1.15.6（本地，断网可用）
 ├── docs/                   # 设计与使用文档
+│   ├── *.md                # credit-and-token-tracking / dashboard-slow-query / provider-model-usage / traesolo-usage / traework-usage / workbuddy-11128 / cache-tracking
+│   ├── design/             # per-model-reasoning-effort 等设计稿
+│   ├── maintenance/        # 维护手册
+│   ├── releases/           # 发布说明
+│   └── redesign/           # v2.2 重构设计文档（00-baseline / 01-audit / 02-strategy / 03-tokens / 04-prod-worktree）
 ├── tests/                  # pytest
+│   ├── conftest.py
+│   ├── pytest.ini
 │   ├── test_*.py           # 业务与通道测试
 │   └── test_web_assets.py  # 前端 ESM 解析 + vendor/CDN 守卫（v2.2 新增）
 ├── ops/                    # 启动 / 部署 / 构建 / 一次性脚本
@@ -450,13 +459,16 @@ Buddy2api/
 │   ├── docker-compose.yml / docker-compose.windows.yml
 │   ├── docker-entrypoint.sh
 │   ├── requirements/{base.txt, dev.txt}
-│   └── scripts/oneoff/                  # 一次性分析与回填脚本（归档）
+│   ├── scripts/backup-db.py             # 手动拍 db 快照
+│   ├── scripts/copy-dev-to-prod.py      # dev → prod 配置复制
+│   └── scripts/oneoff/                  # 一次性分析与回填脚本（归档；不要 import）
 ├── data/                   # 运行时数据（DB + 凭据，.gitignore）
-├── redesign-audit/         # v2.2 重构设计文档（基线 / 审计 / 策略 / 令牌）
+├── pyproject.toml          # pythonpath=["src"] 让 pytest 找到 src/
+├── config.example.toml     # 配置模板（config.toml 自身被 gitignore）
 └── README.md / README_EN.md / SECURITY.md / LICENSE / .gitignore / .dockerignore / .mailmap
 ```
 
-启动方式：`python -m gateway.server`（从根目录）。
+启动方式：`python -m gateway.server`（从根目录；src/ 由 pyproject.toml 提供 sys.path）。
 
 启动脚本：
 
@@ -488,7 +500,7 @@ powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1
   - `upstream/proxy.py` 留 pipeline 主流程；模型别名、审核、精简、Responses 翻译拆到 `upstream/{aliases.py, moderation.py, compaction.py, responses.py}`。
   - 56 个端点路径、契约、行为全部保持不变；`pytest` 与基线一致（pre-existing 失败不在重构范围）。
 - **管理页 Overhaul**：8 个 lever（依赖本地化、版本号单一来源、CSS 单一令牌体系重建、组件层重做、图表令牌化、重点页重排、移动端断点收敛、一次性脚本归档）。版本号现在从 `/admin/meta` 拉，不再写死。`em-dash` 全部清理为中文标点。
-- **一次 commits 走完**：每个 lever 一个 commit（`refactor(web): ...` / `refactor(storage): ...` / `refactor(gateway): ...` / `refactor(upstream): ...`），所有 commit 已 push 到 `refactor/web-console-ia`。详细设计见 `redesign-audit/`。
+- **一次 commits 走完**：每个 lever 一个 commit（`refactor(web): ...` / `refactor(storage): ...` / `refactor(gateway): ...` / `refactor(upstream): ...`），所有 commit 已 push 到 `refactor/web-console-ia`。详细设计见 `docs/redesign/`。
 - **配置文件 `config.toml`**：新增。`gateway.server` 启动时自动加载，支持 `[default]` / `[dev]` / `[prod]` profile 与 `--config <profile>` / `CB_GATEWAY_CONFIG=<profile>` 切换。dev / prod 双 checkout 各自一份 `config.toml`（`.gitignore`d，per-deploy 私有），端口和 db 路径已写死，bare `python -m gateway.server` 走对端。详见 [配置文件](#配置文件) 一节。
 
 ## License
