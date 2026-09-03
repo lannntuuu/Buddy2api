@@ -31,7 +31,13 @@ createApp({
   template:`
   <div class="shell">
     <aside class="rail" :class="{open:railOpen}">
-      <div class="rail-brand" v-html="I.logo"></div>
+      <div class="rail-brand">
+        <span class="rail-brand-ic" v-html="I.logo"></span>
+        <span class="rail-brand-txt" v-if="railOpen">
+          <span class="rail-brand-name">{{meta.title}}</span>
+          <span class="rail-brand-ver" v-if="meta.version">v{{meta.version}}</span>
+        </span>
+      </div>
       <nav class="railnav">
         <div v-for="n in nav" :key="n.k" class="rail-item" :class="{on:page===n.k}" @click="go(n.k)" :title="n.l">
           <span class="rail-ic" v-html="n.i"></span><span class="rail-lbl" v-if="railOpen">{{n.l}}</span>
@@ -44,7 +50,6 @@ createApp({
     </aside>
     <div class="shell-body">
       <div class="shell-head">
-        <div class="shell-title">{{meta.title}}<span class="shell-ver" v-if="meta.version"> v{{meta.version}}</span></div>
         <div class="shell-actions">
           <span class="tag">{{metaTag}}</span>
           <button class="refresh-cta" @click="hardRefresh"><span v-html="I.refresh"></span><span>刷新</span></button>

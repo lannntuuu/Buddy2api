@@ -63,3 +63,9 @@
 - 改动文件: web/js/pages/channels.js, web/js/pages/keys.js
 - commit: 5376606 feat(web): replace ghost CSS vars with real tokens in channels/keys pages
 - 说明: 仅做幽灵 CSS 变量名→真实 token 的机械替换,零文案/逻辑/布局/内联 style 结构改动。channels.js 替换 10 处(--red×4、--fg2×4、--border2×1、--green×1,对应 --err/--fg-2/--border-strong/--ok);keys.js 替换 6 处(--blue-bg×2、--blue×2、--green-bg×1、--blue-border×1,对应 --accent-soft/--accent/--ok-bg/--accent-border)。--fg3/--ok-border/--ok-fg 已存在,保留不动。git grep 幽灵变量 → 0;pytest -q tests/test_web_assets.py 14 passed;中文 UI 零 em-dash。
+
+## Lever 10 — brand title + version moved into collapsible rail
+- 状态: ✔ done
+- 改动文件: web/js/app.js, web/css/app.css
+- commit: (待填)
+- 说明: `.rail-brand` 从纯 `v-html="I.logo"` 改为 logo + 文字双 span 结构(`.rail-brand-ic` + `.rail-brand-txt` 包裹 `.rail-brand-name` + `.rail-brand-ver`,后者 `v-if="railOpen"`,且版本号 `v-if="meta.version"` 兜底)。`.shell-head` 移除 `.shell-title`/`.shell-ver` 双 span(品牌已移入 rail),保留 `.shell-head` 容器承担 sticky 定位,容器内仅余 `.shell-actions`(metaTag + 刷新钮)。app.css 同步:.rail-brand 由 `display:grid;place-items:center` 改 `display:flex`,增加 `gap:8px;overflow:hidden;transition:width`;新增 `.rail-brand-ic`/`-txt`/`-name`/`-ver`(字体/字号/颜色/white-space 全部按 spec §2.2 取值);`.rail.open .rail-brand` 增 `height:auto;min-height:40px`,新增 `.rail.open .rail-brand-txt{display:flex}`;`.shell-title`/`.shell-ver` 两段删除(死代码);`.shell-actions` 加 `justify-content:flex-start`(左对齐,顶部条无标题后右对齐会显得飘)。移动端(≤760)`.rail-brand,.rail-foot{display:none}` 已存在,品牌文字在 rail 沉底 tab 条时仍不显示,无需额外规则。`git grep -n "shell-title\|shell-ver" -- web/js/app.js web/css/app.css` 输出空;`git grep -n "—" -- web/` 输出空;pytest -q tests/test_web_assets.py 14 passed;中文 UI 零 em-dash。
