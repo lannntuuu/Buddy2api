@@ -5,7 +5,7 @@ const{ref,reactive,computed,onMounted,onBeforeUnmount,nextTick,watch}=Vue;
 export default {props:['token','toast','saveToken'],setup(p){
   const defaults={backend_url:'https://copilot.tencent.com',default_domain:'www.codebuddy.cn',timeout:300};
   const s=ref({...defaults,base_url:'http://127.0.0.1:8787/v1',admin_auth:'本机 Cookie 自动验证'}),ld=ref(true),saving=ref(false),adminToken=ref(p.token||'');
-  const hostOverrides=reactive({gmi:{base_url:''},qwenwork:{gateway:''}});
+  const hostOverrides=reactive({gmi:{base_url:''},qwenwork:{gateway:''},qclaw:{jprx_gateway:'',aizone_base:''},traesolo:{oauth_host:'',console_host:'',agent_host:''},traework:{agent_host:'',ug_host:''}});
 
   // Channels panel -- collapsed by default. Native <details> for a11y.
   const chs=ref([]),chLd=ref(false),chBusy=ref(false),chErr=ref(''),
@@ -17,9 +17,16 @@ export default {props:['token','toast','saveToken'],setup(p){
     const ch=s.value.channel_hosts||{};
     hostOverrides.gmi.base_url=ch.gmi?.base_url||'';
     hostOverrides.qwenwork.gateway=ch.qwenwork?.gateway||'';
+    hostOverrides.qclaw.jprx_gateway=ch.qclaw?.jprx_gateway||'';
+    hostOverrides.qclaw.aizone_base=ch.qclaw?.aizone_base||'';
+    hostOverrides.traesolo.oauth_host=ch.traesolo?.oauth_host||'';
+    hostOverrides.traesolo.console_host=ch.traesolo?.console_host||'';
+    hostOverrides.traesolo.agent_host=ch.traesolo?.agent_host||'';
+    hostOverrides.traework.agent_host=ch.traework?.agent_host||'';
+    hostOverrides.traework.ug_host=ch.traework?.ug_host||'';
   }
   async function load(){ld.value=true;try{const cfg=await api.get('/admin/settings',p.token);s.value={...s.value,...cfg};fillHosts()}catch(e){p.toast(apiErr(e,'加载失败'),'err')}ld.value=false}
-  async function save(){if(saving.value)return;saving.value=true;try{await api.put('/admin/settings',{backend_url:s.value.backend_url,default_domain:s.value.default_domain,timeout:Number(s.value.timeout)||300,channel_hosts:{gmi:{base_url:hostOverrides.gmi.base_url.trim()},qwenwork:{gateway:hostOverrides.qwenwork.gateway.trim()}}},p.token);p.toast('已保存')}catch(e){p.toast(apiErr(e,'保存失败'),'err')}saving.value=false}
+  async function save(){if(saving.value)return;saving.value=true;try{await api.put('/admin/settings',{backend_url:s.value.backend_url,default_domain:s.value.default_domain,timeout:Number(s.value.timeout)||300,channel_hosts:{gmi:{base_url:hostOverrides.gmi.base_url.trim()},qwenwork:{gateway:hostOverrides.qwenwork.gateway.trim()},qclaw:{jprx_gateway:hostOverrides.qclaw.jprx_gateway.trim(),aizone_base:hostOverrides.qclaw.aizone_base.trim()},traesolo:{oauth_host:hostOverrides.traesolo.oauth_host.trim(),console_host:hostOverrides.traesolo.console_host.trim(),agent_host:hostOverrides.traesolo.agent_host.trim()},traework:{agent_host:hostOverrides.traework.agent_host.trim(),ug_host:hostOverrides.traework.ug_host.trim()}}},p.token);p.toast('已保存')}catch(e){p.toast(apiErr(e,'保存失败'),'err')}saving.value=false}
   function resetDefaults(){s.value={...s.value,backend_url:defaults.backend_url,default_domain:defaults.default_domain,timeout:defaults.timeout};p.toast('已恢复默认','info')}
   async function saveAdminToken(){
     const t=adminToken.value.trim();
@@ -127,6 +134,34 @@ export default {props:['token','toast','saveToken'],setup(p){
         <div class="field"><label>QwenWork 网关</label>
           <input v-model="hostOverrides.qwenwork.gateway" placeholder="留空使用默认 https://gateway.qwenwork.cn"/>
           <div class="hint">自定义 QwenWork 网关地址。留空 = 默认。</div></div>
+      </div>
+      <div class="card-p">
+        <details>
+          <summary class="text-bold mb-2" style="cursor:pointer">高级平台覆盖（QClaw / Trae SOLO / TraeWork）</summary>
+          <div class="form-grid">
+            <div class="field"><label>QClaw JPRX 网关</label>
+              <input v-model="hostOverrides.qclaw.jprx_gateway" placeholder="留空使用默认 https://jprx.m.qq.com"/>
+              <div class="hint">业务/签名网关。留空 = 默认。</div></div>
+            <div class="field"><label>QClaw AIZone 地址</label>
+              <input v-model="hostOverrides.qclaw.aizone_base" placeholder="留空使用默认 https://mmgrcalltoken.3g.qq.com/aizone/v1"/>
+              <div class="hint">chat 端点。留空 = 默认。</div></div>
+            <div class="field"><label>Trae SOLO OAuth 地址</label>
+              <input v-model="hostOverrides.traesolo.oauth_host" placeholder="留空使用默认 https://api.trae.com.cn"/>
+              <div class="hint">ExchangeToken / GetUserInfo。留空 = 默认。</div></div>
+            <div class="field"><label>Trae SOLO 登录页</label>
+              <input v-model="hostOverrides.traesolo.console_host" placeholder="留空使用默认 https://www.trae.cn"/>
+              <div class="hint">授权登录页。留空 = 默认。</div></div>
+            <div class="field"><label>Trae SOLO Agent 网关</label>
+              <input v-model="hostOverrides.traesolo.agent_host" placeholder="留空使用默认 https://trae-api-cn.mchost.guru"/>
+              <div class="hint">chat / models。留空 = 默认。</div></div>
+            <div class="field"><label>TraeWork Agent 网关</label>
+              <input v-model="hostOverrides.traework.agent_host" placeholder="留空使用默认 https://trae-api-cn.mchost.guru"/>
+              <div class="hint">chat sessions。留空 = 默认。</div></div>
+            <div class="field"><label>TraeWork 积分地址</label>
+              <input v-model="hostOverrides.traework.ug_host" placeholder="留空使用默认 https://api.trae.cn"/>
+              <div class="hint">签到/积分。留空 = 默认。</div></div>
+          </div>
+        </details>
       </div>
     </div>
 
