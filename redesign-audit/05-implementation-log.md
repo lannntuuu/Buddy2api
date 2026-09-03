@@ -40,7 +40,7 @@
 ## Lever 6 — polish empty/loading + icon stroke + dark shadows
 - 状态: ✔ done
 - 改动文件: web/css/app.css
-- commit: (pending) feat(web): polish empty/loading states, unify icon stroke, dark shadows
+- commit: 630210a feat(web): polish empty/loading states, unify icon stroke, dark shadows
 - 说明: `.empty` 重写为 flex 居中 + `::before` 40×40 圆角块 radial-gradient 8px 网格点占位（保留 `.empty .em` 文本）；`.load` 改 flex 居中 + 文案配色；dark 块新增柔和阴影 override（`.card:none` / `.modal:0 24px 80px / .6` / `.toast:0 10px 30px / .5`）。`icons.js` 全 17 个 stroke-width=1.8 一致（`logo` Lever 3 已加）。pytest 通过 (14 passed)、零 em-dash。
 - screenshot: 未截屏
 - screenshot: 未截屏
