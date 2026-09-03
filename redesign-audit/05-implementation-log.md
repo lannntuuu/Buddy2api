@@ -57,3 +57,9 @@
 - 改动文件: web/js/pages/setup.js, web/css/app.css
 - commit: f4a9669 feat(web): restructure setup guide into sectioned cards, drop inline styles
 - 说明: setup 页从 1 长卡(接入信息+向导+Codex 一键+快速验证)拆为 4 独立 `.card`,每块 `.card-h`+`.card-p`。保留全部逻辑/函数/后端调用/用户可见文案(零功能改动)。消灭全部内联 `style=` 与幽灵变量(`--blue-soft/--blue-border/--fg2/--green/--red/--blue`),改用 `.text-muted/.text-ok/.text-err/.text-accent/.mb-1..4/.mt-1..4/.callout/.testbox/.status-line/.hint/.mono/.tcell/.field/.btn/.btn.pri` 等已有/新增工具类。`app.css` utilities 区新增 `.text-ok/.text-accent/.text-xs/.status-line/.callout.accent/.codex-grid/.codex-row/.field-grow`(均在 `:root[data-theme=dark]` 下透过 `--accent-soft/--accent-border/--fg-3/--ok/--err` 自动适配)。`git grep -n "var(--blue\|var(--green\|var(--red\|var(--fg2\|style=" web/js/pages/setup.js` 输出空(`style=` 5 处 `font-size:12px` 已全部改为 `.text-xs`)。Codex 专用说明块改用 `.callout.accent` + `.codex-grid`;Codex 一键配置 card 内的 API Key 输入改 `.tcell`(已含全宽+mono);状态徽章容器改 `.status-line`;结果块改 `.testbox`,配色用 `.text-ok/.text-err/.text-accent/.text-muted`。pytest -q tests/test_web_assets.py 14 passed、零 em-dash。
+
+## Lever 9 — ghost CSS var cleanup (channels/keys)
+- 状态: ✔ done
+- 改动文件: web/js/pages/channels.js, web/js/pages/keys.js
+- commit: 5376606 feat(web): replace ghost CSS vars with real tokens in channels/keys pages
+- 说明: 仅做幽灵 CSS 变量名→真实 token 的机械替换,零文案/逻辑/布局/内联 style 结构改动。channels.js 替换 10 处(--red×4、--fg2×4、--border2×1、--green×1,对应 --err/--fg-2/--border-strong/--ok);keys.js 替换 6 处(--blue-bg×2、--blue×2、--green-bg×1、--blue-border×1,对应 --accent-soft/--accent/--ok-bg/--accent-border)。--fg3/--ok-border/--ok-fg 已存在,保留不动。git grep 幽灵变量 → 0;pytest -q tests/test_web_assets.py 14 passed;中文 UI 零 em-dash。
