@@ -58,7 +58,7 @@ class GmiProvider:
         from accounts import auth_manager
 
         store.ensure_env_account()
-        return auth_manager.pick_account_with_fallback(set(exclude_ids or ()), provider=CHANNEL_ID)
+        return await auth_manager.pick_account_with_fallback(set(exclude_ids or ()), provider=CHANNEL_ID)
 
     async def has_usable_account(self) -> bool:
         # Lazy env-bootstrap so has_usable_account() works without an admin UI step.
