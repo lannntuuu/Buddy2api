@@ -36,4 +36,12 @@
 - commit: 65c3d25 feat(web): tasteful entrance stagger + hover/press motion (reduced-motion safe)
 - 说明: 追加 `@keyframes riseIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}`。`.content > .card/.dash-hero/.today-usage` 各 stagger 0/0.04s/0.08s 入场，`.content > .dash-grid` 0.12s。`.card:hover` 加 `box-shadow:0 4px 20px rgba(0,0,0,.06)`。按压：`.iconbtn:active/.refresh-cta:active/.rail-item:active{transform:scale(.97)}`（`.btn:active{translateY(1px)}` 原有保留，避免 cascade 覆盖；spec §6.2 选择器里去掉 `.btn`）。三处 transition 加 `transform var(--dur-fast) var(--ease)`。prefers-reduced-motion 已在 L114 全局 0ms 兜底（`*` animation/transition 0ms）。pytest 通过 (14 passed)、零 em-dash。
 - screenshot: 未截屏
+
+## Lever 6 — polish empty/loading + icon stroke + dark shadows
+- 状态: ✔ done
+- 改动文件: web/css/app.css
+- commit: (pending) feat(web): polish empty/loading states, unify icon stroke, dark shadows
+- 说明: `.empty` 重写为 flex 居中 + `::before` 40×40 圆角块 radial-gradient 8px 网格点占位（保留 `.empty .em` 文本）；`.load` 改 flex 居中 + 文案配色；dark 块新增柔和阴影 override（`.card:none` / `.modal:0 24px 80px / .6` / `.toast:0 10px 30px / .5`）。`icons.js` 全 17 个 stroke-width=1.8 一致（`logo` Lever 3 已加）。pytest 通过 (14 passed)、零 em-dash。
+- screenshot: 未截屏
+- screenshot: 未截屏
 - screenshot: 未截屏

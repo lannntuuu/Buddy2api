@@ -110,6 +110,10 @@
 [data-theme="dark"] .rail{background:var(--bg-sunken)}
 [data-theme="dark"] .card{background:var(--bg-elevated)}
 [data-theme="dark"] th{background:var(--bg-sunken)}
+/* dark-mode soft shadows (Lever 6 polish) */
+[data-theme="dark"] .card{box-shadow:none}
+[data-theme="dark"] .modal{box-shadow:0 24px 80px rgba(0,0,0,.6)}
+[data-theme="dark"] .toast{box-shadow:0 10px 30px rgba(0,0,0,.5)}
 
 @media (prefers-reduced-motion:reduce){
   :root{--dur-fast:0ms;--dur-base:0ms}
@@ -564,9 +568,14 @@ tr:hover td{background:var(--accent-soft)}
   border-top-color:var(--accent);border-radius:50%;
   animation:sp .7s linear infinite;display:inline-block}
 @keyframes sp{to{transform:rotate(360deg)}}
-.load{text-align:center;padding:60px}
-.empty{text-align:center;padding:40px;color:var(--fg-3)}
-.empty .em{font-size:22px;margin-bottom:var(--sp-2);opacity:.4}
+.load{display:flex;align-items:center;justify-content:center;gap:var(--sp-2);padding:60px;color:var(--fg-3);font-size:var(--fs-b)}
+.empty{text-align:center;padding:48px var(--sp-4);color:var(--fg-3);
+  display:flex;flex-direction:column;align-items:center;gap:var(--sp-2)}
+.empty::before{content:'';width:40px;height:40px;border-radius:12px;
+  background:var(--bg-sunken);border:1px solid var(--border);display:block;
+  background-image:radial-gradient(circle at center,var(--fg-3) 1.5px,transparent 1.5px);
+  background-size:8px 8px}
+.empty .em{margin-bottom:0;font-size:18px;opacity:.5}
 
 /* ---- modal & overlay (in/out motion) ----------------------- */
 .ov{position:fixed;inset:0;background:rgba(29,28,26,.5);z-index:1000;
