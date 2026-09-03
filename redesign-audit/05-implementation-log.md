@@ -45,3 +45,15 @@
 - screenshot: 未截屏
 - screenshot: 未截屏
 - screenshot: 未截屏
+
+## Lever 7 — collapsible rail sidebar
+- 状态: ✔ done
+- 改动文件: web/js/app.js, web/js/icons.js, web/css/app.css
+- commit: 53815d4 feat(web): collapsible rail sidebar with expand/collapse toggle
+- 说明: 默认仍 56px 纯图标。`app.js` 新增 `railOpen`(读 `localStorage('cb_gw_rail')`)+ `toggleRail`(写 LS 兜 try/catch)；template `<aside class="rail" :class="{open:railOpen}">`、`.rail-item` 拆为 `<span class="rail-ic">` + `<span class="rail-lbl" v-if="railOpen">`；`.rail-foot` 主题按钮上方插入双箭头切换钮，chevron 方向随状态翻转。`icons.js` 加 `chevronL/chevronR`(stroke 1.8)。`app.css` `.shell` 列宽改 `var(--rail-w,56px)`；`.rail` 加 `transition:width`；`.rail-item` 由 `display:grid;place-items:center` 改 `display:flex;align-items:center;justify-content:center`(收起态仍 40×40 居中)；新增 `.rail.open`(200px,stretch 排版)+ 子元素 `.rail-brand/.railnav/.rail-item` 横排靠左 + `.rail-lbl` 显示字号字重。移动端 `@media (max-width:760px)` 追加 `.rail.open{width:100%;align-items:center}`+`.rail-lbl{display:none}`,确保底部 tab 条不破坏。pytest -q tests/test_web_assets.py 14 passed、零 em-dash。
+
+## Lever 8 — setup guide sectioned cards
+- 状态: ✔ done
+- 改动文件: web/js/pages/setup.js, web/css/app.css
+- commit: f4a9669 feat(web): restructure setup guide into sectioned cards, drop inline styles
+- 说明: setup 页从 1 长卡(接入信息+向导+Codex 一键+快速验证)拆为 4 独立 `.card`,每块 `.card-h`+`.card-p`。保留全部逻辑/函数/后端调用/用户可见文案(零功能改动)。消灭全部内联 `style=` 与幽灵变量(`--blue-soft/--blue-border/--fg2/--green/--red/--blue`),改用 `.text-muted/.text-ok/.text-err/.text-accent/.mb-1..4/.mt-1..4/.callout/.testbox/.status-line/.hint/.mono/.tcell/.field/.btn/.btn.pri` 等已有/新增工具类。`app.css` utilities 区新增 `.text-ok/.text-accent/.text-xs/.status-line/.callout.accent/.codex-grid/.codex-row/.field-grow`(均在 `:root[data-theme=dark]` 下透过 `--accent-soft/--accent-border/--fg-3/--ok/--err` 自动适配)。`git grep -n "var(--blue\|var(--green\|var(--red\|var(--fg2\|style=" web/js/pages/setup.js` 输出空(`style=` 5 处 `font-size:12px` 已全部改为 `.text-xs`)。Codex 专用说明块改用 `.callout.accent` + `.codex-grid`;Codex 一键配置 card 内的 API Key 输入改 `.tcell`(已含全宽+mono);状态徽章容器改 `.status-line`;结果块改 `.testbox`,配色用 `.text-ok/.text-err/.text-accent/.text-muted`。pytest -q tests/test_web_assets.py 14 passed、零 em-dash。
