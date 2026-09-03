@@ -84,6 +84,50 @@ ALIASES = {
     "auto": DEFAULT_CONFIG,
 }
 
+# 官方 consumption_rate.rate（credit 消耗倍率，原值直用；相对基准模型的系数）。
+# 来自 get_detail_param 实时解析；此处为无可用账号/缓存未命中时的静态兜底。
+# None 表示官方未提供（自定义/占位项）。
+MODEL_RATES: dict[str, float | None] = {
+    "kimi-k3": 1.65,
+    "qwen3.8-max": 1.5,
+    "Doubao-Seed-Evolving": 0.77,
+    "Doubao-Seed-2.1-Pro": 0.77,
+    "seed-code-pro-0430": 0.77,
+    "glm-5-turbo": 0.74,
+    "DeepSeek-V4-Pro-Official": 0.72,
+    "DeepSeek-V4-Pro": 0.72,
+    "glm-5": 0.70,
+    "kimi-k2.6": 0.69,
+    "kimi-k2.7-code": 0.62,
+    "glm-5.3": 0.40,
+    "glm-5.2": 0.40,
+    "sagitta": 0.40,
+    "aquila": 0.40,
+    "Doubao-Seed-2.1-Turbo": 0.39,
+    "Doubao-Seed-2.0-Code": 0.39,
+    "minimax-m3": 0.26,
+    "qwen-3.7-plus": 0.25,
+    "summary": 0.15,
+    "DeepSeek-V4-Flash-Official": 0.08,
+    "DeepSeek-V4-Flash": 0.08,
+    "file_search_agent": 0.03,
+    "explore_sub_agent_v2": 0.03,
+    "browser_use_subagent": 0.01,
+    "custom_model_gemini": None,
+    "custom_model_placeholder": None,
+    "custom_model_1M_text": None,
+    "custom_model_1M": None,
+    "custom_model_kimi": None,
+    "custom_model_claude": None,
+    "custom_model_gpt-5": None,
+    "custom_model_no-fc": None,
+    "custom_model_deepseek_chat": None,
+    "custom_model_deepseek_reasoner": None,
+    "custom_model_deepseek_v4": None,
+    "claude-opus-4-6": None,
+    "GLM-5.2": None,
+}
+
 # --- Scheduling（冷却状态机，移植自 Go 版 pool）---
 PLAN_COOLDOWN_S = 12 * 3600   # 1005 权益不足 → 硬冷却 12h
 SOFT_COOLDOWN_S = 60          # 429 / 404 → 短冷却 60s

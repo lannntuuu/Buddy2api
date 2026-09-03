@@ -15,6 +15,8 @@ class WorkBuddyProvider:
     id: ChannelId = "workbuddy"
     display_name = "WorkBuddy / CodeBuddy"
     checkin_supported = True
+    # 该通道上游（copilot.tencent.com）支持 reasoning_effort 按模型控制
+    supports_reasoning_effort = True
 
     def list_models(self) -> list[dict]:
         """未设置 `models` → 内置默认；已设置（哪怕空列表）→ 以自定义为准。"""
@@ -27,6 +29,13 @@ class WorkBuddyProvider:
         if isinstance(models, list):
             return models
         return []
+
+    def fetch_model_rates(self) -> list[dict]:
+        """WorkBuddy 上游直接报 usage.credit，无独立的 per-model 倍率概念；仅返回生效白名单。"""
+        return [
+            {"id": m["id"], "display_name": m["id"], "rate": None, "context_window": None, "official": False}
+            for m in self.list_models()
+        ]
 
     def alias_map(self) -> dict[str, str]:
         return proxy.effective_builtin_aliases()

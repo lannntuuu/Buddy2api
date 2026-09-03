@@ -177,6 +177,33 @@ def test_usage_returns_aggregated_data(isolated_db, admin_env):
     assert data["totals"]["requests"] == 1
 
 
+def test_usage_days_one_is_today_only(isolated_db, admin_env):
+    """days=1 必须只覆盖今天 00:00~23:59:59，排除更早的记录。
+
+    record_request 会强制 created_at=now，无法回填历史；这里用裸 SQL 直接
+    写入一条「前天」记录，验证时间区间过滤确实把旧数据排除在外。
+    """
+    import sqlite3
+
+    today = date.today()
+    two_days_ago = today - timedelta(days=2)
+    # 今天的记录走正常写入路径
+    _add_log("qclaw", "m1", _ts(today))
+    # 前天的记录用裸 SQL 回填，绕过 record_request 的 now 覆盖
+    with sqlite3.connect(str(isolated_db)) as c:
+        c.execute(
+            "INSERT INTO logs (provider, model, stream, prompt_tokens, completion_tokens, "
+            "total_tokens, credit, finish_reason, duration_ms, status_code, error_msg, created_at) "
+            "VALUES ('qclaw','m1',0,1,1,2,0.0,'stop',1000,200,'',?)",
+            (int(datetime(two_days_ago.year, two_days_ago.month, two_days_ago.day, 12, 0, 0).timestamp()),),
+        )
+
+    data = admin_env(provider="qclaw", days=1)
+    daily = data["providers"]["qclaw"]["models"]["m1"]["daily"]
+    assert [d["date"] for d in daily] == [today.isoformat()]
+    assert data["totals"]["requests"] == 1
+
+
 def test_usage_days_window_bounds(isolated_db, admin_env):
     start_ts, end_ts = server._usage_date_bounds(7, None, None)
     today = date.today()

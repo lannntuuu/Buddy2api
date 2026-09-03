@@ -1,111 +1,73 @@
 """
 proxy.py — 请求代理转发
 
-功能：
-  - 转发到 copilot.tencent.com/v2/chat/completions
-  - 流式 SSE 原样转发
-  - 非流式 SSE 聚合为单个 JSON
-  - tool_calls 分片合并
-  - usage 统计
-  - 账号故障自动切换
+P3 split: this module keeps the request pipeline (proxy_chat_completions,
+the streaming + collector, log_request, the SSE observer/decoder) and
+re-exports a stable surface for everything that was extracted.
+
+Pipeline layers (each lives in its own module under upstream/):
+  - aliases.py      — model alias table, default model list, reasoning defaults
+  - moderation.py   — content-audit and tool-stall detection helpers
+  - compaction.py   — request-body compaction policy and 11128 self-heal state
+
+The aliases / moderation / compaction helpers are imported here under
+their original private names so existing call sites in this file
+(e.g. `if _is_tool_stall(...)`) keep working without further edits.
+External code that imports from `upstream.proxy` also keeps working
+because of the re-exports below.
 """
 
 import asyncio
 import json
+import logging
 import os
+import threading
 import time
+from pathlib import Path
 from typing import AsyncGenerator, Optional
 
 import httpx
+
+logger = logging.getLogger("buddy2api.proxy")
+
+# ---- Backwards-compatible re-exports ----
+# These modules are the canonical home for each name; we re-export
+# here so callers (`from upstream import proxy; proxy._is_tool_stall(...)`,
+# `proxy.DEFAULT_MODELS`, etc.) keep working after the split.
+from upstream.aliases import (  # noqa: E402,F401
+    DEFAULT_MODELS,
+    _BUILTIN_ALIASES,
+    effective_builtin_aliases,
+    resolve_model_alias,
+    _configured_reasoning_default,
+    _env_int,
+)
+from upstream.moderation import (  # noqa: E402,F401
+    _body_size_profile,
+    _dump_11128_body,
+    _looks_like_audit_block,
+    _request_has_tool_loop,
+    _looks_like_stall_text,
+    _is_tool_stall,
+    TOOL_STALL_RETRY,
+    TOOL_STALL_FAIL_STREAM,
+)
+from upstream.compaction import (  # noqa: E402,F401
+    compaction_stats,
+    _is_11128_error,
+    _arm_channel,
+    _channel_armed,
+    _smart_compact_messages,
+    _compact_text,
+    _compact_tools,
+    _compact_schema_descriptions,
+)
 
 from storage import database as db
 from accounts import auth_manager
 
 BACKEND = "https://copilot.tencent.com"
 RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
-
-# 腾讯内容审核拦截时返回的固定话术特征（HTTP 200 + 正文是这段话）。
-# 仅匹配短拒答，避免正常回答引用审查文案时被误标。
-_AUDIT_PHRASE_GROUPS = (
-    ("系统检测到", "敏感内容", "无法响应"),
-    ("无法响应您的请求", "请检查后重新输入"),
-    ("内容违规", "请检查后重新输入"),
-    ("违规内容", "不能提供相关"),
-)
-_AUDIT_PREFIXES = (
-    "系统检测到",
-    "无法响应您的请求",
-    "内容违规",
-    "违规内容",
-    "抱歉，系统检测到",
-    "抱歉，无法响应",
-)
-
-
-def _looks_like_audit_block(text: str) -> bool:
-    text = " ".join((text or "").split())
-    if not text or len(text) > 240:
-        return False
-    if not text.startswith(_AUDIT_PREFIXES):
-        return False
-    return any(all(phrase in text for phrase in group) for group in _AUDIT_PHRASE_GROUPS)
-
-
-# 工具停转（tool stall）检测与修复开关。
-# 场景：agent 工具循环回合（请求带 tools 且历史含 role=tool），上游模型却以
-# finish_reason=stop + 纯文本（"好的，马上继续跑流程"式确认话术）结束且未调用
-# 任何工具 —— 工作流卡死成纯聊天（issue #31）。
-TOOL_STALL_RETRY = (
-    os.environ.get("CB_GATEWAY_TOOL_STALL_RETRY", "1").strip().lower()
-    not in {"0", "false", "no", "off"}
-)
-TOOL_STALL_FAIL_STREAM = (
-    os.environ.get("CB_GATEWAY_TOOL_STALL_FAIL_STREAM", "0").strip().lower()
-    in {"1", "true", "yes", "on"}
-)
-
-_STALL_POSITIVE_MARKERS = (
-    "马上继续", "继续跑", "接下来需要", "请问您接下来",
-    "这就去", "马上开始", "我现在就", "这就开始", "稍等",
-)
-_STALL_NEGATIVE_MARKERS = (
-    "总结", "已完成", "结果如下", "以下是", "以上就是", "完成情况",
-)
-
-
-def _request_has_tool_loop(body: dict) -> bool:
-    """是否为 agent 工具循环回合：声明了 tools 且历史里存在工具结果。"""
-    if not isinstance(body.get("tools"), list) or not body["tools"]:
-        return False
-    return any(
-        isinstance(msg, dict) and msg.get("role") == "tool"
-        for msg in (body.get("messages") or [])
-    )
-
-
-def _looks_like_stall_text(text: str) -> bool:
-    """空内容视为 stall；否则要求短文本且像'知道了，马上继续'式话术，
-    排除总结性回答。"""
-    text = (text or "").strip()
-    if not text:
-        return True
-    if len(text) > 160:
-        return False
-    if any(marker in text for marker in _STALL_NEGATIVE_MARKERS):
-        return False
-    return any(marker in text for marker in _STALL_POSITIVE_MARKERS)
-
-
-def _is_tool_stall(body: dict, finish_reason, tool_calls: bool, text: str) -> bool:
-    """判定一次上游完成是否属于工具停转（stall）。"""
-    if not _request_has_tool_loop(body):
-        return False
-    if tool_calls:
-        return False
-    if (finish_reason or "stop") not in {"stop", None}:
-        return False
-    return _looks_like_stall_text(text)
-
 
 def _is_retryable_status(status: int) -> bool:
     return status in RETRYABLE_STATUS_CODES or status in {401, 403}
@@ -122,100 +84,9 @@ PASSTHROUGH_BODY_KEYS = {
     "verbosity", "reasoning_summary",
 }
 
-_REASONING_DEFAULT_MODEL_IDS = frozenset({
-    "deepseek-v4-pro",
-    "deepseek-v4-flash",
-})
-_VALID_REASONING_DEFAULTS = frozenset({"low", "high", "max"})
 _BACKEND_ROLE_ALIASES = {
     "developer": "system",
 }
-
-DEFAULT_MODELS = [
-    {"id": "glm-5.2", "name": "GLM-5.2"},
-    {"id": "glm-5.1", "name": "GLM-5.1"},
-    {"id": "glm-5v-turbo", "name": "GLM-5V Turbo"},
-    {"id": "kimi-k2.7", "name": "Kimi K2.7"},
-    {"id": "kimi-k2.6", "name": "Kimi K2.6"},
-    {"id": "kimi-k2.5", "name": "Kimi K2.5"},
-    {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro"},
-    {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash"},
-    {"id": "minimax-m3-pay", "name": "MiniMax M3"},
-    {"id": "hy3-preview-agent", "name": "HY3 Preview Agent"},
-    {"id": "auto", "name": "Auto (auto routing)"},
-]
-
-# Built-in model aliases: alias_id -> backend_model_id
-# Extended by user-defined aliases from database settings "model_aliases".
-_BUILTIN_ALIASES = {
-    # GPT-5.x 系列 → 映射到后端可用模型
-    "gpt-5.5": "glm-5.2",
-    "gpt-5.5-mini": "glm-5.1",
-    "gpt-5.4": "glm-5.2",
-    "gpt-5.4-mini": "glm-5.1",
-    "gpt-5.4-codex": "glm-5.2",
-    "gpt-5.1": "glm-5.2",
-    "gpt-5.1-codex": "glm-5.2",
-    "gpt-5": "glm-5.2",
-    "gpt-5-mini": "glm-5.1",
-    # GPT-4.x 系列
-    "gpt-4o": "glm-5.2",
-    "gpt-4o-mini": "glm-5.1",
-    "gpt-4-turbo": "glm-5.2",
-    "gpt-4": "glm-5.2",
-    "gpt-4.1": "glm-5.2",
-    "gpt-4.1-mini": "glm-5.1",
-    "gpt-3.5-turbo": "glm-5.1",
-    # o 系列推理模型
-    "o3": "deepseek-v4-pro",
-    "o3-mini": "deepseek-v4-flash",
-    "o4-mini": "deepseek-v4-pro",
-    "o1": "deepseek-v4-pro",
-    "o1-mini": "deepseek-v4-flash",
-    # Claude 系列
-    "claude-3.5-sonnet": "deepseek-v4-pro",
-    "claude-3-haiku": "deepseek-v4-flash",
-    "claude-sonnet-4": "deepseek-v4-pro",
-    "claude-opus-4": "deepseek-v4-pro",
-    # DeepSeek
-    "deepseek-chat": "deepseek-v4-pro",
-    "deepseek-coder": "deepseek-v4-pro",
-    "deepseek-r1": "deepseek-v4-pro",
-    # Moonshot
-    "moonshot-v1-128k": "kimi-k2.7",
-    "moonshot-v1-32k": "kimi-k2.6",
-}
-
-
-def effective_builtin_aliases() -> dict:
-    """WorkBuddy 生效别名表（整体替换语义，与其它通道一致）：
-
-    未设置 `model_aliases` → 内置默认别名；
-    已设置（哪怕空对象）  → 完全以自定义为准，内置别名全部失效。
-    """
-    raw = db.get_setting("model_aliases", None)
-    if raw is None:
-        return dict(_BUILTIN_ALIASES)
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        str(key).strip(): str(value).strip()
-        for key, value in raw.items()
-        if str(key).strip() and str(value).strip()
-    }
-
-
-def resolve_model_alias(model: str) -> str:
-    """Resolve an alias to its real backend model ID. Returns original if no match."""
-    return effective_builtin_aliases().get(model, model)
-
-
-def _configured_reasoning_default(model: str) -> str | None:
-    """Return the opt-in reasoning default for supported DeepSeek V4 models."""
-    if model not in _REASONING_DEFAULT_MODEL_IDS:
-        return None
-    value = os.environ.get("CB_GATEWAY_DEFAULT_REASONING_EFFORT", "").strip().lower()
-    return value if value in _VALID_REASONING_DEFAULTS else None
 
 
 def build_backend_body(payload: dict) -> dict:
@@ -231,6 +102,8 @@ def build_backend_body(payload: dict) -> dict:
             else message
             for message in messages
         ]
+    # 注：content 精简不在此构建期做。11128 自愈精简只在转发失败后的重试路径触发，
+    # 那里才拿得到客户端信息（仅 ZCode Client 参与），避免构建期无谓地全量截断。
     has_explicit_thinking = "thinking" in payload
     # Resolve model alias before forwarding
     raw_model = body.get("model", "auto")
@@ -281,6 +154,40 @@ def _has_terminal_choice(payload: dict) -> bool:
 
 
 _MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024
+
+
+def _repair_json_arguments(raw: str) -> str:
+    """尝试修复上游截断的工具调用 arguments（hy3 长时间流式偶发）。
+
+    只做尾部补全：从后往前尝试补上缺失的 `}` / `]` / `"`，直到能解析成
+    JSON 对象。修不动就原样返回（调用方会按不完整报错）。
+    """
+    if not raw:
+        return raw
+    try:
+        parsed = json.loads(raw)
+        return raw if isinstance(parsed, dict) else raw
+    except (json.JSONDecodeError, RecursionError, TypeError):
+        pass
+    # 从尾部逐步补闭合符，最多尝试补 16 个（避免死循环/过度猜测）
+    for extra in range(1, 17):
+        candidate = raw + "}" * extra
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, RecursionError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            return candidate
+    # 再试补 ] 和 " 组合（嵌套数组/字符串未闭合的场景）
+    for tail in ("]", "]", "}", "\"}", "\"]", "}}", "]}", "\"}"):
+        candidate = raw + tail
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, RecursionError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            return candidate
+    return raw
 
 
 class _ChatStreamObserver:
@@ -510,12 +417,17 @@ class _ChatStreamObserver:
                     continue
                 if not state["id"] or not state["name"]:
                     return "The upstream tool call stream ended before the tool call was complete."
+                repaired = _repair_json_arguments(state["arguments"])
                 try:
-                    arguments = json.loads(state["arguments"])
+                    arguments = json.loads(repaired)
                 except (json.JSONDecodeError, RecursionError, TypeError):
                     return "The upstream tool call stream ended with incomplete JSON arguments."
                 if not isinstance(arguments, dict):
                     return "The upstream tool call arguments were not a JSON object."
+                if repaired != state["arguments"]:
+                    # 上游把 arguments 尾部截断了（hy3 长时间流式偶发）：
+                    # 修复后按修复值透传，避免整个回合失败。
+                    state["arguments"] = repaired
         for choice_index, reason in self.finish_reasons.items():
             if (
                 reason not in {"length", "content_filter"}
@@ -641,10 +553,59 @@ class _SSEEventDecoder:
         self._event_bytes = 0
 
 
+def _extract_cache_tokens(usage: dict | None) -> tuple[int, int]:
+    """从上游 usage 提取 (cache_read, cache_creation)，兼容三种字段风格。
+
+    优先级：Anthropic → DeepSeek → OpenAI。
+      - Anthropic: cache_read_input_tokens / cache_creation_input_tokens
+      - DeepSeek:  prompt_cache_hit_tokens(→cache_read) / prompt_cache_miss_tokens(→creation 不计入)
+      - OpenAI:    prompt_tokens_details.cached_tokens(→cache_read)，无 creation 概念
+    全部缺省返回 (0, 0)。负值 clamp 到 0；cache_read 不超过 prompt_tokens（cache_read 是 prompt 子集）。
+    """
+    if not usage or not isinstance(usage, dict):
+        return (0, 0)
+
+    cache_read = 0
+    cache_creation = 0
+
+    # 1) Anthropic 风格
+    ar = usage.get("cache_read_input_tokens")
+    ac = usage.get("cache_creation_input_tokens")
+    if ar is not None or ac is not None:
+        cache_read = int(ar) if ar is not None else 0
+        cache_creation = int(ac) if ac is not None else 0
+        return (
+            max(0, min(cache_read, int(usage.get("prompt_tokens", 0) or 0))),
+            max(0, cache_creation),
+        )
+
+    # 2) DeepSeek 风格
+    dh = usage.get("prompt_cache_hit_tokens")
+    if dh is not None:
+        cache_read = int(dh)
+        return (
+            max(0, min(cache_read, int(usage.get("prompt_tokens", 0) or 0))),
+            0,
+        )
+
+    # 3) OpenAI 风格
+    ptd = usage.get("prompt_tokens_details")
+    if isinstance(ptd, dict) and ptd.get("cached_tokens") is not None:
+        cache_read = int(ptd["cached_tokens"])
+        return (
+            max(0, min(cache_read, int(usage.get("prompt_tokens", 0) or 0))),
+            0,
+        )
+
+    return (0, 0)
+
+
 def _log_request(api_key_info, account, model_name, stream,
                   prompt_t, completion_t, total_t, credit,
                   finish_reason, status_code, error_msg, t0,
-                  increment_usage: bool = True):
+                  increment_usage: bool = True,
+                  usage: dict | None = None,
+                  reasoning_effort: str | None = None):
     elapsed_ms = int((time.time() - t0) * 1000)
     log_data = {
         "api_key_id": api_key_info["id"] if api_key_info else None,
@@ -656,6 +617,7 @@ def _log_request(api_key_info, account, model_name, stream,
         or "workbuddy",
         "model": model_name,
         "stream": 1 if stream else 0,
+        "reasoning_effort": reasoning_effort,
         "prompt_tokens": prompt_t,
         "completion_tokens": completion_t,
         "total_tokens": total_t,
@@ -665,9 +627,44 @@ def _log_request(api_key_info, account, model_name, stream,
         "status_code": status_code,
         "error_msg": error_msg,
         "increment_usage": increment_usage,
+        "client": (api_key_info or {}).get("_client_tag"),
+        "client_version": (api_key_info or {}).get("_client_version"),
     }
+    # Cache 命中追踪：兼容三种字段风格，整包 dump 留证据。
+    cache_read, cache_creation = _extract_cache_tokens(usage)
+    log_data["cache_read_tokens"] = cache_read
+    log_data["cache_creation_tokens"] = cache_creation
+    usage_json = None
+    if usage is not None:
+        try:
+            serialized = json.dumps(usage, ensure_ascii=False)
+        except (TypeError, ValueError):
+            serialized = None
+        # 体积保护：序列化后 >64KB 时只留存提取结果，避免超大 usage 污染日志表。
+        if serialized is not None and len(serialized.encode("utf-8")) > 65536:
+            serialized = json.dumps(
+                {"truncated": True, "cache_read_tokens": cache_read,
+                 "cache_creation_tokens": cache_creation},
+                ensure_ascii=False,
+            )
+        usage_json = serialized
+    log_data["usage_json"] = usage_json
+    # credit_source='live' 门槛：usage 含任意已知 cache 键即标 live（实测语义，与 dashboard accurate 对齐）。
+    _known_cache_keys = (
+        "cache_read_input_tokens", "cache_creation_input_tokens",
+        "prompt_cache_hit_tokens", "prompt_cache_miss_tokens",
+        "prompt_tokens_details",
+    )
+    log_data["credit_source"] = (
+        "live" if usage is not None and any(k in usage for k in _known_cache_keys) else None
+    )
     try:
-        db.record_request(log_data)
+        # 写日志（含 BEGIN IMMEDIATE 事务 + fsync）不占事件循环：
+        # 放进默认线程池 fire-and-forget，日志失败只静默丢弃。
+        loop = asyncio.get_running_loop()
+        fut = loop.run_in_executor(None, db.record_request, log_data)
+        # fire-and-forget：吞掉 executor 内抛出的异常，避免“异常从未被读取”告警
+        fut.add_done_callback(lambda f: f.exception() if f.cancelled() is False else None)
     except Exception:
         pass
 
@@ -687,6 +684,8 @@ async def proxy_chat_completions(
     """
     client_wants_stream = bool(payload.get("stream"))
     body = build_backend_body(payload)
+    # 实际发给上游的思考档位（客户端显式或按模型配置注入）：用于请求日志
+    effective_reasoning = body.get("reasoning_effort")
     if log_model is None and isinstance(api_key_info, dict):
         log_model = api_key_info.get("_log_model")
     model_name = log_model if log_model is not None else payload.get("model", "auto")
@@ -741,8 +740,38 @@ async def proxy_chat_completions(
             auth_manager.mark_account_success(account["id"])
             return result
 
-        last_error = result
+        channel = account.get("provider") or "workbuddy"
+        client = (api_key_info or {}).get("_client_tag")
         err_status = result[1][0]
+        # 11128 大内容拦截：武装该 (通道,客户端) + 用激进阈值精简后原地重试（自愈）。
+        # 仅 ZCode Client 参与精简；DSH 及其它 agent 不精简。
+        if _is_11128_error(err_status, result[1][1], body):
+            _arm_channel(channel, client)
+            _smart_compact_messages(body, channel=channel, client_tag=client)
+            body["_compacted_11128"] = True
+            with _COMPACTION_LOCK:
+                _COMPACTION_STATS["retried_11128"] += 1
+            retry_t0 = time.time()
+            retry_result = await _collect_stream(
+                url, headers, body, account, api_key_info, model_name, retry_t0
+            )
+            if retry_result[0] == "json":
+                auth_manager.mark_account_success(account["id"])
+                return retry_result
+            # 精简后仍失败：落为普通错误走统一处理（不再尝试切换账号疯转）
+            result = retry_result
+            err_status = retry_result[1][0]
+            dump_path = _dump_11128_body(body, channel, model_name)
+            logger.warning(
+                "11128 self-heal retry still failed (non-stream) "
+                "profile=%s channel=%s model=%s dump=%s",
+                _body_size_profile(body),
+                channel,
+                model_name,
+                dump_path,
+            )
+
+        last_error = result
         auth_manager.mark_account_failure(account["id"], err_status)
         will_retry = _is_retryable_status(err_status) and attempt < max_retries - 1
         detail = result[1][1]
@@ -755,6 +784,7 @@ async def proxy_chat_completions(
             0, 0, 0, 0, "retry" if will_retry else "error",
             err_status, str(error_message)[:500], t0,
             increment_usage=not will_retry,
+            reasoning_effort=effective_reasoning,
         )
         if not will_retry:
             return result
@@ -821,6 +851,8 @@ async def _stream_upstream(
     """Stream upstream SSE with pre-output account failover and backoff."""
     tried_ids: set[int] = set()
     last_error = b"No available accounts"
+    # 实际发给上游的思考档位（客户端显式或按模型配置注入）：用于请求日志
+    effective_reasoning = body.get("reasoning_effort")
     last_error_event: dict | None = None
     last_status = 503
     last_account = None
@@ -831,6 +863,7 @@ async def _stream_upstream(
         account = await auth_manager.pick_account_with_fallback(tried_ids)
         if not account:
             break
+        channel = account.get("provider") or "workbuddy"
         if pending_retry_log is not None:
             _log_request(
                 api_key_info,
@@ -846,6 +879,7 @@ async def _stream_upstream(
                 pending_retry_log["message"],
                 pending_retry_log["started"],
                 increment_usage=False,
+                reasoning_effort=effective_reasoning,
             )
             await _retry_delay(pending_retry_log["attempt"])
             pending_retry_log = None
@@ -880,9 +914,34 @@ async def _stream_upstream(
                 async with client.stream("POST", url, headers=headers, json=body) as response:
                     if response.status_code != 200:
                         raw_error = await response.aread()
+                        # 11128 大内容拦截：武装通道 + 激进精简后原地重试（自愈）。
+                        if _is_11128_error(response.status_code, raw_error, body):
+                            _arm_channel(channel, (api_key_info or {}).get("_client_tag"))
+                            _smart_compact_messages(
+                                body, channel=channel,
+                                client_tag=(api_key_info or {}).get("_client_tag"),
+                            )
+                            body["_compacted_11128"] = True
+                            with _COMPACTION_LOCK:
+                                _COMPACTION_STATS["retried_11128"] += 1
+                            # 同一账号重发一次：从 tried 移除以免单账号通道被误判为无可用账号
+                            tried_ids.discard(account["id"])
+                            attempt -= 1
+                            continue
                         last_error = raw_error
                         last_error_event = None
                         last_status = response.status_code
+                        if body.get("_compacted_11128"):
+                            # 自愈精简后仍失败：记录 body 特征 + 完整出站体，便于定位触发源
+                            dump_path = _dump_11128_body(body, channel, model_name)
+                            logger.warning(
+                                "11128 self-heal retry still failed "
+                                "profile=%s channel=%s model=%s dump=%s",
+                                _body_size_profile(body),
+                                channel,
+                                model_name,
+                                dump_path,
+                            )
                         auth_manager.mark_account_failure(account["id"], response.status_code)
                         if _is_retryable_status(response.status_code) and attempt < 2:
                             pending_retry_log = {
@@ -901,6 +960,7 @@ async def _stream_upstream(
                             api_key_info, account, model_name, True,
                             0, 0, 0, 0, "error", response.status_code,
                             raw_error.decode("utf-8", "replace")[:500], t0,
+                            reasoning_effort=effective_reasoning,
                         )
                         yield _err_sse_event(raw_error, response.status_code)
                         return
@@ -956,6 +1016,7 @@ async def _stream_upstream(
             _log_request(
                 api_key_info, account, model_name, True,
                 0, 0, 0, 0, "network_error", 502, str(exc)[:500], t0,
+                reasoning_effort=effective_reasoning,
             )
             yield _err_sse_event(last_error, 502)
             return
@@ -1008,6 +1069,8 @@ async def _stream_upstream(
                 observer.usage.get("total_tokens", 0),
                 observer.usage.get("credit", 0),
                 "error", 502, eof_error, t0,
+                usage=observer.usage,
+                reasoning_effort=effective_reasoning,
             )
             if observer.upstream_error_event is not None:
                 yield _json_sse_event(observer.upstream_error_event)
@@ -1043,6 +1106,8 @@ async def _stream_upstream(
             observer.usage.get("total_tokens", 0),
             observer.usage.get("credit", 0),
             log_finish, 200, log_error, t0,
+            usage=observer.usage,
+            reasoning_effort=effective_reasoning,
         )
         if tool_stall and TOOL_STALL_FAIL_STREAM:
             # 流式已发出文本增量，无法回退重试；把本回合标记为失败，
@@ -1081,6 +1146,7 @@ async def _stream_upstream(
         final_failure["credit"],
         "error", final_failure["status"],
         final_failure["message"], final_failure["started"],
+        reasoning_effort=effective_reasoning,
     )
     if last_error_event is not None:
         yield _json_sse_event(last_error_event)
@@ -1149,7 +1215,7 @@ async def _collect_stream(
     if tool_calls:
         tcs = [
             {"id": v["id"], "type": "function",
-             "function": {"name": v["name"], "arguments": v["arguments"]}}
+             "function": {"name": v["name"], "arguments": _repair_json_arguments(v["arguments"])}}
             for _, v in sorted(tool_calls.items())
         ]
         finish_reason = finish_reason or "tool_calls"
@@ -1185,6 +1251,7 @@ async def _collect_stream(
     }
 
     u = usage or {}
+    effective_reasoning = (body or {}).get("reasoning_effort")
     _log_request(
         api_key_info, account, model_name, False,
         u.get("prompt_tokens", 0),
@@ -1192,5 +1259,7 @@ async def _collect_stream(
         u.get("total_tokens", 0),
         u.get("credit", 0),
         finish_reason or "stop", 200, "", t0,
+        usage=u,
+        reasoning_effort=effective_reasoning,
     )
     return ("json", result)

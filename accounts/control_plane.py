@@ -9,7 +9,10 @@ import secrets
 import time
 from pathlib import Path
 
+import logging
+
 from storage import database as db
+from storage import credit_cache
 from upstream import proxy
 import providers
 from accounts import auth_manager
@@ -24,6 +27,46 @@ from providers.traework.constants import ALIASES as _TRAEWORK_DEFAULT_ALIASES
 from providers.traework.constants import STATIC_MODELS as _TRAEWORK_DEFAULT_MODELS
 from providers.traesolo.constants import ALIASES as _TRAESOLO_DEFAULT_ALIASES
 from providers.traesolo.constants import STATIC_MODELS as _TRAESOLO_DEFAULT_MODELS
+from providers.gmi.constants import ALIASES as _GMI_DEFAULT_ALIASES
+from providers.gmi.constants import STATIC_MODELS as _GMI_DEFAULT_MODELS
+
+logger = logging.getLogger(__name__)
+
+# credit-summary 结果级快照缓存 TTL（秒）。0 = 关闭缓存。签到/领取后会 invalidate()。
+_CREDIT_SUMMARY_TTL = float(os.environ.get("CB_GATEWAY_CREDIT_SUMMARY_TTL", "300"))
+
+
+async def _refresh_credit_snapshot_bg(expected_gen: int) -> None:
+    """过期快照的后台重建（stale-while-revalidate），单飞保证同一时刻只有一次重建。
+
+    expected_gen 在调度时刻捕获（而非任务体首行——create_task 只是调度，
+    invalidate 可能发生在调度与任务体启动之间）；重建期间若发生 invalidate
+    （如签到领取成功），代数变化，本次结果作废不回填，避免用旧数据覆盖失效。
+    """
+    try:
+        snap = await _build_credit_summary(False)
+        if credit_cache.generation() == expected_gen:
+            credit_cache.set_snapshot(snap)
+    except Exception:  # noqa: BLE001
+        logger.warning("credit_summary 后台刷新失败，沿用旧快照", exc_info=True)
+    finally:
+        credit_cache.mark_refreshing(False)
+
+
+def _maybe_schedule_credit_refresh() -> None:
+    if credit_cache.is_refreshing():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    credit_cache.mark_refreshing(True)
+    loop.create_task(_refresh_credit_snapshot_bg(credit_cache.generation()))
+
+
+def invalidate_credit_summary_cache() -> None:
+    """签到/领取/强制刷新成功后调用，使额度快照失效。"""
+    credit_cache.invalidate()
 
 
 async def _gather_limited(accounts: list[dict], operation, limit: int = 2) -> list[dict]:
@@ -304,6 +347,7 @@ _CHANNEL_DEFAULTS: dict[str, tuple[list[str], dict[str, str]]] = {
     "qwenwork": (list(_QWENWORK_DEFAULT_MODELS), dict(_QWENWORK_DEFAULT_ALIASES)),
     "traework": (list(_TRAEWORK_DEFAULT_MODELS), dict(_TRAEWORK_DEFAULT_ALIASES)),
     "traesolo": (list(_TRAESOLO_DEFAULT_MODELS), dict(_TRAESOLO_DEFAULT_ALIASES)),
+    "gmi": (list(_GMI_DEFAULT_MODELS), dict(_GMI_DEFAULT_ALIASES)),
 }
 
 
@@ -346,15 +390,63 @@ def channel_model_view(channel: str) -> dict:
         for item in provider.list_models()
     ]
     default_ids, default_aliases = _CHANNEL_DEFAULTS[channel]
+    # per-model 明细（含官方消耗倍率）。无 fetch_model_rates 钩子的通道回退到白名单。
+    rates_fn = getattr(provider, "fetch_model_rates", None)
+    if callable(rates_fn):
+        model_details = rates_fn()
+    else:
+        model_details = [
+            {"id": mid, "display_name": mid, "rate": None, "context_window": None, "official": False}
+            for mid in effective_ids
+        ]
     return {
         "channel": channel,
         "models": effective_ids,
+        "model_details": model_details,
         "aliases": provider.alias_map(),
         "defaults": {"models": default_ids, "aliases": default_aliases},
         "customized": is_customized(channel),
         "credit_rate": model_config.channel_credit_rate(channel),
-        "credit_rate_default": model_config.DEFAULT_CREDIT_RATE,
+        "credit_rate_default": model_config.channel_credit_rate(channel),
         "credit_rate_customized": db.get_setting(f"{channel}.credit_rate") is not None,
+        # 按模型思考档位（取代环境变量）
+        "reasoning_supported": bool(getattr(provider, "supports_reasoning_effort", False)),
+        "reasoning": model_config.channel_reasoning(channel),
+        "reasoning_default": model_config.channel_reasoning(channel).get("__default__", ""),
+        "reasoning_customized": db.get_setting(f"{channel}.reasoning") is not None,
+        "reasoning_choices": list(model_config.REASONING_CHOICES),
+    }
+
+
+async def refresh_channel_models(channel: str) -> dict:
+    """强制刷新某通道的官方模型表（仅支持动态拉取的通道，如 traesolo）。
+
+    返回 {"channel", "refreshed": bool, "model_details": [...], "note": str}。
+    非动态通道返回 refreshed=false 并附说明。
+    """
+    channel = str(channel or "").strip()
+    if channel not in KNOWN_CHANNEL_SET:
+        raise ValueError(f"Unknown channel '{channel}'")
+    provider = providers.get_provider(channel)
+    if provider is None:
+        raise ValueError(f"Channel '{channel}' is not enabled")
+    # traesolo 有动态刷新能力
+    refresh_fn = getattr(provider, "refresh_dynamic_models", None)
+    if callable(refresh_fn):
+        ok = await refresh_fn(force=True)
+        view = channel_model_view(channel)
+        return {
+            "channel": channel,
+            "refreshed": bool(ok),
+            "model_details": view.get("model_details", []),
+            "note": "" if ok else "刷新失败（可能无可用账号或上游不可达）",
+        }
+    view = channel_model_view(channel)
+    return {
+        "channel": channel,
+        "refreshed": False,
+        "model_details": view.get("model_details", []),
+        "note": "该通道无动态模型接口，仅展示静态白名单（上游不提供倍率）",
     }
 
 
@@ -364,18 +456,23 @@ def set_channel_models(
     models=None,
     aliases=None,
     credit_rate=None,
+    reasoning=None,
     set_models: bool = False,
     set_aliases: bool = False,
     set_rate: bool = False,
+    set_reasoning: bool = False,
 ) -> dict:
-    """设置或重置通道模型列表 / 别名 / credit 换算率。None 表示重置为默认。返回最新视图。"""
+    """设置或重置通道模型列表 / 别名 / credit 换算率 / 按模型思考档位。
+    None 表示重置为默认。返回最新视图。"""
     channel = str(channel or "").strip()
     if channel not in KNOWN_CHANNEL_SET:
         raise ValueError(f"Unknown channel '{channel}'")
     if providers.get_provider(channel) is None:
         raise ValueError(f"Channel '{channel}' is not enabled")
-    if not (set_models or set_aliases or set_rate):
-        raise ValueError("Provide 'models' and/or 'aliases' and/or 'credit_rate' (null resets)")
+    if not (set_models or set_aliases or set_rate or set_reasoning):
+        raise ValueError(
+            "Provide 'models' and/or 'aliases' and/or 'credit_rate' and/or 'reasoning' (null resets)"
+        )
 
     models_key, aliases_key = _channel_keys(channel)
     if set_models:
@@ -404,6 +501,12 @@ def set_channel_models(
             if rate < 0:
                 raise ValueError("credit_rate must be >= 0")
             db.set_setting(f"{channel}.credit_rate", rate)
+    if set_reasoning:
+        if reasoning is None:
+            db.delete_setting(f"{channel}.reasoning")
+        else:
+            validated = model_config._validate_reasoning(reasoning)
+            db.set_setting(f"{channel}.reasoning", validated)
     return channel_model_view(channel)
 
 
@@ -473,6 +576,25 @@ async def _channel_accounts(channel: str, status: str = "active") -> list[dict]:
 
 
 async def credit_summary(force: bool = False) -> dict:
+    """结果级缓存 + SWR 的入口；真实构建逻辑在 _build_credit_summary。"""
+    if not _CREDIT_SUMMARY_TTL:
+        return await _build_credit_summary(force)
+    if force:
+        # 用户显式强制刷新：绕过账号级缓存，并刷新进程级快照
+        snap = await _build_credit_summary(True)
+        credit_cache.set_snapshot(snap)
+        return snap
+    if credit_cache.has_snapshot():
+        cached = credit_cache.get_snapshot(_CREDIT_SUMMARY_TTL)
+        if cached.get("cache") == "stale":
+            _maybe_schedule_credit_refresh()
+        return cached
+    snap = await _build_credit_summary(False)
+    credit_cache.set_snapshot(snap)
+    return snap
+
+
+async def _build_credit_summary(force: bool = False) -> dict:
     channels = []
     workbuddy_resources = []
     for channel in providers.enabled_provider_ids():
@@ -484,7 +606,7 @@ async def credit_summary(force: bool = False) -> dict:
                 resources = await _gather_limited(
                     accounts,
                     lambda account: auth_manager.fetch_account_resources(account, force=force),
-                    limit=2,
+                    limit=4,
                 )
             workbuddy_resources = resources
             ok = [row for row in resources if row.get("ok")]
@@ -524,8 +646,10 @@ async def credit_summary(force: bool = False) -> dict:
         ok_count = 0
         unsupported = False
         message = ""
-        for account in accounts:
-            snapshot = await fetch_quota(account)
+        snapshots = await _gather_limited(
+            accounts, lambda account: fetch_quota(account), limit=4
+        )
+        for snapshot in snapshots:
             unit = getattr(snapshot, "unit", None) if not isinstance(snapshot, dict) else snapshot.get("unit")
             ok = bool(getattr(snapshot, "ok", None) if not isinstance(snapshot, dict) else snapshot.get("ok"))
             snap_unsupported = bool(
@@ -617,13 +741,13 @@ async def checkin_status_all(force: bool = False) -> dict:
             chunk = await _gather_limited(
                 accounts,
                 lambda account, fn=fetch_checkin: fn(account, force=force),
-                limit=2,
+                limit=4,
             )
         else:
             chunk = await _gather_limited(
                 accounts,
                 lambda account: auth_manager.fetch_checkin_status(account, force=force),
-                limit=2,
+                limit=4,
             )
         for item in chunk:
             if isinstance(item, dict):
@@ -670,6 +794,7 @@ async def checkin_all(channel_filter: list[str] | None = None) -> dict:
                 result["resources"] = await auth_manager.fetch_account_resources(account, force=True)
             result["channel"] = channel
             results.append(result)
+    invalidate_credit_summary_cache()
     wb_credit = round(
         sum(float(row.get("credit") or 0) for row in results if row.get("claimed") and row.get("channel") == "workbuddy"),
         4,
@@ -683,4 +808,87 @@ async def checkin_all(channel_filter: list[str] | None = None) -> dict:
         "credit_deprecated": True,
         "skipped": skipped,
         "results": results,
+    }
+
+
+# ============================================================
+# TraeWork 官方消耗真值同步（usage_type=7 session 明细 -> 按天聚合落库）
+# ============================================================
+
+async def sync_traework_usage(days: int = 90) -> dict:
+    """拉取 TraeWork 官方 session 消耗明细，按天+模型聚合写入 traework_daily_credit。
+
+    返回 {synced_days, sessions, total_credits}。失败返回 {ok:False, error}。
+    注意：这是官方真值，与 logs.credit 的估算无关；dashboard 的 TraeWork 消耗改读此真值。
+    """
+    from providers.traework import quota as tw_quota
+
+    account = auth_manager.pick_account(None, provider="traework")
+    if account is None:
+        return {"ok": False, "error": "no traework account"}
+    try:
+        sessions = await tw_quota.fetch_session_usage(account, days=days)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:240]}
+
+    # 按 (day, model_name) 聚合
+    agg: dict[tuple, dict] = {}
+    for s in sessions:
+        if not s.get("usage_time"):
+            continue
+        day = time.strftime("%Y-%m-%d", time.localtime(s["usage_time"]))
+        key = (day, s.get("model_name") or "?")
+        bucket = agg.setdefault(key, {"day": day, "model_name": key[1], "credits": 0.0, "sessions": 0})
+        bucket["credits"] += float(s.get("credits_float") or 0)
+        bucket["sessions"] += 1
+    rows = list(agg.values())
+    db.upsert_traework_daily_credit(rows)
+    total_credits = round(sum(r["credits"] for r in rows), 4)
+    return {
+        "ok": True,
+        "synced_days": len({r["day"] for r in rows}),
+        "sessions": len(sessions),
+        "total_credits": total_credits,
+    }
+
+
+# ============================================================
+# 账户级历史总消耗估算（当前已用 + 已过期积分，假设过期部分已用完）
+# 说明：TRAE 官方不提供"历史总消耗"直读，也不提供 traesolo 单产品真值。
+# 这里用 user_current_entitlement_list 的 consumed_amount（当前包已用）
+# + expired_ents 的过期包额度上限（假设用完后过期）估算历史总消耗。
+# 仅作账户级概览，不可用于按产品/按日拆分。
+# ============================================================
+
+async def account_credit_overview() -> dict:
+    from providers.traesolo import quota as ts_quota
+
+    account = auth_manager.pick_account(None, provider="traesolo")
+    if account is None:
+        # 退而求其次用 traework 账号（共享同一 TRAE 用户）
+        account = auth_manager.pick_account(None, provider="traework")
+    if account is None:
+        return {"ok": False, "error": "no trae account"}
+    try:
+        ent = await ts_quota.fetch_entitlement_list(account)
+        exp = await ts_quota.fetch_expired_ents(account)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:240]}
+
+    ent_data = (ent.get("data") or {}) if ent.get("ok") else {}
+    exp_data = (exp.get("data") or {}) if exp.get("ok") else {}
+    usage_summary = ent_data.get("usage_summary") or {}
+    current_consumed = float(usage_summary.get("consumed_amount") or 0)
+    expired_list = exp_data.get("expired_ent_list") or []
+    expired_total = sum(float(e.get("credits_limit") or 0) for e in expired_list)
+    # 假设过期包已用完（官方不回报"过期包实际已用"，只能假设）
+    historical_estimate = round(current_consumed + expired_total, 4)
+    return {
+        "ok": True,
+        "current_consumed": round(current_consumed, 4),
+        "expired_total": round(expired_total, 4),
+        "expired_count": len(expired_list),
+        "historical_estimate": historical_estimate,
+        "assumed_expired_used": True,
+        "note": "历史总消耗=当前包已用+过期包额度上限（假设过期部分已用完）；官方不回报过期包实际用量，故为估算。",
     }

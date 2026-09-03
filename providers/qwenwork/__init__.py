@@ -8,6 +8,7 @@ import httpx
 
 from accounts import auth_manager
 from storage import database as db
+from storage.http_pool import get_client
 from providers.model_config import channel_aliases, channel_model_ids
 from providers.protocol import ChannelId, QuotaSnapshot
 from providers.qwenwork import chat, store
@@ -29,6 +30,13 @@ class QwenWorkProvider:
 
     def list_models(self) -> list[dict]:
         return [{"id": item} for item in channel_model_ids(CHANNEL_ID, STATIC_MODELS)]
+
+    def fetch_model_rates(self) -> list[dict]:
+        """QwenWork 上游不回报 per-model 倍率，仅返回生效白名单（rate=None, official=False）。"""
+        return [
+            {"id": m["id"], "display_name": m["id"], "rate": None, "context_window": None, "official": False}
+            for m in self.list_models()
+        ]
 
     def alias_map(self) -> dict[str, str]:
         return channel_aliases(CHANNEL_ID, ALIASES)
@@ -96,8 +104,8 @@ class QwenWorkProvider:
             headers["Authorization"] = f"Bearer {access}"
         url = f"{GATEWAY}{ACCOUNT_CONTEXT_PATH}?include=user,plan,quota"
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(url, headers=headers)
+            client = get_client()
+            response = await client.get(url, headers=headers, timeout=30.0)
         except httpx.HTTPError as exc:
             return QuotaSnapshot(
                 ok=False,
