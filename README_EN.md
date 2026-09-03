@@ -225,6 +225,69 @@ The admin UI's "Model config" page provides a graphical interface: a wide "Unifi
 | `--port` | `8787` | Port |
 | `--admin-token` | auto-generated (printed once in the startup log) | Admin token; paste it once in the admin UI "Settings" to get a cookie |
 | `--no-admin-auth` | off | Disable admin auth; local trial only |
+| `--config` | read the `[default]` block of `config.toml`; if a path is given, treat it as a TOML file; if not, treat it as a profile name (see [Configuration file](#configuration-file)) |
+| `--config-name` | `default` | Profile table name inside the TOML file (e.g. `[dev]`, `[prod]`) |
+
+## Configuration file
+
+Place a `config.toml` at the project root and `gateway.server` will auto-load it on startup. This is the alternative to a wall of CLI flags / env vars: put `host`, `port`, `database.path`, `admin.token` in a file, and a bare `python -m gateway.server` does the right thing.
+
+**Priority order** (later wins):
+
+```
+code default  ->  config.toml [default]  ->  config.toml [<profile>]  ->  env var  ->  CLI flag
+```
+
+**Two ways to switch profiles**:
+
+```bash
+# 1) Profile is a table inside the same config.toml
+python -m gateway.server                          # uses [default]
+python -m gateway.server --config prod            # uses [prod]
+CB_GATEWAY_CONFIG=prod python -m gateway.server   # same, via env
+
+# 2) Profile lives in a separate file
+python -m gateway.server --config config.prod.toml
+```
+
+**Full example** (dev / prod share the same code, each has its own config):
+
+```toml
+# config.toml -- dev checkout defaults to 8787
+[default.server]
+host = "127.0.0.1"
+port = 8787
+
+[dev.server]
+host = "127.0.0.1"
+port = 8787
+```
+
+```toml
+# config.prod.toml -- prod runs on 8788 with its own data dir
+[default.server]
+host = "127.0.0.1"
+port = 8788
+
+[default.database]
+path = "/var/lib/buddy2api/codebuddy_gateway.db"
+
+[default.admin]
+# Leave empty to auto-generate; set a fixed value to keep the
+# browser cookie valid across restarts.
+# token = "cb-admin-xxxxxxxxxxxxxxxxxxxxxxxx"
+```
+
+`config.toml` and `config.*.toml` are `.gitignore`d (per-deploy config never enters the repo); only `config.example.toml` is tracked as a template.
+
+**Running dev and prod side-by-side**: each checkout writes its own `config.toml`, and port / db path must differ (otherwise they race on the same WAL file):
+
+| checkout | config.toml port | config.toml db path |
+|---|---|---|
+| `Buddy2api/` (dev) | 8787 | `data/codebuddy_gateway.db` (default) |
+| `Buddy2api-prod/` (worktree runtime) | 8788 | `data/codebuddy_gateway.db` (relative to prod's own cwd) |
+
+Pin the admin token so the browser cookie survives restarts: edit `config.toml` and set `admin.token = "cb-admin-xxx"`. Generate one with: `python -c "import secrets; print('cb-admin-' + secrets.token_urlsafe(24))"`.
 
 ## Environment variables
 
@@ -418,6 +481,7 @@ Compared to 1.4 / 2.0 / 2.1:
   - All 56 endpoint paths, contracts, and behavior are unchanged; the test suite shows the same pre-existing pass/fail as the v2.1 baseline (no new regressions).
 - **Admin UI overhaul**: eight levers, one commit each (vendor local, version from `/admin/meta`, CSS token rebuild, component layer, chart palette tokenization, key page reflow, responsive breakpoint consolidation, one-off script archive). Version is now fetched from the backend instead of hard-coded. `em-dash` characters were replaced with Chinese punctuation throughout the SPA.
 - **One lever, one commit**: every refactor commit is independently reviewable (`refactor(web): ...`, `refactor(storage): ...`, `refactor(gateway): ...`, `refactor(upstream): ...`); all commits are pushed to `refactor/web-console-ia`. See `redesign-audit/` for the design baseline, audit findings, strategy, and token spec.
+- **Config file `config.toml`**: added. `gateway.server` auto-loads it on startup, supports `[default]` / `[dev]` / `[prod]` profiles plus `--config <profile>` / `CB_GATEWAY_CONFIG=<profile>` to switch. A dev/prod worktree split keeps two `config.toml` files (`.gitignore`d, per-deploy private) pinning port and db path, so a bare `python -m gateway.server` lands on the right port in each checkout. See [Configuration file](#configuration-file) for details.
 
 ## License
 
