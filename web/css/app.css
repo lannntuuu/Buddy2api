@@ -24,6 +24,7 @@
 
   /* color · semantic */
   --ok:#0a8a4a;        --ok-bg:#e8f5ee;
+  --ok-border:#c3e6cc;  --ok-fg:#006633;
   --warn:#9a5c14;      --warn-bg:#fff1da;
   --err:#c03434;       --err-bg:#fdeeee;
 

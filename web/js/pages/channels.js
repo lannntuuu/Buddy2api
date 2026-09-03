@@ -181,7 +181,7 @@ export default {props:['token','toast'],setup(p){
           <div class="hint" style="margin:0">内置默认：{{chDefaultText(chOf())}}</div>
         </div>
       </div>
-      <div v-if="chOf().reasoningSupported" style="margin-top:14px;border-top:1px dashed #e2e2e2;padding-top:12px">
+      <div v-if="chOf().reasoningSupported" style="margin-top:14px;border-top:1px dashed var(--border);padding-top:12px">
         <label style="font-size:12px;color:var(--fg2);display:block;margin-bottom:6px">思考档位（通道默认）</label>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <select v-model="chOf().reasoningDefault" class="selectctl" style="padding:4px 6px;font-size:12px">
@@ -194,9 +194,9 @@ export default {props:['token','toast'],setup(p){
       </div>
       <div><label style="font-size:12px;color:var(--fg2);display:block;margin-bottom:6px">别名（别名 → 模型 ID；保存 = 按列表整体保存；删空后保存 = 该平台无任何别名）</label>
         <div v-for="(r,i) in chOf().aliasRows" :key="i" style="display:flex;gap:8px;margin-bottom:6px;align-items:center">
-          <input v-model="r.k" placeholder="别名 (如 auto)" style="flex:1;padding:5px 8px;border:1px solid #e8e8e8;border-radius:4px;font:inherit;font-size:12px;font-family:var(--mono);background:#fff;outline:none"/>
+          <input v-model="r.k" placeholder="别名 (如 auto)" style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:4px;font:inherit;font-size:12px;font-family:var(--mono);background:#fff;outline:none"/>
           <span style="color:var(--fg3)">→</span>
-          <input v-model="r.v" placeholder="模型 ID" style="flex:1;padding:5px 8px;border:1px solid #e8e8e8;border-radius:4px;font:inherit;font-size:12px;font-family:var(--mono);background:#fff;outline:none"/>
+          <input v-model="r.v" placeholder="模型 ID" style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:4px;font:inherit;font-size:12px;font-family:var(--mono);background:#fff;outline:none"/>
           <button class="btn s danger" @click="rmRow(chOf(),i)">删除</button>
         </div>
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
@@ -204,7 +204,7 @@ export default {props:['token','toast'],setup(p){
           <div class="hint" style="margin:0">内置默认别名：{{Object.entries((chOf().defaults&&chOf().defaults.aliases)||{}).map(([k,v])=>k+'→'+v).join(', ')||'无'}}</div>
         </div>
       </div>
-      <div style="margin-top:14px;border-top:1px dashed #e2e2e2;padding-top:12px"><label style="font-size:12px;color:var(--fg2);display:block;margin-bottom:6px">相对消耗缩放因子（tokens ÷ 该值 × 模型倍率）</label>
+      <div style="margin-top:14px;border-top:1px dashed var(--border);padding-top:12px"><label style="font-size:12px;color:var(--fg2);display:block;margin-bottom:6px">相对消耗缩放因子（tokens ÷ 该值 × 模型倍率）</label>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <input class="tcell" style="width:120px" v-model="chOf().credit_rate" type="number" min="0" step="1"/>
           <span class="hint" style="margin:0" v-if="chOf().channel==='traesolo'">TRAE SOLO 已改用<strong>官方三档标价公式</strong>（input/cache_read/output 分别计价，反解自官方 session 真值，46/51 行误差<1%，见 pricing.py）。本栏缩放因子仅在请求无 token 数据时兜底使用。注意：标价≠实际扣费——订阅内官方实际扣费远低于标价（见 docs §10.5）。</span>
