@@ -23,6 +23,7 @@ python -m src.gateway.server
 | QwenWork | on | `%APPDATA%\QwenWorkCN` |
 | TraeWork | on | `%APPDATA%\TRAE SOLO CN\User\globalStorage` |
 | Trae SOLO | on | none (web login loop / credential JSON import) |
+| Bailian | opt-in | Web UI: paste the API key on the Accounts page after selecting the Bailian channel |
 
 If the paths are wrong you can point them with `CB_AUTH_DIR`, `CB_QCLAW_AUTH_DIR`, `CB_QWENWORK_AUTH_DIR`, `CB_TRAEWORK_AUTH_DIR`. Don't put the four channels' login files in the same directory. Trae SOLO's credential JSON can be scanned from a directory set via `CB_TRAESOLO_AUTH_DIR` (optional).
 
@@ -297,6 +298,7 @@ Pin the admin token so the browser cookie survives restarts: edit `config.toml` 
 | Variable | Description |
 |---|---|
 | `CB_GATEWAY_PROVIDERS` | Which channels to enable, comma-separated. Default `workbuddy,qclaw,qwenwork,traework,traesolo`. GMI is opt-in; enable by appending `gmi`: `workbuddy,qclaw,qwenwork,traework,traesolo,gmi` |
+| `CB_BAILIAN_API_KEY` | Alibaba Bailian API key (opt-in channel; paste in the admin UI or set this env var; auto-imported when no active account exists) |
 | `CB_GATEWAY_AUTO_IMPORT` | Set `1` to auto-scan and import accounts on startup. Default `0` |
 | `CB_GATEWAY_CHECKIN_GAP_MS` | Milliseconds between adjacent accounts during one-click checkin (anti-risk; don't set too small). Default `800` |
 | `CB_GATEWAY_ADMIN_TOKEN` | Fixed admin token. Default auto-generated (printed once at startup; paste into admin UI "Settings" once to get a cookie) |

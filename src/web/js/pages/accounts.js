@@ -3,9 +3,9 @@ import {I} from '../icons.js';
 const{ref,reactive,computed,onMounted}=Vue;
 
 export default {props:['token','toast'],setup(p){
-  const l=ref([]),ld=ref(true),sa=ref(false),ai=ref(''),nm=ref(''),disc=ref(null),dl=ref(false),scanning=ref(false),adding=ref(false),authPath=ref(''),test=ref(null),tl=ref(0),busy=ref({}),discChannel=ref('workbuddy'),channels=ref([{id:'workbuddy',display_name:'WorkBuddy'},{id:'qclaw',display_name:'QClaw'},{id:'qwenwork',display_name:'QwenWork / 千问办公'},{id:'traework',display_name:'TraeWork'},{id:'traesolo',display_name:'Trae SOLO'},{id:'gmi',display_name:'GMI Cloud'}]);
+  const l=ref([]),ld=ref(true),sa=ref(false),ai=ref(''),nm=ref(''),disc=ref(null),dl=ref(false),scanning=ref(false),adding=ref(false),authPath=ref(''),test=ref(null),tl=ref(0),busy=ref({}),discChannel=ref('workbuddy'),channels=ref([{id:'workbuddy',display_name:'WorkBuddy'},{id:'qclaw',display_name:'QClaw'},{id:'qwenwork',display_name:'QwenWork / 千问办公'},{id:'traework',display_name:'TraeWork'},{id:'traesolo',display_name:'Trae SOLO'},{id:'gmi',display_name:'GMI Cloud'},{id:'bailian',display_name:'阿里百炼'}]);
   // API Key 类通道（单 key、无本机登录文件）：选中时渲染粘贴导入面板而非文件检测 UI。
-  const APIKEY_CHANNELS={'gmi':{name:'GMI Cloud',base:'https://api.gmi-serving.com/v1',env:'CB_GMI_API_KEY'}};
+  const APIKEY_CHANNELS={'gmi':{name:'GMI Cloud',base:'https://api.gmi-serving.com/v1',env:'CB_GMI_API_KEY'},'bailian':{name:'阿里百炼',base:'https://llm-7dqe434wikmhz0wa.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',env:'CB_BAILIAN_API_KEY'}};
   const gmiKey=ref(''),gmiNick=ref(''),gmiBase=ref(''),gmiBusy=ref(false);
   const gmiMode=computed(()=>APIKEY_CHANNELS[discChannel.value]?discChannel.value:'');
   const APIKEY_PANEL=computed(()=>APIKEY_CHANNELS[gmiMode.value]||{name:'',base:'',env:''});

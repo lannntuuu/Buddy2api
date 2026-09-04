@@ -29,6 +29,8 @@ from providers.traesolo.constants import ALIASES as _TRAESOLO_DEFAULT_ALIASES
 from providers.traesolo.constants import STATIC_MODELS as _TRAESOLO_DEFAULT_MODELS
 from providers.gmi.constants import ALIASES as _GMI_DEFAULT_ALIASES
 from providers.gmi.constants import STATIC_MODELS as _GMI_DEFAULT_MODELS
+from providers.bailian.constants import ALIASES as _BAILIAN_DEFAULT_ALIASES
+from providers.bailian.constants import STATIC_MODELS as _BAILIAN_DEFAULT_MODELS
 
 logger = logging.getLogger(__name__)
 
@@ -348,6 +350,7 @@ _CHANNEL_DEFAULTS: dict[str, tuple[list[str], dict[str, str]]] = {
     "traework": (list(_TRAEWORK_DEFAULT_MODELS), dict(_TRAEWORK_DEFAULT_ALIASES)),
     "traesolo": (list(_TRAESOLO_DEFAULT_MODELS), dict(_TRAESOLO_DEFAULT_ALIASES)),
     "gmi": (list(_GMI_DEFAULT_MODELS), dict(_GMI_DEFAULT_ALIASES)),
+    "bailian": (list(_BAILIAN_DEFAULT_MODELS), dict(_BAILIAN_DEFAULT_ALIASES)),
 }
 
 

@@ -24,6 +24,7 @@ python -m src.gateway.server
 | TraeWork | 寮€ | `%APPDATA%\TRAE SOLO CN\User\globalStorage` |
 | Trae SOLO | 寮€ | 鏃狅紙Web 鐧诲綍闂幆 / 鍑瘉 JSON 瀵煎叆锛?|
 | GMI | 鍏筹紙opt-in锛?| Web 閰嶇疆锛氳处鍙烽〉閫?GMI 閫氶亾鍚庣矘 API Key 鍗冲彲 |
+| Bailian | 关(opt-in) | Web 配置：账号页选 Bailian 通道后粘贴 API Key 即可 |
 
 璺緞涓嶅鏃跺彲鐢?`CB_AUTH_DIR`銆乣CB_QCLAW_AUTH_DIR`銆乣CB_QWENWORK_AUTH_DIR`銆乣CB_TRAEWORK_AUTH_DIR` 鎸囧畾銆傚洓涓€氶亾鐨勭櫥褰曟枃浠朵笉瑕佹贩鍦ㄥ悓涓€涓洰褰曘€俆rae SOLO 鐨勫嚟璇?JSON 鍙敤 `CB_TRAESOLO_AUTH_DIR` 鎸囧畾鎵弿鐩綍锛堝彲閫夛級銆侴MI 涓嶈鏈満鐧诲綍鐩綍锛岄潬绠＄悊椤靛鍏?API Key銆?
 
@@ -302,6 +303,7 @@ path = "/var/lib/buddy2api/codebuddy_gateway.db"
 | 鍙橀噺 | 璇存槑 |
 |---|---|
 | `CB_GATEWAY_PROVIDERS` | 鍚敤鍝簺閫氶亾锛岄€楀彿鍒嗛殧銆傞粯璁?`workbuddy,qclaw,qwenwork,traework,traesolo`銆侴MI 涓嶅湪榛樿閲岋紝鍚敤鍔犲湪鏈熬锛歚workbuddy,qclaw,qwenwork,traework,traesolo,gmi` |
+| `CB_BAILIAN_API_KEY` | 阿里百炼 API Key（opt-in 通道：账号页粘贴或此环境变量导入；无活跃账号时自动导入） |
 | `CB_GATEWAY_AUTO_IMPORT` | 璁?`1` 鍒欏惎鍔ㄦ椂鑷姩鎵弿瀵煎叆璐﹀彿銆傞粯璁?`0` |
 | `CB_GATEWAY_CHECKIN_GAP_MS` | 涓€閿鍙栨椂鐩搁偦璐﹀彿鐨勯棿闅旀绉掞紙闃查鎺э紝涓嶅彲璁惧お灏忥級銆傞粯璁?`800` |
 | `CB_GATEWAY_ADMIN_TOKEN` | 鍥哄畾绠＄悊 Token銆傞粯璁よ嚜鍔ㄧ敓鎴愶紙鍚姩鏃ュ織鎵撳嵃涓€娆★紝绠＄悊椤点€岃缃€嶇矘璐翠竴娆″嵆鍙嬁 Cookie锛?|

@@ -5,7 +5,7 @@ const{ref,reactive,computed,onMounted,onBeforeUnmount,nextTick,watch}=Vue;
 export default {props:['token','toast','saveToken'],setup(p){
   const defaults={backend_url:'https://copilot.tencent.com',default_domain:'www.codebuddy.cn',timeout:300};
   const s=ref({...defaults,base_url:'http://127.0.0.1:8787/v1',admin_auth:'本机 Cookie 自动验证'}),ld=ref(true),saving=ref(false),adminToken=ref(p.token||'');
-  const hostOverrides=reactive({gmi:{base_url:''},qwenwork:{gateway:''},qclaw:{jprx_gateway:'',aizone_base:''},traesolo:{oauth_host:'',console_host:'',agent_host:''},traework:{agent_host:'',ug_host:''}});
+  const hostOverrides=reactive({gmi:{base_url:''},bailian:{base_url:''},qwenwork:{gateway:''},qclaw:{jprx_gateway:'',aizone_base:''},traesolo:{oauth_host:'',console_host:'',agent_host:''},traework:{agent_host:'',ug_host:''}});
 
   // Channels panel -- collapsed by default. Native <details> for a11y.
   const chs=ref([]),chLd=ref(false),chBusy=ref(false),chErr=ref(''),
@@ -16,6 +16,7 @@ export default {props:['token','toast','saveToken'],setup(p){
   function fillHosts(){
     const ch=s.value.channel_hosts||{};
     hostOverrides.gmi.base_url=ch.gmi?.base_url||'';
+    hostOverrides.bailian.base_url=ch.bailian?.base_url||'';
     hostOverrides.qwenwork.gateway=ch.qwenwork?.gateway||'';
     hostOverrides.qclaw.jprx_gateway=ch.qclaw?.jprx_gateway||'';
     hostOverrides.qclaw.aizone_base=ch.qclaw?.aizone_base||'';
@@ -26,7 +27,7 @@ export default {props:['token','toast','saveToken'],setup(p){
     hostOverrides.traework.ug_host=ch.traework?.ug_host||'';
   }
   async function load(){ld.value=true;try{const cfg=await api.get('/admin/settings',p.token);s.value={...s.value,...cfg};fillHosts()}catch(e){p.toast(apiErr(e,'加载失败'),'err')}ld.value=false}
-  async function save(){if(saving.value)return;saving.value=true;try{await api.put('/admin/settings',{backend_url:s.value.backend_url,default_domain:s.value.default_domain,timeout:Number(s.value.timeout)||300,channel_hosts:{gmi:{base_url:hostOverrides.gmi.base_url.trim()},qwenwork:{gateway:hostOverrides.qwenwork.gateway.trim()},qclaw:{jprx_gateway:hostOverrides.qclaw.jprx_gateway.trim(),aizone_base:hostOverrides.qclaw.aizone_base.trim()},traesolo:{oauth_host:hostOverrides.traesolo.oauth_host.trim(),console_host:hostOverrides.traesolo.console_host.trim(),agent_host:hostOverrides.traesolo.agent_host.trim()},traework:{agent_host:hostOverrides.traework.agent_host.trim(),ug_host:hostOverrides.traework.ug_host.trim()}}},p.token);p.toast('已保存')}catch(e){p.toast(apiErr(e,'保存失败'),'err')}saving.value=false}
+  async function save(){if(saving.value)return;saving.value=true;try{await api.put('/admin/settings',{backend_url:s.value.backend_url,default_domain:s.value.default_domain,timeout:Number(s.value.timeout)||300,channel_hosts:{gmi:{base_url:hostOverrides.gmi.base_url.trim()},bailian:{base_url:hostOverrides.bailian.base_url.trim()},qwenwork:{gateway:hostOverrides.qwenwork.gateway.trim()},qclaw:{jprx_gateway:hostOverrides.qclaw.jprx_gateway.trim(),aizone_base:hostOverrides.qclaw.aizone_base.trim()},traesolo:{oauth_host:hostOverrides.traesolo.oauth_host.trim(),console_host:hostOverrides.traesolo.console_host.trim(),agent_host:hostOverrides.traesolo.agent_host.trim()},traework:{agent_host:hostOverrides.traework.agent_host.trim(),ug_host:hostOverrides.traework.ug_host.trim()}}},p.token);p.toast('已保存')}catch(e){p.toast(apiErr(e,'保存失败'),'err')}saving.value=false}
   function resetDefaults(){s.value={...s.value,backend_url:defaults.backend_url,default_domain:defaults.default_domain,timeout:defaults.timeout};p.toast('已恢复默认','info')}
   async function saveAdminToken(){
     const t=adminToken.value.trim();
@@ -131,6 +132,9 @@ export default {props:['token','toast','saveToken'],setup(p){
         <div class="field"><label>GMI Cloud Base URL</label>
           <input v-model="hostOverrides.gmi.base_url" placeholder="留空使用默认 https://api.gmi-serving.com/v1"/>
           <div class="hint">自定义 GMI 上游地址（镜像/反代）。留空 = 默认。</div></div>
+        <div class="field"><label>阿里百炼 Base URL</label>
+          <input v-model="hostOverrides.bailian.base_url" placeholder="留空使用默认 https://llm-7dqe434wikmhz0wa.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"/>
+          <div class="hint">自定义阿里百炼上游地址（MaaS 专属实例）。留空 = 默认。</div></div>
         <div class="field"><label>QwenWork 网关</label>
           <input v-model="hostOverrides.qwenwork.gateway" placeholder="留空使用默认 https://gateway.qwenwork.cn"/>
           <div class="hint">自定义 QwenWork 网关地址。留空 = 默认。</div></div>

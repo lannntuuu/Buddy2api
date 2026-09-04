@@ -12,6 +12,7 @@ from storage import database as db
 # channels (qclaw, traesolo, traework).
 CHANNEL_HOST_FIELDS: dict[str, tuple[str, ...]] = {
     "gmi": ("base_url",),
+    "bailian": ("base_url",),
     "qwenwork": ("gateway",),
     "qclaw": ("jprx_gateway", "aizone_base"),
     "traesolo": ("oauth_host", "console_host", "agent_host"),

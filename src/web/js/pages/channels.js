@@ -66,7 +66,7 @@ export default {props:['token','toast'],setup(p){
     catch(e){p.toast('重置失败：'+apiErr(e),'err')}
     setChBusy(c,false);
   }
-  function canRefreshOfficial(c){return c&&(c.channel==='traesolo'||c.channel==='gmi')}
+  function canRefreshOfficial(c){return c&&(c.channel==='traesolo'||c.channel==='gmi'||c.channel==='bailian')}
   async function refreshOfficialModels(){
     const c=chOf();if(!c||chBusyOf(c)||!canRefreshOfficial(c))return;
     setChBusy(c,true);

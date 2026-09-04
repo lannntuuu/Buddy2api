@@ -16,6 +16,7 @@ from providers.traework import PROVIDER as TRAEWORK_PROVIDER
 from providers.traesolo import PROVIDER as TRAESOLO_PROVIDER
 from providers.workbuddy import PROVIDER as WORKBUDDY_PROVIDER
 from providers.gmi import PROVIDER as GMI_PROVIDER
+from providers.bailian import PROVIDER as BAILIAN_PROVIDER
 
 # Canonical default order when the operator has neither set the env var nor
 # saved anything via the Web UI. workbuddy is intentionally first.
@@ -24,7 +25,7 @@ DEFAULT_PROVIDER_IDS: tuple[str, ...] = ("workbuddy", "qclaw", "qwenwork", "trae
 # Extra providers that ship with the gateway but are NOT on by default —
 # opt in via CB_GATEWAY_PROVIDERS (e.g. "workbuddy,qclaw,gmi"). ponytail:
 # keeping these opt-in avoids surprising users who never asked for them.
-OPT_IN_PROVIDER_IDS: tuple[str, ...] = ("gmi",)
+OPT_IN_PROVIDER_IDS: tuple[str, ...] = ("gmi", "bailian")
 
 _LOADED: dict[str, Provider] = {
     "workbuddy": WORKBUDDY_PROVIDER,
@@ -33,6 +34,7 @@ _LOADED: dict[str, Provider] = {
     "traework": TRAEWORK_PROVIDER,
     "traesolo": TRAESOLO_PROVIDER,
     "gmi": GMI_PROVIDER,
+    "bailian": BAILIAN_PROVIDER,
 }
 
 # Settings-table keys for UI-driven overrides.

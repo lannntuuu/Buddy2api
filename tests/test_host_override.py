@@ -6,17 +6,26 @@ from storage import database as db
 def test_default_when_unset(monkeypatch):
     monkeypatch.setattr(db, "get_setting", lambda k, d=None: d)
     assert channel_host("gmi", "base_url", "https://default") == "https://default"
+    assert channel_host("bailian", "base_url", "https://default") == "https://default"
     assert channel_host("qwenwork", "gateway", "https://default") == "https://default"
 
 def test_override_when_set(monkeypatch):
     monkeypatch.setattr(db, "get_setting",
         lambda k, d=None: {"gmi": {"base_url": "https://mirror.example.com/v1"}})
     assert channel_host("gmi", "base_url", "https://default") == "https://mirror.example.com/v1"
+    assert channel_host("bailian", "base_url", "https://default") == "https://default"
     assert channel_host("qwenwork", "gateway", "https://default") == "https://default"
+
+def test_override_bailian_when_set(monkeypatch):
+    monkeypatch.setattr(db, "get_setting",
+        lambda k, d=None: {"bailian": {"base_url": "https://bailian.mirror.example.com/v1"}})
+    assert channel_host("bailian", "base_url", "https://default") == "https://bailian.mirror.example.com/v1"
+    assert channel_host("gmi", "base_url", "https://default") == "https://default"
 
 def test_channel_host_fields():
     assert CHANNEL_HOST_FIELDS == {
         "gmi": ("base_url",),
+        "bailian": ("base_url",),
         "qwenwork": ("gateway",),
         "qclaw": ("jprx_gateway", "aizone_base"),
         "traesolo": ("oauth_host", "console_host", "agent_host"),
