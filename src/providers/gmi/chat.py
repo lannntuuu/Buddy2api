@@ -191,6 +191,20 @@ def _record(api_key_info: dict | None, account: dict | None, *,
             error_msg: str = "", t0: float = 0.0, usage_payload: dict | None = None):
     """Fire-and-forget log write — mirrors upstream/proxy._log_request."""
     elapsed_ms = int((time.time() - t0) * 1000) if t0 else 0
+    cache_read, cache_creation = 0, 0
+    try:
+        from providers.store_common import extract_cache_tokens
+        cache_read, cache_creation = extract_cache_tokens(usage_payload)
+    except Exception:
+        pass
+    _known_cache_keys = (
+        "cache_read_input_tokens", "cache_creation_input_tokens",
+        "prompt_cache_hit_tokens", "prompt_cache_miss_tokens",
+        "prompt_tokens_details",
+    )
+    credit_source = (
+        "live" if usage_payload and any(k in usage_payload for k in _known_cache_keys) else None
+    )
     payload = {
         "api_key_id": (api_key_info or {}).get("id"),
         "api_key_name": (api_key_info or {}).get("name"),
@@ -202,6 +216,8 @@ def _record(api_key_info: dict | None, account: dict | None, *,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
+        "cache_read_tokens": cache_read,
+        "cache_creation_tokens": cache_creation,
         "credit": 0,
         "finish_reason": finish_reason,
         "duration_ms": elapsed_ms,
@@ -210,7 +226,7 @@ def _record(api_key_info: dict | None, account: dict | None, *,
         "client": (api_key_info or {}).get("_client_tag"),
         "client_version": (api_key_info or {}).get("_client_version"),
         "usage_json": json.dumps(usage_payload, ensure_ascii=False) if usage_payload else None,
-        "credit_source": None,
+        "credit_source": credit_source,
         "increment_usage": True,
     }
     try:

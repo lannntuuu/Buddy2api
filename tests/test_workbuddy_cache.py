@@ -1,7 +1,7 @@
 """WorkBuddy cache_read 统计补全测试（对应 docs/workbuddy-cache-tracking-plan.md）。
 
 覆盖：
-  - _extract_cache_tokens：三种字段风格 / 混合优先级 / 负值 clamp / 越界截断 / 空 None
+  - _extract_cache_tokens：三种字段风格 / 混合取最大非零 / 负值 clamp / 越界截断 / 空 None
   - _log_request 带 usage：log_data 含 cache 字段 + usage_json + credit_source 判定
   - Responses 流：input_tokens_details.cached_tokens 透传真值
 """
@@ -47,15 +47,18 @@ def test_extract_cache_openai_style():
     assert proxy._extract_cache_tokens(usage) == (250, 0)
 
 
-def test_extract_cache_mixed_prefers_anthropic():
-    # 同时带三种风格时，Anthropic 优先
+def test_extract_cache_mixed_takes_max_nonzero():
+    # 2026-09 语义更新：上游（copilot.tencent.com）同时返回三种风格字段，
+    # 其中 cache_read_input_tokens 是恒 0 占位；旧实现按优先级短路返回 0，
+    # 丢弃了 prompt_cache_hit_tokens 里的真实命中（DB 实证每条可达 7 万 token）。
+    # 新实现取三种候选的最大非零值，见 providers/store_common.extract_cache_tokens。
     usage = {
         "prompt_tokens": 1000,
         "cache_read_input_tokens": 400,
         "prompt_cache_hit_tokens": 999,
         "prompt_tokens_details": {"cached_tokens": 888},
     }
-    assert proxy._extract_cache_tokens(usage) == (400, 0)
+    assert proxy._extract_cache_tokens(usage) == (999, 0)
 
 
 def test_extract_cache_negative_clamped():
