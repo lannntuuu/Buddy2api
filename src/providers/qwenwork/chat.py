@@ -56,7 +56,13 @@ def _ids(account: dict) -> tuple[str, str, str, str]:
 
 
 def _log(api_key_info, account, model_name, stream, prompt_t, completion_t, total_t,
-         finish_reason, status_code, error_msg, t0, increment_usage=True):
+         finish_reason, status_code, error_msg, t0, increment_usage=True, usage=None):
+    # 缓存命中提取（三种风格取最大非零值，见 store_common.extract_cache_tokens）
+    try:
+        from providers.store_common import extract_cache_tokens
+        cache_read, cache_creation = extract_cache_tokens(usage if isinstance(usage, dict) else None)
+    except Exception:
+        cache_read, cache_creation = 0, 0
     rate = channel_credit_rate(CHANNEL_ID)
     credit = round(total_t / rate, 6) if rate else 0
     try:
@@ -72,6 +78,8 @@ def _log(api_key_info, account, model_name, stream, prompt_t, completion_t, tota
                 "prompt_tokens": prompt_t,
                 "completion_tokens": completion_t,
                 "total_tokens": total_t,
+                "cache_read_tokens": cache_read,
+                "cache_creation_tokens": cache_creation,
                 "credit": credit,
                 "finish_reason": finish_reason,
                 "duration_ms": int((time.time() - t0) * 1000),
@@ -421,7 +429,7 @@ async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
                 int(usage.get("completion_tokens") or 0),
                 int(usage.get("total_tokens") or 0),
                 aggregated["choices"][0].get("finish_reason") or "stop",
-                200, "", t0,
+                200, "", t0, usage=usage,
             )
             return ("json", aggregated)
         except httpx.HTTPError as exc:
@@ -502,7 +510,7 @@ async def _stream(raw: str, url: str, request_id: str, upstream_model: str, api_
                     int(usage.get("prompt_tokens") or 0),
                     int(usage.get("completion_tokens") or 0),
                     int(usage.get("total_tokens") or (usage.get("prompt_tokens") or 0) + (usage.get("completion_tokens") or 0)),
-                    "stop", 200, "", t0,
+                    "stop", 200, "", t0, usage=usage,
                 )
             else:
                 _log(api_key_info, account, model_name, True, 0, 0, 0, "stop", 200, "", t0)
