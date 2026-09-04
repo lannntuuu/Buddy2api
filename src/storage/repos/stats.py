@@ -71,6 +71,7 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
             "cache_creation_tokens": 0,
             "credit": 0.0,
             "duration_ms": 0,
+            "cache_hit_ratio": 0.0,
         }
 
     def _add(target: dict, row: dict) -> None:
@@ -85,6 +86,11 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
 
     def _finalize(s: dict) -> dict:
         requests = max(1, s["requests"])
+        ratio = (
+            (s["cache_read_tokens"] / s["prompt_tokens"])
+            if s["prompt_tokens"] > 0
+            else None
+        )
         return {
             "requests": s["requests"],
             "prompt_tokens": s["prompt_tokens"],
@@ -95,6 +101,7 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
             "credit": round(s["credit"], 4),
             "duration_ms": s["duration_ms"],
             "avg_duration_ms": int(s["duration_ms"] / requests),
+            "cache_hit_ratio": round(ratio, 4) if ratio is not None else None,
         }
 
     providers_out: dict[str, dict] = {}
@@ -109,18 +116,26 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
         if m not in prov_bucket["models"]:
             prov_bucket["models"][m] = {"daily": [], "summary": _new_summary()}
         model_bucket = prov_bucket["models"][m]
+        daily_prompt = int(row["prompt_tokens"] or 0)
+        daily_cache_read = int(row["cache_read_tokens"] or 0)
+        daily_ratio = (
+            (daily_cache_read / daily_prompt) if daily_prompt > 0 else None
+        )
         model_bucket["daily"].append(
             {
                 "date": row["date"],
                 "requests": int(row["requests"] or 0),
-                "prompt_tokens": int(row["prompt_tokens"] or 0),
+                "prompt_tokens": daily_prompt,
                 "completion_tokens": int(row["completion_tokens"] or 0),
                 "total_tokens": int(row["total_tokens"] or 0),
-                "cache_read_tokens": int(row["cache_read_tokens"] or 0),
+                "cache_read_tokens": daily_cache_read,
                 "cache_creation_tokens": int(row["cache_creation_tokens"] or 0),
                 "credit": round(float(row["credit"] or 0), 4),
                 "avg_duration_ms": (
                     int(row["duration_ms"] / row["requests"]) if row["requests"] else 0
+                ),
+                "cache_hit_ratio": (
+                    round(daily_ratio, 4) if daily_ratio is not None else None
                 ),
             }
         )

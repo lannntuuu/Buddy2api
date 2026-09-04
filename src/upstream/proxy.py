@@ -65,6 +65,7 @@ from upstream.compaction import (  # noqa: E402,F401
 
 from storage import database as db
 from accounts import auth_manager
+from providers.store_common import extract_cache_tokens
 
 BACKEND = "https://copilot.tencent.com"
 RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -553,51 +554,20 @@ class _SSEEventDecoder:
         self._event_bytes = 0
 
 
-def _extract_cache_tokens(usage: dict | None) -> tuple[int, int]:
-    """从上游 usage 提取 (cache_read, cache_creation)，兼容三种字段风格。
+_extract_cache_tokens = extract_cache_tokens
 
-    优先级：Anthropic → DeepSeek → OpenAI。
-      - Anthropic: cache_read_input_tokens / cache_creation_input_tokens
-      - DeepSeek:  prompt_cache_hit_tokens(→cache_read) / prompt_cache_miss_tokens(→creation 不计入)
-      - OpenAI:    prompt_tokens_details.cached_tokens(→cache_read)，无 creation 概念
-    全部缺省返回 (0, 0)。负值 clamp 到 0；cache_read 不超过 prompt_tokens（cache_read 是 prompt 子集）。
-    """
-    if not usage or not isinstance(usage, dict):
-        return (0, 0)
-
-    cache_read = 0
-    cache_creation = 0
-
-    # 1) Anthropic 风格
-    ar = usage.get("cache_read_input_tokens")
-    ac = usage.get("cache_creation_input_tokens")
-    if ar is not None or ac is not None:
-        cache_read = int(ar) if ar is not None else 0
-        cache_creation = int(ac) if ac is not None else 0
-        return (
-            max(0, min(cache_read, int(usage.get("prompt_tokens", 0) or 0))),
-            max(0, cache_creation),
-        )
-
-    # 2) DeepSeek 风格
-    dh = usage.get("prompt_cache_hit_tokens")
-    if dh is not None:
-        cache_read = int(dh)
-        return (
-            max(0, min(cache_read, int(usage.get("prompt_tokens", 0) or 0))),
-            0,
-        )
-
-    # 3) OpenAI 风格
-    ptd = usage.get("prompt_tokens_details")
-    if isinstance(ptd, dict) and ptd.get("cached_tokens") is not None:
-        cache_read = int(ptd["cached_tokens"])
-        return (
-            max(0, min(cache_read, int(usage.get("prompt_tokens", 0) or 0))),
-            0,
-        )
-
-    return (0, 0)
+# 上游各模型的原生默认思考档位（未显式注入 reasoning_effort 时的真实档位）。
+# 来源：docs/design/per-model-reasoning-effort.md §2 探针实测（2026-02-25）：
+#   deepseek-v4-flash / glm-5.2 / auto 默认不思考（0 reasoning tokens）→ none；
+#   kimi-k2.7 默认轻思考（44 tok）→ minimal；deepseek-v4-pro 与 flash 同系 → none。
+# 未知模型 → "upstream"（前端显示"上游默认"）。
+_UPSTREAM_DEFAULT_REASONING = {
+    "deepseek-v4-pro": "none",
+    "deepseek-v4-flash": "none",
+    "glm-5.2": "none",
+    "auto": "none",
+    "kimi-k2.7": "minimal",
+}
 
 
 def _log_request(api_key_info, account, model_name, stream,
@@ -607,6 +577,8 @@ def _log_request(api_key_info, account, model_name, stream,
                   usage: dict | None = None,
                   reasoning_effort: str | None = None):
     elapsed_ms = int((time.time() - t0) * 1000)
+    if not reasoning_effort:
+        reasoning_effort = _UPSTREAM_DEFAULT_REASONING.get(model_name, "upstream")
     log_data = {
         "api_key_id": api_key_info["id"] if api_key_info else None,
         "api_key_name": api_key_info["name"] if api_key_info else None,

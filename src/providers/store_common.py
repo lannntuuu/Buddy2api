@@ -232,3 +232,41 @@ def checkin_row(
         "channel": channel,
         **(extra or {}),
     }
+
+
+def extract_cache_tokens(usage: dict | None) -> tuple[int, int]:
+    """从上游 usage 提取 (cache_read, cache_creation)：取三种风格候选字段的最大非零值。
+
+    背景（WorkBuddy 上游实测，2026-09 数据）：copilot.tencent.com 返回的 usage 同时携带
+    三种风格字段，其中 cache_read_input_tokens 是恒 0 的占位字段。旧的按优先级短路实现
+    第一步就命中 0 值并直接返回 (0, 0)，把 prompt_cache_hit_tokens /
+    prompt_tokens_details.cached_tokens 里的真实命中（每条可达 7 万 token）全部丢弃。
+    新逻辑：三个候选取最大非零值；cache_read 是 prompt 子集，clamp 到 [0, prompt_tokens]。
+    候选字段（均映射到 cache_read）：
+      - Anthropic: cache_read_input_tokens
+      - DeepSeek:  prompt_cache_hit_tokens
+      - OpenAI:    prompt_tokens_details.cached_tokens
+    cache_creation 仅 Anthropic 风格提供（其余风格无此概念）。
+    """
+    if not usage or not isinstance(usage, dict):
+        return (0, 0)
+
+    candidates: list[int] = []
+    ar = usage.get("cache_read_input_tokens")
+    if ar is not None:
+        candidates.append(int(ar))
+    dh = usage.get("prompt_cache_hit_tokens")
+    if dh is not None:
+        candidates.append(int(dh))
+    ptd = usage.get("prompt_tokens_details")
+    if isinstance(ptd, dict) and ptd.get("cached_tokens") is not None:
+        candidates.append(int(ptd["cached_tokens"]))
+
+    cache_read = max((c for c in candidates if c > 0), default=0)
+    ac = usage.get("cache_creation_input_tokens")
+    cache_creation = int(ac) if ac is not None else 0
+    prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+    return (
+        max(0, min(cache_read, prompt_tokens)),
+        max(0, cache_creation),
+    )

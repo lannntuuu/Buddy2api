@@ -49,7 +49,7 @@ export default {props:['token','toast'],setup(p){
     <div class="dash-grid thirds" style="margin-bottom:14px">
       <div class="metric"><div class="m-label">请求数</div><div class="m-value">{{n(data.totals?.requests)}}</div><div class="m-sub">所选时间范围合计</div></div>
       <div class="metric"><div class="m-label">Token 总量</div><div class="m-value">{{tok(data.totals?.total_tokens)}}</div><div class="m-sub">输入 {{tok(data.totals?.prompt_tokens)}} · 输出 {{tok(data.totals?.completion_tokens)}} · 缓存命中 {{tok(data.totals?.cache_read_tokens)}}</div></div>
-      <div class="metric"><div class="m-label">缓存命中率</div><div class="m-value">{{pct(data.totals?.cache_hit_ratio)}}</div><div class="m-sub">cache_read / (输入 - cache_read + cache_read)</div></div>
+      <div class="metric"><div class="m-label">缓存命中率</div><div class="m-value">{{pct(data.totals?.cache_hit_ratio)}}</div><div class="m-sub">cache_read / prompt_tokens</div></div>
     </div>
     <div class="card" v-if="hasData"><div class="table-scroll"><table>
       <thead><tr><th>平台 / 模型 / 日期</th><th>请求数</th><th>输入 Token</th><th>缓存命中 Token</th><th>缓存命中率</th><th>输出 Token</th><th>总 Token</th><th>Credit</th><th>平均耗时</th></tr></thead>
