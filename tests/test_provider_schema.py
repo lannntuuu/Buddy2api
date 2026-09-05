@@ -107,12 +107,14 @@ def test_disabled_channels_filtered_out(monkeypatch, isolated_db):
 
 
 def test_bailian_is_known_and_opt_in(monkeypatch, isolated_db):
-    """bailian mirrors gmi: a KNOWN channel that is opt-in, not on by default.
+    """bailian mirrors gmi: reachable once its definition exists, opt-in.
 
-    After the data-driven migration, bailian is no longer a built-in package
-    but a seed definition written into the `custom_channels` settings key
-    on first boot. The fixture calls `seed_initial_definitions()` to make
-    the channel reachable via `get_provider`.
+    After the data-driven migration, bailian is a plain data-driven custom
+    channel: its id is NOT a reserved literal (admins may delete the seed
+    definition and recreate it), and reachability comes solely from the
+    definition living in the `custom_channels` settings key. The fixture
+    calls `seed_initial_definitions()` to make the channel reachable via
+    `get_provider`.
     """
     import providers
     from providers import custom_channels
@@ -121,9 +123,9 @@ def test_bailian_is_known_and_opt_in(monkeypatch, isolated_db):
     custom_channels.seed_initial_definitions()
     custom_channels.invalidate_cache(None)
 
-    # Known channel set (literal) must still include bailian — that's the
-    # documentation set in providers.protocol.
-    assert "bailian" in providers.KNOWN_CHANNEL_IDS
+    # Not a reserved literal anymore — deletable/recreatable as a normal
+    # custom channel id.
+    assert "bailian" not in providers.KNOWN_CHANNEL_IDS
     # Not in the default ON set (opt-in).
     assert "bailian" not in providers.DEFAULT_PROVIDER_IDS
     # Opt-in via env → provider available and locked-respecting order.

@@ -418,18 +418,15 @@ async def admin_delete_custom_channel(
 ):
     """Remove a custom-channel definition. Set every account row for this
     provider to status='inactive' so the dispatcher stops using it (D6 —
-    keep logs). Refuse to delete seed channels; the admin should disable
-    them via the standard toggle."""
+    keep logs). Seed channels (gmi / bailian) are deletable too: deleting
+    leaves the settings key as an empty list, which is distinct from
+    "absent", so seed_initial_definitions() will NOT resurrect them on the
+    next boot."""
     _check_admin(authorization)
     cid = str(cid or "").strip()
     existing = custom_channels.get_definition(cid)
     if existing is None:
         raise HTTPException(status_code=404, detail=f"channel '{cid}' not found")
-    if existing.get("source") == "seed":
-        raise HTTPException(
-            status_code=409,
-            detail=f"channel '{cid}' is seeded and cannot be deleted; disable via the channel toggle",
-        )
 
     # Inactive every account row (preserve rows for log forensics, D6).
     inactive_count = 0
