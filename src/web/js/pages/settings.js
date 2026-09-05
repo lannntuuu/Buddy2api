@@ -130,7 +130,7 @@ export default {props:['token','toast','saveToken'],setup(p){
         <div class="field"><label>QwenWork 网关</label>
           <input v-model="hostOverrides.qwenwork.gateway" placeholder="留空使用默认 https://gateway.qwenwork.cn"/>
           <div class="hint">自定义 QwenWork 网关地址。留空 = 默认。</div></div>
-        <div class="hint" style="grid-column:1/-1">GMI / 阿里百炼 Base URL 改去「通道与模型 → 自定义渠道」编辑对应渠道定义；本页不再托管。</div>
+        <div class="hint" style="grid-column:1/-1">GMI / 阿里百炼 Base URL 改去「通道与模型 → 自定义通道」编辑对应通道定义；本页不再托管。</div>
       </div>
       <div class="card-p">
         <details>

@@ -38,7 +38,7 @@ export default {props:['token','toast'],setup(p){
   function addModelRow(c){c.modelRows.push({id:''})}
   function rmModelRow(c,i){c.modelRows.splice(i,1)}
 
-  // 自定义渠道（OpenAI 兼容 / 「一个 URL + 一个 Key」类）CRUD
+  // 自定义通道（OpenAI 兼容 / 「一个 URL + 一个 Key」类）CRUD
   const ccList=ref([]),ccLd=ref(false),ccBusy=ref(false),ccErr=ref('');
   const ccEditing=ref(null);  // {id, display_name, base_url, models, aliases, env_api_key, api_key, source}
   const ccForm=ref({mode:'create',draft:emptyCcDraft(),warning:null});
@@ -47,7 +47,7 @@ export default {props:['token','toast'],setup(p){
   async function loadCCAll(){
     ccLd.value=true;ccErr.value='';
     try{const r=await api.get('/admin/channels/custom',p.token);ccList.value=r.channels||[]}
-    catch(e){ccErr.value=apiErr(e,'加载自定义渠道失败')}
+    catch(e){ccErr.value=apiErr(e,'加载自定义通道失败')}
     ccLd.value=false;
   }
   function ccStartCreate(){ccForm.value={mode:'create',draft:emptyCcDraft(),warning:null}}
@@ -92,14 +92,14 @@ export default {props:['token','toast'],setup(p){
     ccBusy.value=false;
   }
   async function ccDelete(c){
-    if(!confirm('删除自定义渠道 '+c.id+' ？该渠道账号行将全部置 inactive（D6）。'))return;
+    if(!confirm('删除自定义通道 '+c.id+' ？该通道账号行将全部置 inactive。'))return;
     try{
       await api.del('/admin/channels/custom/'+encodeURIComponent(c.id),p.token);
       p.toast('已删除 '+c.id);
       await Promise.all([loadCCAll(),loadAll()]);
     }catch(e){
       const m=String(e.message||'');
-      p.toast(m==='409'?'seed 渠道不允许删除，请用「启用通道」开关停用':'删除失败：'+apiErr(e),'err');
+      p.toast(m==='409'?'seed 通道不允许删除，请用「启用通道」开关停用':'删除失败：'+apiErr(e),'err');
     }
   }
 
@@ -284,14 +284,14 @@ export default {props:['token','toast'],setup(p){
       <div v-if="chOf().error" style="margin-top:10px;font-size:12px;color:var(--err)">{{chOf().error}}</div>
     </div>
   </div>
-  <div class="card" style="margin-top:16px"><div class="card-h">自定义渠道<span class="sub">OpenAI 兼容 · 一个 Base URL + 一个 API Key · Key 写 accounts 表，定义只存描述</span><div style="margin-left:auto;display:flex;gap:6px"><button class="btn s pri" @click="ccStartCreate" v-if="ccForm.mode==='edit'||!ccEditing"><span v-html="I.plus"></span>新增</button><button v-if="ccForm.mode!=='create'||ccEditing" class="btn s" @click="ccCancel">取消</button></div></div>
+  <div class="card" style="margin-top:16px"><div class="card-h">自定义通道<span class="sub">OpenAI 兼容 · 一个 Base URL + 一个 API Key · Key 写 accounts 表，定义只存描述</span><div style="margin-left:auto;display:flex;gap:6px"><button class="btn s pri" @click="ccStartCreate" v-if="ccForm.mode==='edit'||!ccEditing"><span v-html="I.plus"></span>新增</button><button v-if="ccForm.mode!=='create'||ccEditing" class="btn s" @click="ccCancel">取消</button></div></div>
     <div v-if="ccLd" class="load"><div class="spin"></div></div>
     <div v-else-if="ccErr" style="padding:16px;color:var(--err);font-size:12px">{{ccErr}}</div>
     <div v-else class="card-p">
       <div v-if="ccForm.mode==='edit'||ccEditing" style="margin-bottom:14px;border:1px solid var(--border);border-radius:6px;padding:12px;background:var(--bg-sunken)">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><strong style="font-family:var(--mono)">{{ccForm.mode==='create'?'新增自定义渠道':'编辑 '+ccForm.draft.id}}</strong><span class="hint" style="margin:0">{{ccForm.mode==='edit'?'带 * 字段可改；api_key 留空保留旧 Key':''}}</span></div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><strong style="font-family:var(--mono)">{{ccForm.mode==='create'?'新增自定义通道':'编辑 '+ccForm.draft.id}}</strong><span class="hint" style="margin:0">{{ccForm.mode==='edit'?'带 * 字段可改；api_key 留空保留旧 Key':''}}</span></div>
         <div class="form-grid">
-            <div class="field"><label>渠道 ID *</label><input v-model="ccForm.draft.id" :disabled="ccForm.mode==='edit'" placeholder="小写字母数字下划线连字符，32 字以内"/></div>
+            <div class="field"><label>通道 ID *</label><input v-model="ccForm.draft.id" :disabled="ccForm.mode==='edit'" placeholder="小写字母数字下划线连字符，32 字以内"/></div>
             <div class="field"><label>显示名称 *</label><input v-model="ccForm.draft.display_name" placeholder="如 内部代理 / 第三方镜像"/></div>
             <div class="field"><label>Base URL *<span class="hint" style="margin:0">https:// 或 http://127.0.0.1[:port]/localhost[:port]</span></label><input v-model="ccForm.draft.base_url" placeholder="https://api.example.com/v1"/></div>
             <div class="field"><label>模型白名单 *<span class="hint" style="margin:0">逗号分隔，至少一个</span></label><input v-model="ccForm.draft.modelsText" placeholder="model-a, model-b, ..."/></div>
@@ -314,11 +314,11 @@ export default {props:['token','toast'],setup(p){
             <td style="font-family:var(--mono);font-size:12px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="Object.entries(c.aliases||{}).map(([k,v])=>k+'→'+v).join(', ')">{{Object.keys(c.aliases||{}).length}} 项</td>
             <td style="font-family:var(--mono);font-size:11px;color:var(--fg3)">{{c.env_api_key||'-'}}</td>
             <td><span v-if="c.source==='seed'" class="tag">seed</span><span v-else class="tag" style="background:var(--bg-sunken);color:var(--fg3)">user</span></td>
-            <td><button class="btn s" @click="ccStartEdit(c)">编辑</button><button class="btn s danger" style="margin-left:6px" @click="ccDelete(c)" :disabled="c.source==='seed'" :title="c.source==='seed'?'seed 渠道不允许删除，请用启用通道开关停用':''">{{c.source==='seed'?'删除(禁用)':'删除'}}</button></td>
+            <td><button class="btn s" @click="ccStartEdit(c)">编辑</button><button class="btn s danger" style="margin-left:6px" @click="ccDelete(c)" :disabled="c.source==='seed'" :title="c.source==='seed'?'seed 通道不允许删除，请用启用通道开关停用':''">{{c.source==='seed'?'删除(禁用)':'删除'}}</button></td>
           </tr>
         </tbody>
       </table></div>
-      <div v-else class="empty" style="padding:18px">尚无自定义渠道。点「新增」配置第一个兼容端点。</div>
+      <div v-else class="empty" style="padding:18px">尚无自定义通道。点「新增」配置第一个兼容端点。</div>
     </div>
   </div>
 </div>`};

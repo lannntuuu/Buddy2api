@@ -113,16 +113,16 @@ export default {props:['token','toast'],setup(p){
   onMounted(()=>{loadChannels();load();if(!keyMode.value)discover()});return{l,visibleAccounts,filters,ld,sa,ai,nm,disc,dl,scanning,adding,authPath,test,tl,busyKey,dirty,load,discover,scan,scanCustom,add,addApiKey,ref2,saveMeta,toggle,testOne,del,fmt,size,credit,tok,creditPct,tokenLife,clearPath,I,discChannel,channels,keyMode,keyKey,keyNick,keyBase,keyBusy,KEY_PANEL,solo,soloBusy,startSoloLogin,cancelSolo,completeSolo}
 },template:`
 <div>
-  <div class="phead"><h1>账号管理</h1><p>账号导入 · 调度权重与优先级 · 连通性测试（官方额度与积分领取在「额度与积分」页）</p></div>
+  <div class="phead"><h1>账号管理</h1><p>登录型通道导入账号 · API-Key 型通道配置上游密钥 · 调度权重与连通性测试（官方额度与积分领取在「额度与积分」页）</p></div>
   <div class="card">
-    <div class="card-h">本机登录检测<span class="sub">只显示文件信息，不显示 token</span></div>
+    <div class="card-h">本机登录检测<span class="sub" v-if="keyMode">{{KEY_PANEL.name}} 是密钥型通道：不读本机登录文件，在下方粘贴上游密钥</span><span class="sub" v-else>只显示文件信息，不显示 token</span></div>
     <div class="card-p">
       <div class="detect-summary">
         <div>
-          <div class="detect-title" v-if="keyMode">{{KEY_PANEL.name}} · API Key 导入</div>
+          <div class="detect-title" v-if="keyMode">{{KEY_PANEL.name}} · 上游密钥配置</div>
           <div class="detect-title" v-else-if="disc">检测到 {{disc.file_count}} 个登录文件，其中 {{disc.valid_count}} 个有效</div>
           <div class="detect-title" v-else>正在检测本机登录文件</div>
-          <div class="hint" v-if="keyMode">粘贴 API Key 即可入库。也支持环境变量 <span class="mono">{{KEY_PANEL.env}}</span>（无活跃账号时自动导入）。凭据不会回显，列表里只显示尾号。</div>
+          <div class="hint" v-if="keyMode">粘贴该平台的上游 API Key 即可入库。也支持环境变量 <span class="mono">{{KEY_PANEL.env}}</span>（无可用密钥时自动导入）。密钥不会回显，列表里只显示尾号。注意：这是上游通行证，与「API Keys」页发给客户端的网关 Key 是两回事。</div>
           <div class="hint" v-else>三个通道默认都能选。先选通道再检测导入；没登录的通道检测为空。启动默认不再自动入库。已导入账号默认只更新 token，不改权重/优先级。</div>
         </div>
         <div class="detect-actions" v-if="!keyMode">
@@ -135,13 +135,13 @@ export default {props:['token','toast'],setup(p){
         </div>
       </div>
       <div v-if="keyMode" class="notebox">
-        <div class="field"><label>API Key（支持裸 Key / "Bearer xxx" / {"api_key":"..."} 三种粘贴形态）</label><textarea v-model="keyKey" placeholder="粘贴 API Key" style="font-family:var(--mono)"></textarea></div>
+        <div class="field"><label>上游密钥（支持裸 Key / "Bearer xxx" / {"api_key":"..."} 三种粘贴形态）</label><textarea v-model="keyKey" placeholder="粘贴上游 API Key" style="font-family:var(--mono)"></textarea></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <div class="field" style="flex:1;min-width:180px"><label>昵称（可选）</label><input v-model="keyNick" placeholder="如 main"/></div>
-          <div class="field" style="flex:2;min-width:260px"><label>Base URL（可选，默认 {{KEY_PANEL.base||'由渠道定义决定'}}）</label><input v-model="keyBase" :placeholder="KEY_PANEL.base"/></div>
+          <div class="field" style="flex:2;min-width:260px"><label>Base URL（可选，默认 {{KEY_PANEL.base||'由通道定义决定'}}）</label><input v-model="keyBase" :placeholder="KEY_PANEL.base"/></div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
-          <button class="btn s pri" @click="addApiKey" :disabled="keyBusy">{{keyBusy?'导入中':'导入 API Key'}}</button>
+          <button class="btn s pri" @click="addApiKey" :disabled="keyBusy">{{keyBusy?'导入中':'保存密钥'}}</button>
           <button class="btn s" @click="keyKey='';keyNick='';keyBase=''">清空</button>
           <span class="hint" style="margin:0">导入后可在下方列表点「测试」验证连通性。</span>
         </div>
@@ -201,11 +201,11 @@ export default {props:['token','toast'],setup(p){
   </div>
   <div class="tbar"><button class="btn s" @click="load()" :disabled="ld"><span v-html="I.refresh"></span>{{ld?'刷新中':'刷新列表'}}</button><button class="btn s" @click="sa=true"><span v-html="I.plus"></span>高级手动添加</button><div class="spacer"></div><span class="tag" v-if="l.length">{{visibleAccounts.length}}/{{l.length}}个 · {{l.filter(a=>a.status==='active').length}}活跃</span></div>
   <div v-if="ld" class="load"><div class="spin"></div></div>
-  <div class="card" v-else-if="l.length"><div class="card-h">账号列表<span class="sub">调度权重 / 优先级 / 余额快照 · 官方额度与每日积分在「额度与积分」页</span></div><div class="card-p" style="padding-bottom:0"><div class="control-row"><input class="searchbox" v-model="filters.q" placeholder="搜索账号 / UID / 域名"/><select class="selectctl" v-model="filters.status"><option value="all">全部状态</option><option value="active">active</option><option value="inactive">inactive</option><option value="expired">expired</option></select><select class="selectctl" v-model="filters.sort"><option value="priority">优先级 / 权重</option><option value="requests">请求数高到低</option><option value="used">累计已用高到低</option></select><div class="spacer"></div><span class="tag">当前 {{visibleAccounts.length}} 条</span></div></div><div class="table-scroll"><table><thead><tr><th>账号</th><th>通道</th><th>UID</th><th>状态</th><th>权重</th><th>优先级</th><th>余额快照</th><th>Token 有效期</th><th>请求</th><th>Token</th><th>累计已用</th><th></th></tr></thead><tbody>
+  <div class="card" v-else-if="l.length"><div class="card-h">{{keyMode?KEY_PANEL.name+' 密钥':'账号列表'}}<span class="sub">{{keyMode?'上游密钥 · 尾号显示 · 用于该通道出站鉴权':'调度权重 / 优先级 / 余额快照 · 官方额度与每日积分在「额度与积分」页'}}</span></div><div class="card-p" style="padding-bottom:0"><div class="control-row"><input class="searchbox" v-model="filters.q" placeholder="搜索账号 / UID / 域名"/><select class="selectctl" v-model="filters.status"><option value="all">全部状态</option><option value="active">active</option><option value="inactive">inactive</option><option value="expired">expired</option></select><select class="selectctl" v-model="filters.sort"><option value="priority">优先级 / 权重</option><option value="requests">请求数高到低</option><option value="used">累计已用高到低</option></select><div class="spacer"></div><span class="tag">当前 {{visibleAccounts.length}} 条</span></div></div><div class="table-scroll"><table><thead><tr><th>账号</th><th>通道</th><th>UID</th><th>状态</th><th>权重</th><th>优先级</th><th>余额快照</th><th>Token 有效期</th><th>请求</th><th>Token</th><th>累计已用</th><th></th></tr></thead><tbody>
     <tr v-for="a in visibleAccounts" :key="a.id"><td style="font-weight:600">{{a.nickname||a.name}} <span class="tag warn" v-if="dirty(a)">未保存</span></td><td><span class="tag">{{a.provider||'workbuddy'}}</span></td><td class="mono">{{a.uid?.slice(0,8)}}…</td><td><span class="badge" :class="a.status">{{a.status}}</span></td><td><input class="numctl" v-model.number="a._weight" type="number" min="1" max="100"/></td><td><input class="numctl" v-model.number="a._priority" type="number" min="-100" max="100"/></td><td class="credit-cell"><input class="numctl credit" v-model.number="a._creditSnapshot" type="number" min="0" step="0.01" placeholder="0"/><div class="credit-meta" v-if="a.credit_snapshot>0">余 {{credit(a.credit_remaining)}} · 已用 {{creditPct(a)}}</div><div class="credit-meta" v-else-if="a.total_credits>0">累计消耗(估算) {{credit(a.total_credits)}}</div><div class="credit-meta" v-else>官方失败时可手动校准</div></td><td>{{tokenLife(a)}}</td><td>{{a.total_requests}}</td><td>{{tok(a.total_tokens)}}</td><td>{{credit(a.total_credits)}}</td><td><div class="ops"><button class="btn s" @click="saveMeta(a)" :disabled="!dirty(a)||busyKey(a.id,'save')">{{busyKey(a.id,'save')?'保存中':'保存'}}</button><button class="btn s" @click="toggle(a)" :disabled="busyKey(a.id,'toggle')">{{busyKey(a.id,'toggle')?'处理中':(a.status==='active'?'禁用':'启用')}}</button><button class="btn s" @click="testOne(a)" :disabled="tl===a.id">{{tl===a.id?'测试中':'测试'}}</button><button class="btn s" @click="ref2(a)" :disabled="busyKey(a.id,'refresh')">{{busyKey(a.id,'refresh')?'刷新中':'刷新'}}</button><button class="btn s danger" @click="del(a)">删除</button></div></td></tr>
     <tr v-if="!visibleAccounts.length"><td colspan="12" class="empty">没有匹配的账号</td></tr>
   </tbody></table></div></div>
-  <div class="card card-p empty" v-else><div class="em">🔌</div><p>暂无账号 · 从上方导入：登录文件类通道用「本机登录检测」，API Key 类通道（如 GMI Cloud）选中后直接粘贴导入</p></div>
+  <div class="card card-p empty" v-else><div class="em">🔌</div><p>暂无账号 · 登录文件类通道从上方「本机登录检测」导入；密钥型通道（GMI / 百炼 / 自定义）选中后直接粘贴上游密钥</p></div>
   <div class="ov" v-if="test" @click.self="test=null"><div class="modal"><div class="modal-h"><h3>账号测试 · {{test.account}}</h3><button class="x" @click="test=null">&times;</button></div><div class="modal-b"><div class="testbox"><div class="row"><span>状态</span><span><span class="badge" :class="test.result.ok?'ok':'err'">{{test.result.ok?'成功':'失败'}}</span></span></div><div class="row"><span>HTTP</span><span class="mono">{{test.result.status_code}}</span></div><div class="row"><span>耗时</span><span class="mono">{{test.result.duration_ms}}ms</span></div><div class="row" v-if="test.result.model"><span>模型</span><span class="mono">{{test.result.model}}</span></div><div class="row" v-if="test.result.usage"><span>Token</span><span class="mono">{{tok(test.result.usage.total_tokens)}}</span></div><div class="msg">{{test.result.message||'无返回内容'}}</div></div><div class="hint" style="margin-top:8px">测试会发送一次极短请求，并记录到请求日志。</div></div><div class="modal-f"><button class="btn pri" @click="test=null">关闭</button></div></div></div>
   <div class="ov" v-if="sa" @click.self="sa=false"><div class="modal"><div class="modal-h"><h3>高级手动添加</h3><button class="x" @click="sa=false">&times;</button></div><div class="modal-b"><div class="field"><label>名称</label><input v-model="nm" placeholder="可选"/></div><div class="field"><label>Auth JSON 或 API Key</label><textarea v-model="ai" placeholder="粘贴 .info 文件内容；单 key 通道可直接粘 API Key / Bearer xxx"></textarea><div class="hint">WorkBuddy 等登录文件通道粘完整 JSON；GMI 等单 key 通道可直接粘 API Key（自动识别）。</div></div></div><div class="modal-f"><button class="btn" @click="sa=false" :disabled="adding">取消</button><button class="btn pri" @click="add" :disabled="adding">{{adding?'添加中':'添加'}}</button></div></div></div>
 </div>`};

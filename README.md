@@ -428,8 +428,8 @@ Buddy2api/
 │  │  ├─ credential_crypto.py
 │  │  └─ fingerprint.py
 │  ├─ providers/            # 通道适配
-│  │  ├─ openai_compat.py   # OpenAI 兼容渠道基类（单 URL + 单 Key 形态）
-│  │  └─ custom_channels.py # 自定义渠道定义（settings 键 custom_channels；gmi / bailian 为内置 seed）
+│  │  ├─ openai_compat.py   # OpenAI 兼容通道基类（单 URL + 单 Key 形态）
+│  │  └─ custom_channels.py # 自定义通道定义（settings 键 custom_channels；gmi / bailian 为内置 seed）
 │  └─ web/                  # 管理页 UI
 │      ├─ index.html
 │      ├─ css/app.css
@@ -488,8 +488,8 @@ powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1
 
 相对 1.4 / 2.0 / 2.1 的主要变化：
 
-- **GMI / Bailian 通道**：内置 seed 渠道（可编辑）。二者都是"单 URL + 单 API Key"的 OpenAI 兼容形态，定义存 settings 键 `custom_channels`（首次启动自动 seed，id 不变、老账号与配置无损）；不在默认通道列表里，启用需在 `CB_GATEWAY_PROVIDERS` 末尾追加 `gmi` / `bailian`，或设 `CB_BAILIAN_API_KEY` / 在管理页粘贴 Key。
-- **自定义渠道**：在管理页「通道与模型 → 自定义渠道」可直接新增/编辑/删除任意 OpenAI 兼容平台（一个 Base URL + 一个 API Key + 模型 ID 即可），零代码、热生效；协议实现统一走 `providers/openai_compat.py` 基类。
+- **GMI / Bailian 通道**：内置 seed 通道（可编辑）。二者都是"单 URL + 单 API Key"的 OpenAI 兼容形态，定义存 settings 键 `custom_channels`（首次启动自动 seed，id 不变、老账号与配置无损）；不在默认通道列表里，启用需在 `CB_GATEWAY_PROVIDERS` 末尾追加 `gmi` / `bailian`，或设 `CB_BAILIAN_API_KEY` / 在管理页粘贴 Key。
+- **自定义通道**：在管理页「通道与模型 → 自定义通道」可直接新增/编辑/删除任意 OpenAI 兼容平台（一个 Base URL + 一个 API Key + 模型 ID 即可），零代码、热生效；协议实现统一走 `providers/openai_compat.py` 基类。
 - **管理页 vendor 本地化**：Vue 3.4.21 与 SortableJS 1.15.6 从 jsdelivr CDN 落到 `web/vendor/`，由 FastAPI StaticFiles 直接服务。局域网仍可打开管理页。`tests/test_web_assets.py` 守卫 CDN 引用永不回归。
 - **后端三巨石模块拆分**：
   - `storage/database.py` 退化为 re-export 兼容门面，子模块在 `storage/repos/{accounts, api_keys, logs, settings, stats, _common}.py`。
