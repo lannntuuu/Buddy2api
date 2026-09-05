@@ -221,6 +221,12 @@ button{font-family:inherit}
 .btn.pri:hover{background:var(--accent-strong);border-color:var(--accent-strong)}
 .btn.danger{background:var(--bg-elevated);color:var(--err);border-color:var(--accent-border)}
 .btn.danger:hover{background:var(--err-bg);border-color:var(--err)}
+.btn.ok{background:var(--ok-bg);color:var(--ok);border-color:var(--ok-border)}
+.btn.ok:hover{background:var(--ok);color:#fff;border-color:var(--ok)}
+.btn.warn{background:var(--warn-bg);color:var(--warn);border-color:var(--accent-border)}
+.btn.warn:hover{background:var(--warn);color:#fff;border-color:var(--warn)}
+.btn.plain{background:var(--bg-elevated);color:var(--fg-2);border-color:var(--border-strong)}
+.btn.plain:hover{background:var(--bg-sunken);color:var(--fg);border-color:var(--fg-3)}
 .btn:disabled,.btn[aria-disabled="true"]{opacity:.45;cursor:not-allowed;transform:none}
 .btn svg{width:13px;height:13px}
 
