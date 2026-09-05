@@ -92,6 +92,8 @@ export default {props:['token','toast'],setup(p){
   // ────────── credential section: KEY_PANEL meta + discover/scan/solo ──────────
   // 合并自 accounts.js: KEY_PANEL_META = id → {name, base, env}，从 /admin/channels + /admin/channels/custom 推导
   const KEY_PANEL_META=ref({});
+  // 模板用的是普通对象下标,这里给一个解包后的 computed,避免模板直接摸 .value
+  const keyPanelMetaById=computed(()=>KEY_PANEL_META.value);
   function refreshKeyMeta(){
     const SEED_DEFAULT={gmi:{base:'https://api.gmi-serving.com/v1',env:'CB_GMI_API_KEY'},bailian:{base:'https://llm-7dqe434wikmhz0wa.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',env:'CB_BAILIAN_API_KEY'}};
     const meta={};
@@ -278,7 +280,7 @@ export default {props:['token','toast'],setup(p){
   watch(list,()=>refreshKeyMeta(),{deep:false});
   watch(ccList,()=>refreshKeyMeta(),{deep:false});
 
-  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccStartCreate,ccStartEdit,ccCancel,ccSave,ccDelete,KEY_PANEL,keyMode,keyKey,keyNick,keyBase,keyBusy,addApiKey,disc,dl,scanning,authPath,discover,scan,scanCustom,clearPath,solo,soloBusy,soloSelected,startSoloLogin,cancelSolo,completeSolo,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,size,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I}
+  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccStartCreate,ccStartEdit,ccCancel,ccSave,ccDelete,KEY_PANEL,keyMode,keyKey,keyNick,keyBase,keyBusy,addApiKey,disc,dl,scanning,authPath,discover,scan,scanCustom,clearPath,solo,soloBusy,soloSelected,startSoloLogin,cancelSolo,completeSolo,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,size,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I,keyPanelMetaById}
 },template:`
 <div>
   <div class="phead"><h1>通道管理</h1><p>定义通道 · 管理凭证 · 启用开关</p></div>
@@ -353,8 +355,8 @@ export default {props:['token','toast'],setup(p){
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
           <div>
             <div><span class="hint" style="margin:0">类型</span> <strong>{{activeCh.kind==='apikey'?'密钥型':'登录型'}}</strong></div>
-            <div v-if="KEY_PANEL_META[activeCh.id]"><span class="hint" style="margin:0">Base URL</span> <code class="mono">{{KEY_PANEL_META[activeCh.id].base||'内置默认'}}</code></div>
-            <div v-if="KEY_PANEL_META[activeCh.id]"><span class="hint" style="margin:0">环境变量</span> <span class="mono">{{KEY_PANEL_META[activeCh.id].env||'-'}}</span></div>
+            <div v-if="keyPanelMetaById[activeCh.id]"><span class="hint" style="margin:0">Base URL</span> <code class="mono">{{keyPanelMetaById[activeCh.id].base||'内置默认'}}</code></div>
+            <div v-if="keyPanelMetaById[activeCh.id]"><span class="hint" style="margin:0">环境变量</span> <span class="mono">{{keyPanelMetaById[activeCh.id].env||'-'}}</span></div>
             <div v-if="activeCh.checkin_supported"><span class="hint" style="margin:0">签到</span> <span class="tag">支持</span></div>
           </div>
           <div class="hint" style="margin:0">内置通道 · 定义不可编辑；启用 / 停用在上方开关</div>
