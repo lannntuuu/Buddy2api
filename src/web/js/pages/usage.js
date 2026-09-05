@@ -1,12 +1,9 @@
 import {api,apiErr,n,tok,money,ms,pct} from '../api.js';
 import {I} from '../icons.js';
 const{ref,reactive,computed,onMounted}=Vue;
-const RATIO_TIP='命中占输入总量的比例 = 缓存命中 ÷ (非缓存输入 + 缓存命中);总输入 prompt_tokens 已含命中部分';
+const RATIO_TIP='缓存命中 Token ÷ 输入 Token(prompt_tokens) — 命中部分已含在输入中;输入为 0 时不计算';
 const AVG_TIP='总耗时 ÷ 请求数 — 全部请求的平均值,含失败';
 const CACHE_INC_TIP='已包含在输入 Token(prompt_tokens)中,非额外增量';
-const NONCACHED_TIP='输入 Token(prompt_tokens) − 缓存命中 — 未命中缓存、按原价计费的部分';
-const CACHE_CREATE_TIP='上游上报的缓存写入 token(仅 Anthropic 风格上游提供;其它平台为 0)';
-function noncached(x){x=x||{};return Math.max(0,(Number(x.prompt_tokens||0))-(Number(x.cache_read_tokens||0)))}
 
 export default {props:['token','toast'],setup(p){
   const data=ref(null),ld=ref(false),err=ref('');
@@ -22,7 +19,7 @@ export default {props:['token','toast'],setup(p){
   const flatRows=computed(()=>{const out=[];const provs=data.value?.providers||{};for(const prov of Object.keys(provs)){const bucket=provs[prov];for(const mdl of Object.keys(bucket.models||{})){const m=bucket.models[mdl];out.push({prov,mdl,summary:m.summary});for(const d of (m.daily||[]))out.push({prov,mdl,detail:d})}out.push({prov,mdl:null,summary:bucket.summary})}return out});
   const hasData=computed(()=>{const provs=data.value?.providers||{};return Object.keys(provs).length>0});
   onMounted(()=>{loadChannels();load()});
-  return{data,ld,err,f,channels,channelModels,rangePreset,onProviderChange,load,n,tok,money,ms,pct,flatRows,hasData,I,RATIO_TIP,AVG_TIP,CACHE_INC_TIP,NONCACHED_TIP,CACHE_CREATE_TIP,noncached}
+  return{data,ld,err,f,channels,channelModels,rangePreset,onProviderChange,load,n,tok,money,ms,pct,flatRows,hasData,I,RATIO_TIP,AVG_TIP,CACHE_INC_TIP}
 },template:`
 <div>
   <div class="phead"><h1>用量统计</h1><p>按平台 × 模型 × 日期聚合的 Token 用量</p></div>
@@ -52,19 +49,18 @@ export default {props:['token','toast'],setup(p){
   <div v-if="ld" class="load"><div class="spin"></div></div>
   <div class="card card-p empty" v-else-if="err"><div class="em">!</div><p style="font-weight:600;color:var(--fg)">{{err}}</p></div>
   <template v-else-if="data">
-    <div class="dash-grid" style="margin-bottom:14px">
+    <div class="dash-grid thirds" style="margin-bottom:14px">
       <div class="metric"><div class="m-label">请求数</div><div class="m-value">{{n(data.totals?.requests)}}</div><div class="m-sub">所选时间范围合计</div></div>
-      <div class="metric"><div class="m-label">非缓存输入 Token</div><div class="m-value">{{tok(noncached(data.totals))}}</div><div class="m-sub">输入 {{tok(data.totals?.prompt_tokens)}} − 命中 {{tok(data.totals?.cache_read_tokens)}}</div></div>
       <div class="metric"><div class="m-label">Token 总量</div><div class="m-value">{{tok(data.totals?.total_tokens)}}</div><div class="m-sub">输入 {{tok(data.totals?.prompt_tokens)}} · 输出 {{tok(data.totals?.completion_tokens)}} · 缓存命中 {{tok(data.totals?.cache_read_tokens)}}</div></div>
-      <div class="metric" :title="RATIO_TIP"><div class="m-label">缓存命中率</div><div class="m-value">{{pct(data.totals?.cache_hit_ratio)}}</div><div class="m-sub">命中 ÷ (非缓存输入 + 命中)</div></div>
+      <div class="metric" :title="RATIO_TIP"><div class="m-label">缓存命中率</div><div class="m-value">{{pct(data.totals?.cache_hit_ratio)}}</div><div class="m-sub">cache_read / prompt_tokens</div></div>
     </div>
     <div class="card" v-if="hasData"><div class="table-scroll"><table>
-      <thead><tr><th>平台 / 模型 / 日期</th><th>请求数</th><th>输入 Token</th><th>非缓存输入 <span class="calc-mark" :title="NONCACHED_TIP">◆</span></th><th :title="CACHE_INC_TIP">缓存命中 Token</th><th :title="CACHE_CREATE_TIP">缓存创建 Token</th><th>缓存命中率 <span class="calc-mark" :title="RATIO_TIP">◆</span></th><th>输出 Token</th><th>总 Token</th><th>Credit</th><th>平均耗时 <span class="calc-mark" :title="AVG_TIP">◆</span></th></tr></thead>
+      <thead><tr><th>平台 / 模型 / 日期</th><th>请求数</th><th>输入 Token</th><th :title="CACHE_INC_TIP">缓存命中 Token</th><th>缓存命中率 <span class="calc-mark" :title="RATIO_TIP">◆</span></th><th>输出 Token</th><th>总 Token</th><th>Credit</th><th>平均耗时 <span class="calc-mark" :title="AVG_TIP">◆</span></th></tr></thead>
       <tbody>
         <template v-for="(row,i) in flatRows" :key="i">
-          <tr v-if="row.prov&&row.mdl===null&&row.summary" class="prov-row"><td style="font-weight:800">{{row.prov}} · 平台汇总</td><td>{{n(row.summary.requests)}}</td><td>{{tok(row.summary.prompt_tokens)}}</td><td>{{tok(noncached(row.summary))}}</td><td>{{tok(row.summary.cache_read_tokens)}}</td><td>{{tok(row.summary.cache_creation_tokens)}}</td><td>{{pct(row.summary.cache_hit_ratio)}}</td><td>{{tok(row.summary.completion_tokens)}}</td><td>{{tok(row.summary.total_tokens)}}</td><td>{{money(row.summary.credit)}}</td><td>{{ms(row.summary.avg_duration_ms)}}</td></tr>
-          <tr v-else-if="row.mdl&&row.detail"><td class="mono" style="padding-left:32px">{{row.mdl}} · {{row.detail.date}}</td><td>{{n(row.detail.requests)}}</td><td>{{tok(row.detail.prompt_tokens)}}</td><td>{{tok(noncached(row.detail))}}</td><td>{{tok(row.detail.cache_read_tokens)}}</td><td>{{tok(row.detail.cache_creation_tokens)}}</td><td>{{pct(row.detail.cache_hit_ratio)}}</td><td>{{tok(row.detail.completion_tokens)}}</td><td>{{tok(row.detail.total_tokens)}}</td><td>{{money(row.detail.credit)}}</td><td>{{ms(row.detail.avg_duration_ms)}}</td></tr>
-          <tr v-else-if="row.mdl&&row.summary" class="model-row"><td style="font-weight:600;padding-left:20px">{{row.mdl}} · 小计</td><td>{{n(row.summary.requests)}}</td><td>{{tok(row.summary.prompt_tokens)}}</td><td>{{tok(noncached(row.summary))}}</td><td>{{tok(row.summary.cache_read_tokens)}}</td><td>{{tok(row.summary.cache_creation_tokens)}}</td><td>{{pct(row.summary.cache_hit_ratio)}}</td><td>{{tok(row.summary.completion_tokens)}}</td><td>{{tok(row.summary.total_tokens)}}</td><td>{{money(row.summary.credit)}}</td><td>{{ms(row.summary.avg_duration_ms)}}</td></tr>
+          <tr v-if="row.prov&&row.mdl===null&&row.summary" class="prov-row"><td style="font-weight:800">{{row.prov}} · 平台汇总</td><td>{{n(row.summary.requests)}}</td><td>{{tok(row.summary.prompt_tokens)}}</td><td>{{tok(row.summary.cache_read_tokens)}}</td><td>{{pct(row.summary.cache_hit_ratio)}}</td><td>{{tok(row.summary.completion_tokens)}}</td><td>{{tok(row.summary.total_tokens)}}</td><td>{{money(row.summary.credit)}}</td><td>{{ms(row.summary.avg_duration_ms)}}</td></tr>
+          <tr v-else-if="row.mdl&&row.detail"><td class="mono" style="padding-left:32px">{{row.mdl}} · {{row.detail.date}}</td><td>{{n(row.detail.requests)}}</td><td>{{tok(row.detail.prompt_tokens)}}</td><td>{{tok(row.detail.cache_read_tokens)}}</td><td>{{pct(row.detail.cache_hit_ratio)}}</td><td>{{tok(row.detail.completion_tokens)}}</td><td>{{tok(row.detail.total_tokens)}}</td><td>{{money(row.detail.credit)}}</td><td>{{ms(row.detail.avg_duration_ms)}}</td></tr>
+          <tr v-else-if="row.mdl&&row.summary" class="model-row"><td style="font-weight:600;padding-left:20px">{{row.mdl}} · 小计</td><td>{{n(row.summary.requests)}}</td><td>{{tok(row.summary.prompt_tokens)}}</td><td>{{tok(row.summary.cache_read_tokens)}}</td><td>{{pct(row.summary.cache_hit_ratio)}}</td><td>{{tok(row.summary.completion_tokens)}}</td><td>{{tok(row.summary.total_tokens)}}</td><td>{{money(row.summary.credit)}}</td><td>{{ms(row.summary.avg_duration_ms)}}</td></tr>
         </template>
       </tbody>
     </table></div></div>
