@@ -86,8 +86,9 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
 
     def _finalize(s: dict) -> dict:
         requests = max(1, s["requests"])
+        # 与 success_rate 同口径：返回百分数（已 ×100），前端 pct() 直接拼 %
         ratio = (
-            (s["cache_read_tokens"] / s["prompt_tokens"])
+            (s["cache_read_tokens"] / s["prompt_tokens"] * 100)
             if s["prompt_tokens"] > 0
             else None
         )
@@ -101,7 +102,7 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
             "credit": round(s["credit"], 4),
             "duration_ms": s["duration_ms"],
             "avg_duration_ms": int(s["duration_ms"] / requests),
-            "cache_hit_ratio": round(ratio, 4) if ratio is not None else None,
+            "cache_hit_ratio": round(ratio, 2) if ratio is not None else None,
         }
 
     providers_out: dict[str, dict] = {}
@@ -119,7 +120,7 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
         daily_prompt = int(row["prompt_tokens"] or 0)
         daily_cache_read = int(row["cache_read_tokens"] or 0)
         daily_ratio = (
-            (daily_cache_read / daily_prompt) if daily_prompt > 0 else None
+            (daily_cache_read / daily_prompt * 100) if daily_prompt > 0 else None
         )
         model_bucket["daily"].append(
             {
@@ -135,7 +136,7 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
                     int(row["duration_ms"] / row["requests"]) if row["requests"] else 0
                 ),
                 "cache_hit_ratio": (
-                    round(daily_ratio, 4) if daily_ratio is not None else None
+                    round(daily_ratio, 2) if daily_ratio is not None else None
                 ),
             }
         )

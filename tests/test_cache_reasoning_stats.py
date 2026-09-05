@@ -111,11 +111,12 @@ def _add_log(provider, model, *, prompt, cache_read):
 
 
 def test_stats_cache_hit_ratio(isolated_db):
+    # cache_hit_ratio 口径为百分数（已 ×100，与 success_rate 一致）：600/1000 -> 60.0
     _add_log("workbuddy", "glm-5.3", prompt=1000, cache_read=600)
     result = db.get_provider_model_usage({})
-    assert result["totals"]["cache_hit_ratio"] == 0.6
+    assert result["totals"]["cache_hit_ratio"] == 60.0
     daily = result["providers"]["workbuddy"]["models"]["glm-5.3"]["daily"][0]
-    assert daily["cache_hit_ratio"] == 0.6
+    assert daily["cache_hit_ratio"] == 60.0
 
 
 def test_stats_cache_hit_ratio_zero_prompt(isolated_db):
