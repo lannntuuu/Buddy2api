@@ -1,9 +1,9 @@
 import {I} from './icons.js';
 import dash from './pages/dashboard.js';
-import accs from './pages/accounts.js';
 import quota from './pages/quota.js';
 import keys from './pages/keys.js';
 import chns from './pages/channels.js';
+import mdls from './pages/models.js';
 import usg from './pages/usage.js';
 import lgs from './pages/logs.js';
 import setup from './pages/setup.js';
@@ -13,9 +13,13 @@ const{createApp,ref,onMounted}=Vue;
 
 createApp({
   setup(){
-    const validPages=['dashboard','accounts','quota','keys','channels','usage','logs','setup','settings'];
-    const savedPage=localStorage.getItem('cb_gw_page');
-    const page=ref(validPages.includes(savedPage)?savedPage:'dashboard'),token=ref(localStorage.getItem('cb_gw_token')||''),toasts=ref([]),meta=ref({title:'Buddy 2 API',version:''}),metaTag=ref('Local model gateway');
+    const validPages=['dashboard','channels','models','keys','usage','logs','quota','setup','settings'];
+    const savedRaw=localStorage.getItem('cb_gw_page');
+    // localStorage 迁移：老用户记忆的「账号」落到新通道管理，老的「通道与模型」落到新模型配置
+    // accounts: 已废弃 → channels； legacy channels（=旧「通道与模型」页）→ models
+    const migrated=savedRaw==='accounts'?'channels':(savedRaw==='channels'?'models':savedRaw);
+    if(migrated!==savedRaw){try{localStorage.setItem('cb_gw_page',migrated)}catch(_){}}
+    const page=ref(validPages.includes(migrated)?migrated:'dashboard'),token=ref(localStorage.getItem('cb_gw_token')||''),toasts=ref([]),meta=ref({title:'Buddy 2 API',version:''}),metaTag=ref('Local model gateway');
     onMounted(async()=>{try{const r=await fetch('/admin/meta',{credentials:'same-origin'});if(r.ok){const d=await r.json();meta.value={title:d.title||'Buddy 2 API',version:d.version||''}}}catch(_){meta.value={title:'Buddy 2 API',version:''}}});
     function tf(m,t='ok'){const id=Date.now()+Math.random();toasts.value=[...toasts.value,{id,m,t}].slice(-4);setTimeout(()=>toasts.value=toasts.value.filter(x=>x.id!==id),2500)}
     function go(k){page.value=k;localStorage.setItem('cb_gw_page',k)}
@@ -23,7 +27,7 @@ createApp({
     function hardRefresh(){window.location.reload()}
     const theme=ref(localStorage.getItem('cb_gw_theme')||'light');
     function toggleTheme(){theme.value=theme.value==='dark'?'light':'dark';document.documentElement.setAttribute('data-theme',theme.value);try{localStorage.setItem('cb_gw_theme',theme.value)}catch(_){}}
-    const nav=[{k:'dashboard',l:'运行总览',i:I.dash},{k:'accounts',l:'账号管理',i:I.users},{k:'quota',l:'额度与积分',i:I.wallet},{k:'keys',l:'API Keys',i:I.key},{k:'channels',l:'通道与模型',i:I.cpu},{k:'usage',l:'用量统计',i:I.tokens},{k:'logs',l:'请求日志',i:I.log},{k:'setup',l:'接入指南',i:I.scan},{k:'settings',l:'设置',i:I.gear}];
+    const nav=[{k:'dashboard',l:'运行总览',i:I.dash},{k:'channels',l:'通道管理',i:I.cpu},{k:'models',l:'模型配置',i:I.tokens},{k:'keys',l:'API Keys',i:I.key},{k:'usage',l:'用量统计',i:I.tokens},{k:'logs',l:'请求日志',i:I.log},{k:'quota',l:'额度与积分',i:I.wallet},{k:'setup',l:'接入指南',i:I.scan},{k:'settings',l:'设置',i:I.gear}];
     const railOpen=ref(localStorage.getItem('cb_gw_rail')==='expanded');
     function toggleRail(){railOpen.value=!railOpen.value;try{localStorage.setItem('cb_gw_rail',railOpen.value?'expanded':'collapsed')}catch(_){}}
     return{page,token,toasts,meta,metaTag,theme,toggleTheme,tf,go,saveToken,hardRefresh,nav,railOpen,toggleRail,I}
@@ -45,7 +49,7 @@ createApp({
       </nav>
       <div class="rail-foot">
         <button class="rail-icon" @click="toggleRail" :title="railOpen?'收起侧栏':'展开侧栏'" v-html="railOpen?I.chevronL:I.chevronR"></button>
-        <button class="rail-icon" @click="toggleTheme" :title="theme==='dark'?'切到浅色':'切到深色'" v-html="theme==='dark'?I.sun:I.moon"></button>
+        <button class="rail-icon" @click="toggleTheme" :title="theme==='dark'?'切到深色':'切到浅色'" v-html="theme==='dark'?I.moon:I.sun"></button>
       </div>
     </aside>
     <div class="shell-body">
@@ -57,10 +61,10 @@ createApp({
       </div>
       <main class="main">
         <div class="content" v-if="page==='dashboard'"><dash :token="token" :toast="tf"/></div>
-        <div class="content" v-if="page==='accounts'"><accs :token="token" :toast="tf"/></div>
+        <div class="content" v-if="page==='channels'"><chns :token="token" :toast="tf"/></div>
+        <div class="content" v-if="page==='models'"><mdls :token="token" :toast="tf"/></div>
         <div class="content" v-if="page==='quota'"><quota :token="token" :toast="tf"/></div>
         <div class="content" v-if="page==='keys'"><keys :token="token" :toast="tf"/></div>
-        <div class="content" v-if="page==='channels'"><chns :token="token" :toast="tf"/></div>
         <div class="content" v-if="page==='usage'"><usg :token="token" :toast="tf"/></div>
         <div class="content" v-if="page==='logs'"><lgs :token="token"/></div>
         <div class="content" v-if="page==='setup'"><setup :token="token" :toast="tf"/></div>
@@ -71,10 +75,10 @@ createApp({
   </div>`
 })
 .component('dash',dash)
-.component('accs',accs)
 .component('quota',quota)
 .component('keys',keys)
 .component('chns',chns)
+.component('mdls',mdls)
 .component('usg',usg)
 .component('lgs',lgs)
 .component('stgs',stgs)

@@ -10,7 +10,7 @@
 
 Buddy2api 在本机提供 `http://127.0.0.1:8787/v1`。你在官方客户端里登录并且还有额度，这个网关把本机登录导入进来，把请求转到对应厂商。普通客户端走 Chat Completions；Codex 走 `/v1/responses`，管理页把 Key 类型选成 Codex 时会做一轮内容清洗。
 
-五个通道默认都开，GMI 和 Bailian 默认关（opt-in）。没装、没登录的通道，账号页检测为空，不会自动入库。Trae SOLO 不走本机登录目录，走管理页的「Web 登录」或粘贴回调 URL（见下）。GMI 与 Bailian 不读本机登录目录，靠管理页导入 API Key。
+五个通道默认都开，GMI 和 Bailian 默认关（opt-in）。没装、没登录的通道，通道管理页检测为空，不会自动入库。Trae SOLO 不走本机登录目录，走管理页的「Web 登录」或粘贴回调 URL（见下）。GMI 与 Bailian 不读本机登录目录，靠管理页导入 API Key。
 
 ```powershell
 python -m src.gateway.server
@@ -23,8 +23,8 @@ python -m src.gateway.server
 | 千问办公 QwenWork | 开 | `%APPDATA%\QwenWorkCN` |
 | TraeWork | 开 | `%APPDATA%\TRAE SOLO CN\User\globalStorage` |
 | Trae SOLO | 开 | 无（Web 登录回环 / 凭证 JSON 导入） |
-| GMI | 关（opt-in） | Web 配置：账号页选 GMI 通道后粘 API Key 即可 |
-| Bailian | 关(opt-in) | Web 配置：账号页选 Bailian 通道后粘贴 API Key 即可 |
+| GMI | 关（opt-in） | Web 配置：通道管理页选 GMI 通道后粘 API Key 即可 |
+| Bailian | 关(opt-in) | Web 配置：通道管理页选 Bailian 通道后粘贴 API Key 即可 |
 
 路径不对时可用 `CB_AUTH_DIR`、`CB_QCLAW_AUTH_DIR`、`CB_QWENWORK_AUTH_DIR`、`CB_TRAEWORK_AUTH_DIR` 指定。四个通道的登录文件不要混在同一个目录里。Trae SOLO 的凭证 JSON 可用 `CB_TRAESOLO_AUTH_DIR` 指定扫描目录（可选）。GMI 不读本机登录目录，靠管理页导入 API Key。
 
@@ -32,7 +32,7 @@ python -m src.gateway.server
 
 按下面的《安装与启动》即可。这几条是 2.0 里最容易踩空的：
 
-1. **启动后账号页是空的，这是正常的。** 默认不再自动入库。到「账号」页：选通道 → 重新检测 → 一键导入。四个本地通道都能选；**Trae SOLO 选完后点「发起网页登录」**，在新窗口完成 TRAE 登录，浏览器会自动跳回服务完成入库（远程够不到回调时，把地址栏完整 URL 粘贴到「手动完成」）。
+1. **启动后通道管理页是空的，这是正常的。** 默认不再自动入库。到「通道管理」页：选通道 → 重新检测 → 一键导入。四个本地通道都能选；**Trae SOLO 选完后点「发起网页登录」**，在新窗口完成 TRAE 登录，浏览器会自动跳回服务完成入库（远程够不到回调时，把地址栏完整 URL 粘贴到「手动完成」）。
 2. **一把 API Key 只打一个通道。** 创建时必须选通道。WorkBuddy 的 Key 可 `auto` / `glm-5.2`；QwenWork 的 Key 可 `auto` 或 `qwork-advanced`；TraeWork 的 Key 可 `auto` 或 `qwen-3.7-plus`；Trae SOLO 的 Key 可 `auto` 或 `glm-5.2`（SOLO 模型表较大，`/v1/models` 里以 `traesolo/` 前缀列出）。通道和模型对不上会 400 或 403，不会帮你转到另一家。
 3. **某个通道返回 503 `channel_unavailable`：** 这个通道还没导入可用账号。
 4. **QClaw / QwenWork 请在 Windows 上直接跑 `python -m src.gateway.server`。** Linux Docker 读不了这两家用了 DPAPI 加密的本机文件；管理页会写明这一点。WorkBuddy 可以继续用 Docker。
@@ -303,7 +303,7 @@ path = "/var/lib/buddy2api/codebuddy_gateway.db"
 | 变量 | 说明 |
 |---|---|
 | `CB_GATEWAY_PROVIDERS` | 启用哪些通道，逗号分隔。默认 `workbuddy,qclaw,qwenwork,traework,traesolo`。GMI 与 Bailian 是 opt-in，启用加在末尾：`workbuddy,qclaw,qwenwork,traework,traesolo,gmi` 或 `...,bailian` |
-| `CB_BAILIAN_API_KEY` | 阿里百炼 API Key（opt-in 通道：账号页粘贴或此环境变量导入；无活跃账号时自动导入） |
+| `CB_BAILIAN_API_KEY` | 阿里百炼 API Key（opt-in 通道：通道管理页粘贴或此环境变量导入；无活跃账号时自动导入） |
 | `CB_GATEWAY_AUTO_IMPORT` | 设 `1` 则启动时自动扫描导入账号。默认 `0` |
 | `CB_GATEWAY_CHECKIN_GAP_MS` | 一键领取时相邻账号的间隔毫秒（防风控，不可设太小）。默认 `800` |
 | `CB_GATEWAY_ADMIN_TOKEN` | 固定管理 Token。默认自动生成（启动日志打印一次，管理页「设置」粘贴一次即可拿 Cookie） |
@@ -346,7 +346,7 @@ path = "/var/lib/buddy2api/codebuddy_gateway.db"
 
 ### 推理档位（按模型）
 
-不再用环境变量，改为在管理页「通道与模型 → 各平台设置」里**按模型**配置（存数据库，即时生效）：
+不再用环境变量，改为在管理页「模型配置 → 各平台设置」里**按模型**配置（存数据库，即时生效）：
 
 - 每个模型一个下拉：`默认（不注入）` / `none` / `minimal` / `low` / `medium` / `high` / `max`；另有「通道默认」档位作用于未单独设置的模型。
 - 优先级：客户端显式 `reasoning_effort` > 按模型配置 > 通道默认 > 不注入（跟随上游默认）。
@@ -489,7 +489,7 @@ powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1
 相对 1.4 / 2.0 / 2.1 的主要变化：
 
 - **GMI / Bailian 通道**：内置 seed 通道（可编辑）。二者都是"单 URL + 单 API Key"的 OpenAI 兼容形态，定义存 settings 键 `custom_channels`（首次启动自动 seed，id 不变、老账号与配置无损）；不在默认通道列表里，启用需在 `CB_GATEWAY_PROVIDERS` 末尾追加 `gmi` / `bailian`，或设 `CB_BAILIAN_API_KEY` / 在管理页粘贴 Key。
-- **自定义通道**：在管理页「通道与模型 → 自定义通道」可直接新增/编辑/删除任意 OpenAI 兼容平台（一个 Base URL + 一个 API Key + 模型 ID 即可），零代码、热生效；协议实现统一走 `providers/openai_compat.py` 基类。
+- **自定义通道**：在管理页「通道管理 → 详情 → 编辑」可直接新增/编辑/删除任意 OpenAI 兼容平台（一个 Base URL + 一个 API Key + 模型 ID 即可），零代码、热生效；协议实现统一走 `providers/openai_compat.py` 基类。
 - **管理页 vendor 本地化**：Vue 3.4.21 与 SortableJS 1.15.6 从 jsdelivr CDN 落到 `web/vendor/`，由 FastAPI StaticFiles 直接服务。局域网仍可打开管理页。`tests/test_web_assets.py` 守卫 CDN 引用永不回归。
 - **后端三巨石模块拆分**：
   - `storage/database.py` 退化为 re-export 兼容门面，子模块在 `storage/repos/{accounts, api_keys, logs, settings, stats, _common}.py`。

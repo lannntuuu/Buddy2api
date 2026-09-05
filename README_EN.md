@@ -10,7 +10,7 @@ Current release **2.2.0**. This project is for local, personal use only. Do not 
 
 Buddy2api serves `http://127.0.0.1:8787/v1` on your machine. You stay signed into the official clients and still have quota; this gateway imports those local sessions and forwards requests to the matching vendor. Normal clients use Chat Completions; Codex uses `/v1/responses`, and when you set the key type to Codex in the admin UI it runs a round of prompt sanitization.
 
-Five channels are on by default; GMI and Bailian are opt-in. A channel you haven't installed or signed into shows empty on the Accounts page and is not auto-imported. Trae SOLO does not read a local login directory — import it via the admin UI's **Web login** or by pasting a callback URL (see below). GMI and Bailian don't read a local directory either; paste their API key on the Accounts page.
+Five channels are on by default; GMI and Bailian are opt-in. A channel you haven't installed or signed into shows empty on the Channels page and is not auto-imported. Trae SOLO does not read a local login directory — import it via the admin UI's **Web login** or by pasting a callback URL (see below). GMI and Bailian don't read a local directory either; paste their API key on the Channels page.
 
 ```powershell
 python -m src.gateway.server
@@ -23,8 +23,8 @@ python -m src.gateway.server
 | QwenWork | on | `%APPDATA%\QwenWorkCN` |
 | TraeWork | on | `%APPDATA%\TRAE SOLO CN\User\globalStorage` |
 | Trae SOLO | on | none (web login loop / credential JSON import) |
-| GMI | opt-in | Web UI: paste the API key on the Accounts page after selecting the GMI channel |
-| Bailian | opt-in | Web UI: paste the API key on the Accounts page after selecting the Bailian channel |
+| GMI | opt-in | Web UI: paste the API key on the Channels page after selecting the GMI channel |
+| Bailian | opt-in | Web UI: paste the API key on the Channels page after selecting the Bailian channel |
 
 If the paths are wrong you can point them with `CB_AUTH_DIR`, `CB_QCLAW_AUTH_DIR`, `CB_QWENWORK_AUTH_DIR`, `CB_TRAEWORK_AUTH_DIR`. Don't put the four channels' login files in the same directory. Trae SOLO's credential JSON can be scanned from a directory set via `CB_TRAESOLO_AUTH_DIR` (optional).
 
@@ -32,7 +32,7 @@ If the paths are wrong you can point them with `CB_AUTH_DIR`, `CB_QCLAW_AUTH_DIR
 
 Just follow "Install and run" below. These are the easiest things to trip over in 2.0:
 
-1. **An empty Accounts page right after startup is normal.** It no longer auto-imports by default. Go to the **Accounts** page: pick a channel → Re-detect → Import all. All four local channels are available; **for Trae SOLO click "Start web login"** after selecting it, finish the TRAE login in the new window, and the browser redirects back to the server to complete the import (if the remote side can't reach the callback, paste the full address-bar URL into "Manual complete").
+1. **An empty Channels page right after startup is normal.** It no longer auto-imports by default. Go to the **Channels** page: pick a channel → Re-detect → Import all. All four local channels are available; **for Trae SOLO click "Start web login"** after selecting it, finish the TRAE login in the new window, and the browser redirects back to the server to complete the import (if the remote side can't reach the callback, paste the full address-bar URL into "Manual complete").
 2. **One API key hits exactly one channel.** You must pick a channel when creating it. A WorkBuddy key sends `auto` / `glm-5.2`; a QwenWork key sends `auto` or `qwork-advanced`; a TraeWork key sends `auto` or `qwen-3.7-plus`; a Trae SOLO key sends `auto` or `glm-5.2`; a GMI key sends any model the upstream lists; a Bailian key sends any model on the `/v1/models` whitelist (SOLO's model list is large and surfaced under the `traesolo/` prefix in `/v1/models`). A channel/model mismatch returns 400 or 403; the gateway won't forward you to another vendor.
 3. **A channel returns 503 `channel_unavailable`:** that channel has no imported, usable account yet.
 4. **Run QClaw / QwenWork with `python -m src.gateway.server` directly on Windows.** A Linux Docker container can't decrypt the DPAPI-encrypted local files those two use; the admin UI says so. WorkBuddy can keep using Docker.
@@ -342,7 +342,7 @@ Pin the admin token so the browser cookie survives restarts: edit `config.toml` 
 
 ### Reasoning effort (per model)
 
-No more environment variable: configure it **per model** on the admin page **Channels & Models → per-platform settings** (stored in DB, takes effect immediately):
+No more environment variable: configure it **per model** on the admin page **Models → per-platform settings** (stored in DB, takes effect immediately):
 
 - Per-model dropdown: `default (no injection)` / `none` / `minimal` / `low` / `medium` / `high` / `max`, plus a channel-level default that applies to models without an explicit entry.
 - Priority: explicit client `reasoning_effort` > per-model config > channel default > no injection (upstream default).
@@ -483,7 +483,7 @@ powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1
 Compared to 1.4 / 2.0 / 2.1:
 
 - **GMI / Bailian channels**: built-in seed channels (editable). Both are "one URL + one API key" OpenAI-compatible channels whose definitions live in the `custom_channels` settings key (seeded on first startup; ids unchanged, so existing accounts and configuration carry over). Off by default; enable by appending `gmi` / `bailian` to `CB_GATEWAY_PROVIDERS`, or set `CB_BAILIAN_API_KEY` / paste the key in the admin UI.
-- **Custom channels**: add / edit / delete any OpenAI-compatible platform (a Base URL + an API key + model ids) directly in the admin UI under "Channels & Models → Custom channels" — zero code, hot reload; all of them share the `providers/openai_compat.py` base class.
+- **Custom channels**: add / edit / delete any OpenAI-compatible platform (a Base URL + an API key + model ids) directly in the admin UI under "Channels → Custom channels" — zero code, hot reload; all of them share the `providers/openai_compat.py` base class.
 - **Admin UI vendoring**: Vue 3.4.21 and SortableJS 1.15.6 moved off jsdelivr CDN into `web/vendor/`, served by the FastAPI StaticFiles mount. The admin UI now works fully offline. `tests/test_web_assets.py` guards against any future CDN reference creeping back in.
 - **Backend monolith split**:
   - `storage/database.py` is now a re-export facade; modules live in `storage/repos/{accounts, api_keys, logs, settings, stats, _common}.py`.
