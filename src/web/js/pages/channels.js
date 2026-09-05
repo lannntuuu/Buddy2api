@@ -1,7 +1,7 @@
 import {api,apiErr,fmt,tok} from '../api.js';
 import {I} from '../icons.js';
 import LoginImport from './_login_import.js';
-const{ref,reactive,computed,onMounted,watch}=Vue;
+const{ref,reactive,computed,onMounted,watch,nextTick}=Vue;
 
 export default {props:['token','toast'],components:{'login-import':LoginImport},setup(p){
   // ────────── master list ──────────
@@ -29,17 +29,40 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
   const apikeyChannels=computed(()=>list.value.filter(c=>c.kind==='apikey'));
 
   // ────────── unified add/edit modal ──────────
-  const um=ref({open:false,mode:'create',kind:'',channelId:'',draft:{},warning:null,busy:false});
+  const um=ref({open:false,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',draft:{},warning:null,busy:false});
   function umEmptyDraft(){return {id:'',display_name:'',base_url:'',modelsText:'',aliases:'',env_api_key:'',api_key:''}}
   function openKeyModal(def){  // def: existing definition for edit; omit for create
-    if(def){um.value={open:true,mode:'edit',kind:'apikey',channelId:def.id,warning:null,busy:false,draft:{
+    if(def){um.value={open:true,mode:'edit',kind:'apikey',channelId:def.id,tab:'form',infoId:'',infoKind:'',warning:null,busy:false,draft:{
       id:def.id,display_name:def.display_name||'',base_url:def.base_url||'',
       modelsText:(def.models||[]).join(', '),
       aliases:Object.entries(def.aliases||{}).map(([k,v])=>k+'→'+v).join('\n'),
       env_api_key:def.env_api_key||'',api_key:''}};}
-    else{um.value={open:true,mode:'create',kind:'',channelId:'',warning:null,busy:false,draft:umEmptyDraft()}}
+    else{um.value={open:true,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',warning:null,busy:false,draft:umEmptyDraft()}}
   }
-  function umClose(){um.value={open:false,mode:'create',kind:'',channelId:'',warning:null,busy:false,draft:umEmptyDraft()}}
+  function umClose(){um.value={open:false,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',warning:null,busy:false,draft:umEmptyDraft()}}
+  // info tab: read-only summary opened from a row's 「详情」 button
+  function openInfo(c){
+    const isAk=c.kind==='apikey';
+    um.value={open:true,tab:'info',mode:isAk&&ccOf(c.id)?'edit':'create',kind:isAk?'apikey':'login',channelId:c.id,infoId:c.id,infoKind:c.kind,warning:null,busy:false,draft:umEmptyDraft()};
+  }
+  // ────────── drag sort (SortableJS, global window.Sortable) ──────────
+  const loginTbody=ref(null),apikeyTbody=ref(null),sortInst=[];
+  function readOrder(tbody){return tbody?Array.from(tbody.querySelectorAll('tr[data-id]')).map(tr=>tr.dataset.id):[];}
+  function applyOrder(ids){
+    if(!ids.length)return;
+    const map=new Map(list.value.map(c=>[c.id,c]));
+    const ordered=ids.map(id=>map.get(id)).filter(Boolean);
+    const rest=list.value.filter(c=>!ids.includes(c.id));
+    list.value=ordered.concat(rest);
+  }
+  async function persistOrder(){
+    const order=loginChannels.value.map(c=>c.id).concat(apikeyChannels.value.map(c=>c.id));
+    const enabled=list.value.filter(c=>c.enabled).map(c=>c.id);
+    try{const r=await api.put('/admin/channels',{enabled,order},p.token);list.value.forEach(c=>{c.enabled=(r.enabled||[]).includes(c.id)});}
+    catch(e){p.toast(apiErr(e,'保存排序失败'),'err');await loadList();}
+  }
+  function onLoginEnd(){if(!loginTbody.value)return;applyOrder(readOrder(loginTbody.value));persistOrder();}
+  function onApikeyEnd(){if(!apikeyTbody.value)return;applyOrder(readOrder(apikeyTbody.value));persistOrder();}
   async function umSave(){
     if(um.value.busy)return;
     const f=um.value.draft;
@@ -250,11 +273,18 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
     adding.value=false;
   }
 
+  function initSortable(){
+    if(sortInst.length||typeof window.Sortable==='undefined')return;
+    const opt={handle:'.drag-handle',animation:120,onMove:e=>!e.related.classList.contains('grp-h')};
+    if(loginTbody.value)sortInst.push(window.Sortable.create(loginTbody.value,{...opt,onEnd:onLoginEnd}));
+    if(apikeyTbody.value)sortInst.push(window.Sortable.create(apikeyTbody.value,{...opt,onEnd:onApikeyEnd}));
+  }
   onMounted(async()=>{
     await Promise.all([loadList(),loadCC(),loadAccounts()]);
     refreshKeyMeta();
     // 选中后默认做一次本机检测（登录型通道；密钥型自带面板）
     if(activeChannel.value&&activeChannel.value!=='traesolo')await discover('');
+    await nextTick();initSortable();
   });
   watch(activeChannel,async(v,old)=>{
     if(!v)return;
@@ -269,7 +299,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
   watch(list,()=>refreshKeyMeta(),{deep:false});
   watch(ccList,()=>refreshKeyMeta(),{deep:false});
 
-  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,loginChannels,apikeyChannels,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccDelete,um,openKeyModal,umClose,umSave,onModalImported,KEY_PANEL,keyMode,disc,dl,scanning,authPath,discover,scan,scanCustom,clearPath,solo,soloBusy,soloSelected,startSoloLogin,cancelSolo,completeSolo,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,size,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I,keyPanelMetaById}
+  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,loginChannels,apikeyChannels,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccDelete,um,openKeyModal,umClose,umSave,onModalImported,openInfo,KEY_PANEL,keyMode,disc,dl,scanning,authPath,discover,scan,scanCustom,clearPath,solo,soloBusy,soloSelected,startSoloLogin,cancelSolo,completeSolo,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,size,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I,keyPanelMetaById,loginTbody,apikeyTbody}
 },template:`
 <div>
   <div class="phead"><h1>通道管理</h1><p>定义通道 · 管理凭证 · 启用开关</p></div>
@@ -283,63 +313,40 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
         检测到环境变量 <code>CB_GATEWAY_PROVIDERS</code>，通道开关为只读；如需在 UI 内调整，请去掉环境变量后重启。
       </div>
       <div class="table-scroll"><table>
-        <tbody>
-          <tr><td colspan="4" style="background:var(--bg-sunken);font-weight:600;font-size:12px;color:var(--fg-2)">登录型平台<span class="hint" style="margin-left:8px;font-weight:400">硬编码配置模板 · 本机登录/网页登录导入 · 一个平台可挂多个凭证</span></td></tr>
-          <tr v-for="c in loginChannels" :key="c.id" @click="activeChannel=c.id" :class="{on:activeChannel===c.id}" style="cursor:pointer">
+        <tbody ref="loginTbody">
+          <tr class="grp-h"><td colspan="5" style="background:var(--bg-sunken);font-weight:600;font-size:12px;color:var(--fg-2)">登录型平台<span class="hint" style="margin-left:8px;font-weight:400">硬编码配置模板 · 本机登录/网页登录导入 · 一个平台可挂多个凭证 · 行首 ≡ 拖拽排序</span></td></tr>
+          <template v-for="c in loginChannels" :key="c.id">
+          <tr @click="activeChannel=c.id" :class="{on:activeChannel===c.id}" style="cursor:pointer" :data-id="c.id">
+            <td class="drag-handle" @click.stop style="width:18px;text-align:center;color:var(--fg-2);cursor:grab" title="拖拽排序">≡</td>
             <td>{{c.display_name||c.id}}</td>
             <td class="mono">{{c.id}}</td>
             <td><span class="tag">{{c.kind||'builtin'}}</span><span v-if="c.id==='workbuddy'" class="tag" style="margin-left:4px">必选</span><span v-else-if="!c.loaded" class="tag warn" style="margin-left:4px">未加载</span></td>
-            <td style="text-align:right"><input type="checkbox" :checked="c.enabled" :disabled="envLocked||c.id==='workbuddy'||toggling[c.id]" @change="toggleChannel(c.id,$event.target.checked)" @click.stop/></td>
+            <td style="text-align:right;white-space:nowrap"><button class="btn s" style="margin-right:8px" @click.stop="openInfo(c)">详情</button><input type="checkbox" :checked="c.enabled" :disabled="envLocked||c.id==='workbuddy'||toggling[c.id]" @change="toggleChannel(c.id,$event.target.checked)" @click.stop/></td>
           </tr>
-          <tr><td colspan="4" style="background:var(--bg-sunken);font-weight:600;font-size:12px;color:var(--fg-2)">密钥型通道<span class="hint" style="margin-left:8px;font-weight:400">通用模板 · Base URL + API Key · 零代码新增</span><button class="btn s pri" style="float:right;margin:2px 0" @click="openKeyModal()"><span v-html="I.plus"></span>新增</button></td></tr>
-          <tr v-for="c in apikeyChannels" :key="c.id" @click="activeChannel=c.id" :class="{on:activeChannel===c.id}" style="cursor:pointer">
+          </template>
+        </tbody>
+        <tbody ref="apikeyTbody">
+          <tr class="grp-h"><td colspan="5" style="background:var(--bg-sunken);font-weight:600;font-size:12px;color:var(--fg-2)">密钥型通道<span class="hint" style="margin-left:8px;font-weight:400">通用模板 · Base URL + API Key · 零代码新增 · 行首 ≡ 拖拽排序</span><button class="btn s pri" style="float:right;margin:2px 0" @click="openKeyModal()"><span v-html="I.plus"></span>新增</button></td></tr>
+          <template v-for="c in apikeyChannels" :key="c.id">
+          <tr @click="activeChannel=c.id" :class="{on:activeChannel===c.id}" style="cursor:pointer" :data-id="c.id">
+            <td class="drag-handle" @click.stop style="width:18px;text-align:center;color:var(--fg-2);cursor:grab" title="拖拽排序">≡</td>
             <td>{{c.display_name||c.id}}</td>
             <td class="mono">{{c.id}}</td>
             <td><span class="tag apikey">{{c.kind||'apikey'}}</span><span v-if="c.custom" class="tag" style="margin-left:4px;background:var(--accent-soft);color:var(--accent)">custom</span><span v-else-if="c.source==='seed'||c.id==='gmi'||c.id==='bailian'" class="tag" style="margin-left:4px">seed</span><span v-else-if="!c.loaded" class="tag warn" style="margin-left:4px">未加载</span></td>
-            <td style="text-align:right"><input type="checkbox" :checked="c.enabled" :disabled="envLocked||toggling[c.id]" @change="toggleChannel(c.id,$event.target.checked)" @click.stop/></td>
+            <td style="text-align:right;white-space:nowrap"><button class="btn s" style="margin-right:8px" @click.stop="openInfo(c)">详情</button><input type="checkbox" :checked="c.enabled" :disabled="envLocked||toggling[c.id]" @change="toggleChannel(c.id,$event.target.checked)" @click.stop/></td>
           </tr>
+          </template>
         </tbody>
       </table></div>
     </div>
   </div>
 
   <div v-if="activeCh" class="card" style="margin-top:16px">
-    <div class="card-h">详情 · <strong style="font-family:var(--mono)">{{activeCh.id}}</strong><span class="sub" style="margin-left:8px">{{activeCh.display_name||activeCh.id}}</span></div>
+    <div class="card-h">凭证 · <strong style="font-family:var(--mono)">{{activeCh.id}}</strong><span class="sub" style="margin-left:8px">{{activeCh.display_name||activeCh.id}}</span></div>
     <div class="card-p">
 
-      <!-- ── definition section ── -->
-      <div class="sec-h">定义</div>
-      <div v-if="ccOf(activeCh.id)" style="border:1px solid var(--border);border-radius:6px;padding:12px;background:var(--bg-elevated)">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-          <div>
-            <div><span class="hint" style="margin:0">显示名</span> <strong>{{ccOf(activeCh.id).display_name}}</strong></div>
-            <div><span class="hint" style="margin:0">Base URL</span> <code class="mono">{{ccOf(activeCh.id).base_url}}</code></div>
-            <div><span class="hint" style="margin:0">模型</span> <span class="mono">{{(ccOf(activeCh.id).models||[]).join(', ')}}</span></div>
-            <div><span class="hint" style="margin:0">别名</span> <span class="mono">{{Object.entries(ccOf(activeCh.id).aliases||{}).map(([k,v])=>k+'→'+v).join(', ')||'无'}}</span></div>
-            <div><span class="hint" style="margin:0">环境变量</span> <span class="mono">{{ccOf(activeCh.id).env_api_key||'-'}}</span></div>
-            <div v-if="ccOf(activeCh.id).source"><span class="hint" style="margin:0">来源</span> <span class="tag">{{ccOf(activeCh.id).source}}</span></div>
-          </div>
-          <div style="display:flex;gap:6px;flex-shrink:0">
-            <button class="btn s pri" @click="openKeyModal(ccOf(activeCh.id))"><span v-html="I.plus"></span>编辑</button>
-            <button class="btn s danger" @click="ccDelete(ccOf(activeCh.id))" v-if="ccOf(activeCh.id).source!=='seed'" title="删除自定义通道">删除</button>
-            <button class="btn s danger" v-else disabled title="seed 通道不允许删除，请用「启用通道」开关停用">删除(禁用)</button>
-          </div>
-        </div>
-      </div>
-      <div v-else style="border:1px solid var(--border);border-radius:6px;padding:12px;background:var(--bg-elevated)">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-          <div>
-            <div><span class="hint" style="margin:0">类型</span> <strong>{{activeCh.kind==='apikey'?'密钥型':'登录型'}}</strong></div>
-            <div v-if="keyPanelMetaById[activeCh.id]"><span class="hint" style="margin:0">Base URL</span> <code class="mono">{{keyPanelMetaById[activeCh.id].base||'内置默认'}}</code></div>
-            <div v-if="keyPanelMetaById[activeCh.id]"><span class="hint" style="margin:0">环境变量</span> <span class="mono">{{keyPanelMetaById[activeCh.id].env||'-'}}</span></div>
-            <div v-if="activeCh.checkin_supported"><span class="hint" style="margin:0">签到</span> <span class="tag">支持</span></div>
-          </div>
-          <div class="hint" style="margin:0">内置通道 · 定义不可编辑；启用 / 停用在上方开关</div>
-        </div>
-      </div>
-
       <!-- ── credential section ── -->
-      <div class="sec-h" style="margin-top:18px">凭证</div>
+      <div class="sec-h" style="margin-top:0">凭证</div>
 
       <!-- key (apikey): entry button opens unified modal -->
       <div v-if="keyMode" class="notebox">
@@ -373,8 +380,59 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
   <!-- 统一新增/编辑浮窗 -->
   <div class="ov" v-if="um.open" @click.self="umClose()">
     <div class="modal" style="min-width:560px;max-width:720px">
-      <div class="modal-h"><h3>{{um.mode==='create'?'新增通道凭证':'编辑密钥型通道 · '+um.draft.id}}</h3><button class="x" @click="umClose()">&times;</button></div>
+      <div class="modal-h">
+        <div>
+          <h3 style="margin-bottom:6px">{{um.tab==='info'?'通道详情 · '+(um.infoId||'') : (um.mode==='create'?'新增通道凭证':'编辑密钥型通道 · '+um.draft.id)}}</h3>
+          <div v-if="um.tab==='info'" class="tabbar"><button class="tab on">详情</button><button class="tab" :disabled="true">编辑</button></div>
+        </div>
+        <button class="x" @click="umClose()">&times;</button>
+      </div>
       <div class="modal-b">
+        <!-- info tab: read-only summary -->
+        <template v-if="um.tab==='info'">
+          <div v-if="um.infoKind==='apikey' && ccOf(um.infoId)" style="border:1px solid var(--border);border-radius:6px;padding:12px;background:var(--bg-elevated)">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
+              <div>
+                <div><span class="hint" style="margin:0">显示名</span> <strong>{{ccOf(um.infoId).display_name}}</strong></div>
+                <div><span class="hint" style="margin:0">Base URL</span> <code class="mono">{{ccOf(um.infoId).base_url}}</code></div>
+                <div><span class="hint" style="margin:0">模型</span> <span class="mono">{{(ccOf(um.infoId).models||[]).join(', ')}}</span></div>
+                <div><span class="hint" style="margin:0">别名</span> <span class="mono">{{Object.entries(ccOf(um.infoId).aliases||{}).map(([k,v])=>k+'→'+v).join(', ')||'无'}}</span></div>
+                <div><span class="hint" style="margin:0">环境变量</span> <span class="mono">{{ccOf(um.infoId).env_api_key||'-'}}</span></div>
+                <div v-if="ccOf(um.infoId).source"><span class="hint" style="margin:0">来源</span> <span class="tag">{{ccOf(um.infoId).source}}</span></div>
+              </div>
+              <div style="display:flex;gap:6px;flex-shrink:0">
+                <button class="btn s pri" @click="um.tab='form'"><span v-html="I.plus"></span>编辑</button>
+                <button class="btn s danger" @click="ccDelete(ccOf(um.infoId))" v-if="ccOf(um.infoId).source!=='seed'" title="删除自定义通道">删除</button>
+                <button class="btn s danger" v-else disabled title="seed 通道不允许删除，请用「启用通道」开关停用">删除(禁用)</button>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="um.infoKind==='apikey'" style="border:1px solid var(--border);border-radius:6px;padding:12px;background:var(--bg-elevated)">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
+              <div>
+                <div><span class="hint" style="margin:0">类型</span> <strong>密钥型</strong></div>
+                <div v-if="keyPanelMetaById[um.infoId]"><span class="hint" style="margin:0">Base URL</span> <code class="mono">{{keyPanelMetaById[um.infoId].base||'内置默认'}}</code></div>
+                <div v-if="keyPanelMetaById[um.infoId]"><span class="hint" style="margin:0">环境变量</span> <span class="mono">{{keyPanelMetaById[um.infoId].env||'-'}}</span></div>
+              </div>
+              <div class="hint" style="margin:0">内置通道 · 定义不可编辑；启用 / 停用在上方开关</div>
+            </div>
+          </div>
+          <div v-else style="border:1px solid var(--border);border-radius:6px;padding:12px;background:var(--bg-elevated)">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
+              <div>
+                <div><span class="hint" style="margin:0">类型</span> <strong>登录型</strong></div>
+                <div><span class="hint" style="margin:0">导入方式</span> <span>本机登录 / 网页登录导入(一个平台可挂多个凭证)</span></div>
+                <div v-if="keyPanelMetaById[um.infoId]"><span class="hint" style="margin:0">Base URL</span> <code class="mono">{{keyPanelMetaById[um.infoId].base||'内置默认'}}</code></div>
+                <div v-if="keyPanelMetaById[um.infoId]"><span class="hint" style="margin:0">环境变量</span> <span class="mono">{{keyPanelMetaById[um.infoId].env||'-'}}</span></div>
+                <div v-if="activeCh && activeCh.id===um.infoId && activeCh.checkin_supported"><span class="hint" style="margin:0">签到</span> <span class="tag">支持</span></div>
+              </div>
+              <div class="hint" style="margin:0">内置通道 · 定义不可编辑；启用 / 停用在上方开关</div>
+            </div>
+            <div class="notebox" style="margin-top:10px"><div class="hint">凭证在下方凭证区或浮窗向导中导入。</div></div>
+          </div>
+        </template>
+        <!-- form tab (create/edit) -->
+        <template v-else>
         <!-- step 1: choose type (create only) -->
         <template v-if="um.mode==='create' && !um.kind">
           <p class="hint" style="margin:0 0 10px">要添加哪一类?</p>
@@ -406,8 +464,9 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
           </div>
           <div v-if="um.warning" class="callout" style="margin-top:10px;font-size:12px;background:var(--warn-bg);border-color:var(--warn-border);color:var(--warn-fg)">探活失败(HTTP {{um.warning.probe_status}}):{{um.warning.probe_error||'无返回内容'}}。定义已保存,可稍后调整 Base URL 重试。</div>
         </template>
+        </template>
       </div>
-      <div class="modal-f" v-if="um.kind">
+      <div class="modal-f" v-if="um.tab==='form'">
         <button class="btn" v-if="um.mode==='create'" @click="um.kind=''">上一步</button>
         <button class="btn" @click="umClose()">取消</button>
         <button class="btn pri" v-if="um.kind==='apikey'" @click="umSave" :disabled="um.busy">{{um.busy?'保存中…':(um.mode==='edit'?'保存修改':'创建通道并保存密钥')}}</button>
