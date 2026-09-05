@@ -2,7 +2,7 @@
 
 旧 `tests/test_gmi_store.py` 覆盖了：
   * parse_credentials 三种粘贴形态（裸 key / Bearer / JSON 包裹）
-  * upsert_account 契约 {"id","updated","row"} + 换 key 置老行 inactive + 同 key 幂等
+  * upsert_account 契约 {"id","updated","row"} + 多 Key 并存(不同 uid 各自成行,均 active)+ 同 key 幂等
   * ensure_env_account 三态（env 未设 / env 首次引导 / env 已存在 active）
   * discover 空壳 + provider 入口端到端契约
   * channel_model_view / set_channel_models 持久化与白名单拦截
@@ -121,7 +121,7 @@ def test_upsert_insert_then_update_contract(gmi_seeded, isolated_db):
     assert len(rows) == 1
     assert rows[0]["access_token"] == "sk-contract-key-8888"
 
-    # 换 key（轮换）= 新 uid = 新行；旧 key 行应被置 inactive，避免调度器选中死 key
+    # 换 key（轮换）= 新 uid = 新行；多 Key 规格下新旧行并存且都 active（spec 21 §3）
     rotated = gmi_seeded.parse_credentials({"api_key": "sk-rotated-key-99999999", "nickname": "main2"})
     result2 = gmi_seeded.upsert_account(rotated)
     assert result2["updated"] is False
@@ -130,9 +130,8 @@ def test_upsert_insert_then_update_contract(gmi_seeded, isolated_db):
     rows = db.list_accounts(provider=CHANNEL_ID)
     assert len(rows) == 2
     active = [r for r in rows if r["status"] == "active"]
-    inactive = [r for r in rows if r["status"] == "inactive"]
-    assert len(active) == 1 and active[0]["access_token"] == "sk-rotated-key-99999999"
-    assert len(inactive) == 1 and inactive[0]["id"] == aid
+    assert len(active) == 2
+    assert {r["access_token"] for r in active} == {"sk-contract-key-8888", "sk-rotated-key-99999999"}
 
 
 def test_upsert_same_key_is_idempotent(gmi_seeded, isolated_db):

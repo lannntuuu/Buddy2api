@@ -111,7 +111,7 @@ def test_upsert_insert_then_update_contract(bailian_seeded, isolated_db):
     assert len(rows) == 1
     assert rows[0]["access_token"] == "sk-contract-key-8888"
 
-    # 换 key（轮换）= 新 uid = 新行；旧 key 行应被置 inactive
+    # 换 key（轮换）= 新 uid = 新行；多 Key 规格下新旧行并存且都 active（spec 21 §3）
     rotated = bailian_seeded.parse_credentials({"api_key": "sk-rotated-key-99999999", "nickname": "main2"})
     result2 = bailian_seeded.upsert_account(rotated)
     assert result2["updated"] is False
@@ -120,9 +120,8 @@ def test_upsert_insert_then_update_contract(bailian_seeded, isolated_db):
     rows = db.list_accounts(provider=CHANNEL_ID)
     assert len(rows) == 2
     active = [r for r in rows if r["status"] == "active"]
-    inactive = [r for r in rows if r["status"] == "inactive"]
-    assert len(active) == 1 and active[0]["access_token"] == "sk-rotated-key-99999999"
-    assert len(inactive) == 1 and inactive[0]["id"] == aid
+    assert len(active) == 2
+    assert {r["access_token"] for r in active} == {"sk-contract-key-8888", "sk-rotated-key-99999999"}
 
 
 def test_upsert_same_key_is_idempotent(bailian_seeded, isolated_db):

@@ -611,10 +611,18 @@ class OpenAICompatProvider:
     def upsert_account(self, parsed: dict) -> dict:
         """Insert or update by (provider, uid). Replaces the key in-place.
 
-        Returns the store_common contract `{"id": aid, "updated": bool}` —
-        gateway/server.py `POST /admin/accounts` reads `result["id"]` /
-        `result["updated"]`, so a bare row or int here 500s the import even
-        though the row landed.
+        Same-uid rows are updated (in-place token refresh); different-uid
+        rows are appended as separate active rows — the auth_manager scheduler
+        picks among all active rows by weight/priority, so the same channel
+        can hold multiple keys concurrently (旋转池). Previously this method
+        deactivated every other active row on the same provider; that single-
+        active constraint was lifted in spec §3 (v2.2.3): keys are not "single-
+        use", they coexist by uid, all eligible for scheduling until
+        individually disabled.
+
+        Returns the store contract `{"id": aid, "updated": bool, "row": ...}`
+        so gateway/server.py POST /admin/accounts reads `result["id"]` /
+        `result["updated"]` without a TypeError on import.
         """
         key = parsed["access_token"]
         base = parsed.get("domain") or self._base_url_default
@@ -623,13 +631,6 @@ class OpenAICompatProvider:
             if row.get("uid") == parsed.get("uid"):
                 existing = row
                 break
-        target_id = existing["id"] if existing else None
-        # 单 key 平台（SINGLE_ACCOUNT=True）：同一时刻只允许一个 active 行。
-        # 换 key 轮换 / 导回旧 key 时，把其余 active 行全部置 inactive 留档
-        #（保留用量历史），避免调度器选中已失效的 key。
-        for row in db.list_accounts(provider=self.id):
-            if row["id"] != target_id and row.get("status") == "active":
-                db.update_account(row["id"], {"status": "inactive"})
         if existing:
             db.update_account(
                 existing["id"],
