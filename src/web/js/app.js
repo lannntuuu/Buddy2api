@@ -14,15 +14,21 @@ const{createApp,ref,onMounted}=Vue;
 createApp({
   setup(){
     const validPages=['dashboard','channels','models','keys','usage','logs','quota','setup','settings'];
-    const savedRaw=localStorage.getItem('cb_gw_page');
-    // localStorage 迁移：老用户记忆的「账号」落到新通道管理，老的「通道与模型」落到新模型配置
-    // accounts: 已废弃 → channels； legacy channels（=旧「通道与模型」页）→ models
-    const migrated=savedRaw==='accounts'?'channels':(savedRaw==='channels'?'models':savedRaw);
-    if(migrated!==savedRaw){try{localStorage.setItem('cb_gw_page',migrated)}catch(_){}}
+    // 页面记忆:新键 cb_gw_page_v2 存当前页;旧键 cb_gw_page 只做一次性迁移
+    // (accounts→channels、legacy channels(旧「通道与模型」)→models)。
+    // 不能直接重读旧键:channels 现在是合法页面值,否则每次刷新都会把「通道管理」错误映射到「模型配置」。
+    let migrated=null;
+    try{migrated=localStorage.getItem('cb_gw_page_v2')}catch(_){}
+    if(!migrated){
+      let savedRaw=null;
+      try{savedRaw=localStorage.getItem('cb_gw_page')}catch(_){}
+      migrated=savedRaw==='accounts'?'channels':(savedRaw==='channels'?'models':savedRaw);
+    }
+    try{localStorage.setItem('cb_gw_page_v2',migrated||'dashboard')}catch(_){}
     const page=ref(validPages.includes(migrated)?migrated:'dashboard'),token=ref(localStorage.getItem('cb_gw_token')||''),toasts=ref([]),meta=ref({title:'Buddy 2 API',version:''}),metaTag=ref('Local model gateway');
     onMounted(async()=>{try{const r=await fetch('/admin/meta',{credentials:'same-origin'});if(r.ok){const d=await r.json();meta.value={title:d.title||'Buddy 2 API',version:d.version||''}}}catch(_){meta.value={title:'Buddy 2 API',version:''}}});
     function tf(m,t='ok'){const id=Date.now()+Math.random();toasts.value=[...toasts.value,{id,m,t}].slice(-4);setTimeout(()=>toasts.value=toasts.value.filter(x=>x.id!==id),2500)}
-    function go(k){page.value=k;localStorage.setItem('cb_gw_page',k)}
+    function go(k){page.value=k;try{localStorage.setItem('cb_gw_page_v2',k)}catch(_){}}
     function saveToken(value){token.value=value.trim();if(token.value)localStorage.setItem('cb_gw_token',token.value);else localStorage.removeItem('cb_gw_token');tf(token.value?'备用 Admin Token 已保存':'备用 Admin Token 已清除')}
     function hardRefresh(){window.location.reload()}
     const theme=ref(localStorage.getItem('cb_gw_theme')||'light');

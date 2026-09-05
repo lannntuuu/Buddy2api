@@ -1,6 +1,6 @@
 import {api,apiErr,fmt,tok} from '../api.js';
 import {I} from '../icons.js';
-const{ref,reactive,computed,onMounted}=Vue;
+const{ref,reactive,computed,onMounted,watch}=Vue;
 
 export default {props:['token','toast'],setup(p){
   // ────────── master list ──────────
