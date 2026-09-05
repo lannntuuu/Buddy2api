@@ -3,7 +3,7 @@ import {I} from '../icons.js';
 const{ref,reactive,computed,onMounted}=Vue;
 
 export default {props:['token','toast'],setup(p){
-  const l=ref([]),ld=ref(true),sa=ref(false),f=reactive({name:'',models:'',limit:null,preset:'custom',channel:'workbuddy'}),res=ref(''),saving=ref(false),copied=ref(false),busy=ref({}),shown=ref({}),channels=ref([{id:'workbuddy',display_name:'WorkBuddy'},{id:'qclaw',display_name:'QClaw'},{id:'qwenwork',display_name:'QwenWork / 千问办公'},{id:'traework',display_name:'TraeWork'},{id:'traesolo',display_name:'Trae SOLO'}]);
+  const l=ref([]),ld=ref(true),sa=ref(false),f=reactive({name:'',models:'',limit:null,preset:'custom',channel:'workbuddy'}),res=ref(''),saving=ref(false),copied=ref(false),busy=ref({}),shown=ref({}),channels=ref([]);
   const clientTypes=[
     {k:'custom',name:'默认',icon:'⚙'},
     {k:'codex',name:'Codex',icon:'◉'},

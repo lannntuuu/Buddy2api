@@ -1,4 +1,8 @@
-"""Channel registry. WorkBuddy, QClaw, QwenWork, and TraeWork are enabled by default."""
+"""Channel registry. WorkBuddy, QClaw, QwenWork, TraeWork, and Trae SOLO are
+enabled by default. GMI and Bailian ship as opt-in data-driven custom
+channels: their definitions live in the `custom_channels` settings key
+(seeded by `providers.custom_channels.seed_initial_definitions()` on first
+boot). User-defined custom channels use the same machinery."""
 
 from __future__ import annotations
 
@@ -6,7 +10,6 @@ import os
 
 from providers.protocol import (
     KNOWN_CHANNEL_IDS,
-    KNOWN_CHANNEL_SET,
     ChannelId,
     Provider,
 )
@@ -15,16 +18,15 @@ from providers.qwenwork import PROVIDER as QWENWORK_PROVIDER
 from providers.traework import PROVIDER as TRAEWORK_PROVIDER
 from providers.traesolo import PROVIDER as TRAESOLO_PROVIDER
 from providers.workbuddy import PROVIDER as WORKBUDDY_PROVIDER
-from providers.gmi import PROVIDER as GMI_PROVIDER
 
 # Canonical default order when the operator has neither set the env var nor
 # saved anything via the Web UI. workbuddy is intentionally first.
 DEFAULT_PROVIDER_IDS: tuple[str, ...] = ("workbuddy", "qclaw", "qwenwork", "traework", "traesolo")
 
-# Extra providers that ship with the gateway but are NOT on by default —
-# opt in via CB_GATEWAY_PROVIDERS (e.g. "workbuddy,qclaw,gmi"). ponytail:
-# keeping these opt-in avoids surprising users who never asked for them.
-OPT_IN_PROVIDER_IDS: tuple[str, ...] = ("gmi",)
+# Opt-in ids (gmi / bailian seed definitions + future custom channels). They
+# ship with the gateway but are NEVER auto-enabled: the admin must opt in via
+# CB_GATEWAY_PROVIDERS or the admin UI toggle.
+OPT_IN_PROVIDER_IDS: tuple[str, ...] = ("gmi", "bailian")
 
 _LOADED: dict[str, Provider] = {
     "workbuddy": WORKBUDDY_PROVIDER,
@@ -32,7 +34,6 @@ _LOADED: dict[str, Provider] = {
     "qwenwork": QWENWORK_PROVIDER,
     "traework": TRAEWORK_PROVIDER,
     "traesolo": TRAESOLO_PROVIDER,
-    "gmi": GMI_PROVIDER,
 }
 
 # Settings-table keys for UI-driven overrides.
@@ -55,6 +56,35 @@ def _lock_first(ordered: list[str]) -> list[str]:
     return head + rest
 
 
+def _custom_definition_ids() -> list[str]:
+    """Cached lookup of custom-channel ids currently in the settings store."""
+    try:
+        from providers import custom_channels
+        return [str(d.get("id") or "") for d in custom_channels.list_definitions() if d.get("id")]
+    except Exception:
+        # settings table may not be initialised yet (very early boot)
+        return []
+
+
+def known_channel_ids() -> tuple[str, ...]:
+    """All channel ids known to the gateway: built-ins union custom.
+
+    Called on every read; cheap because the settings lookup is a single
+    sqlite row. The result is the runtime source of truth for "which ids
+    are addressable" — built-in `KNOWN_CHANNEL_IDS` in protocol.py stays
+    as documentation only.
+    """
+    seen: list[str] = list(KNOWN_CHANNEL_IDS)
+    for cid in _custom_definition_ids():
+        if cid not in seen:
+            seen.append(cid)
+    return tuple(seen)
+
+
+def _known_set() -> frozenset[str]:
+    return frozenset(known_channel_ids())
+
+
 def _read_db_list(key: str) -> list[str] | None:
     try:
         from storage import database as _db
@@ -62,8 +92,9 @@ def _read_db_list(key: str) -> list[str] | None:
     except Exception:
         return None
     if isinstance(value, list) and value:
+        valid = _known_set()
         cleaned = [str(x).strip() for x in value if str(x).strip()]
-        cleaned = [c for c in cleaned if c in KNOWN_CHANNEL_SET]
+        cleaned = [c for c in cleaned if c in valid]
         return cleaned or None
     return None
 
@@ -81,9 +112,10 @@ def _parse_enabled() -> list[str]:
     endpoint that needs to render channel lists must call this.
     """
     raw = (os.environ.get("CB_GATEWAY_PROVIDERS") or "").strip()
+    valid = _known_set()
     if raw:
         parts = [item.strip() for item in raw.split(",") if item.strip()]
-        parts = [p for p in parts if p in KNOWN_CHANNEL_SET]
+        parts = [p for p in parts if p in valid]
         if not parts:
             return list(DEFAULT_PROVIDER_IDS)
         return _lock_first(parts)
@@ -92,7 +124,7 @@ def _parse_enabled() -> list[str]:
     if not enabled:
         # No env, no UI write → alphabetical fallback per the contract: the
         # first time the user touches the order, the saved order takes over.
-        return _lock_first(sorted(KNOWN_CHANNEL_SET))
+        return _lock_first(sorted(valid))
 
     # Apply db-persisted ordering if present, otherwise preserve the enabled
     # list as-written.
@@ -128,13 +160,14 @@ def set_enabled_channels(ids: list[str], order: list[str] | None = None) -> tupl
     enabled set (subset of ordered_full) and ordered_full is the display
     order for every known channel.
     """
+    valid = _known_set()
     cleaned_ids = [str(x).strip() for x in (ids or []) if str(x).strip()]
     if not cleaned_ids:
         raise ValueError("At least one channel id is required")
-    unknown = [c for c in cleaned_ids if c not in KNOWN_CHANNEL_SET]
+    unknown = [c for c in cleaned_ids if c not in valid]
     if unknown:
         raise ValueError(f"Unknown channel id(s): {', '.join(unknown)}")
-    cleaned_ids = [c for c in cleaned_ids if c in KNOWN_CHANNEL_SET]
+    cleaned_ids = [c for c in cleaned_ids if c in valid]
     if not cleaned_ids:
         raise ValueError("At least one known channel id is required")
     # workbuddy is always enabled; force it into the enabled set.
@@ -143,7 +176,7 @@ def set_enabled_channels(ids: list[str], order: list[str] | None = None) -> tupl
 
     if order:
         cleaned_order = [str(x).strip() for x in order if str(x).strip()]
-        cleaned_order = [c for c in cleaned_order if c in KNOWN_CHANNEL_SET]
+        cleaned_order = [c for c in cleaned_order if c in valid]
     else:
         cleaned_order = list(cleaned_ids)
 
@@ -174,7 +207,7 @@ def enabled_provider_ids() -> list[str]:
 
 
 def is_known_channel(channel: str) -> bool:
-    return channel in KNOWN_CHANNEL_SET
+    return channel in _known_set()
 
 
 def is_channel_enabled(channel: str) -> bool:
@@ -182,9 +215,26 @@ def is_channel_enabled(channel: str) -> bool:
 
 
 def get_provider(channel: str) -> Provider | None:
+    """Resolve a provider by id. Two-level lookup:
+
+      1. built-in `_LOADED` registry (gmi / bailian / qclaw / ...)
+      2. custom OpenAI-compat providers materialised from the
+         `custom_channels` settings key (lazy; cached per definition)
+
+    Returns None when the id is unknown or the channel is not currently
+    enabled (custom channels are not auto-enabled; the admin must enable
+    them via env or DB just like opt-in built-ins).
+    """
     if channel not in enabled_provider_ids():
         return None
-    return _LOADED.get(channel)
+    built_in = _LOADED.get(channel)
+    if built_in is not None:
+        return built_in
+    try:
+        from providers import custom_channels
+        return custom_channels.get_provider(channel)
+    except Exception:
+        return None
 
 
 def register_provider(provider: Provider) -> None:

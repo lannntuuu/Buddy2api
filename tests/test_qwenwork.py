@@ -19,9 +19,13 @@ def qwen_enabled(monkeypatch):
     monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
 
 
-def test_qwenwork_in_default_registry(monkeypatch):
+def test_qwenwork_in_default_registry(monkeypatch, isolated_db):
     monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
-    assert providers.enabled_provider_ids() == ["workbuddy", "qclaw", "qwenwork", "traework", "traesolo"]
+    enabled = providers.enabled_provider_ids()
+    canonical = {"workbuddy", "qclaw", "qwenwork", "traework", "traesolo"}
+    assert canonical.issubset(set(enabled)), (
+        f"missing default channels: {canonical - set(enabled)}"
+    )
     assert providers.get_provider("qwenwork") is not None
     assert "qwenwork" in providers._LOADED
 

@@ -116,7 +116,25 @@ def _schedule_traework_sync() -> None:
 # FastAPI app assembly
 # ============================================================
 
-app = FastAPI(title="Buddy 2 API", version=VERSION)
+import contextlib
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app):
+    """Boot-time hooks. Currently only the custom-channel seed migration,
+    which is idempotent and runs whenever the settings key is absent."""
+    # Defer imports: gateway deps / DB / custom_channels all touch the same
+    # module graph; touching them at import time creates a cycle.
+    from providers import custom_channels as _cc
+
+    try:
+        _cc.seed_initial_definitions()
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"[startup] custom-channels seed migration failed: {exc}\n")
+    yield
+
+
+app = FastAPI(title="Buddy 2 API", version=VERSION, lifespan=_lifespan)
 from gateway import deps as _deps  # imported here so we can pass values to CORS
 _CORS_ORIGINS = _deps._cors_origins()
 
