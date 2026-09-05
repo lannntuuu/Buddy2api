@@ -133,8 +133,6 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
     KEY_PANEL_META.value=meta;
   }
   const keyKey=ref(''),keyNick=ref(''),keyBase=ref(''),keyBusy=ref(false);
-  const keyMode=computed(()=>{const c=activeCh.value;return c&&c.kind==='apikey'?c.id:''});
-  const KEY_PANEL=computed(()=>KEY_PANEL_META.value[keyMode.value]||{name:'',base:'',env:''});
 
   const disc=ref(null),dl=ref(false),scanning=ref(false),authPath=ref('');
   const solo=reactive({pending:false,url:'',pendingId:'',callbackUrl:'',state:'',uid:'',error:'',manual:''}),soloBusy=ref(false);let soloTimer=null,soloGen=0;
@@ -299,7 +297,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
   watch(list,()=>refreshKeyMeta(),{deep:false});
   watch(ccList,()=>refreshKeyMeta(),{deep:false});
 
-  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,loginChannels,apikeyChannels,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccDelete,um,openKeyModal,umClose,umSave,onModalImported,openInfo,KEY_PANEL,keyMode,disc,dl,scanning,authPath,discover,scan,scanCustom,clearPath,solo,soloBusy,soloSelected,startSoloLogin,cancelSolo,completeSolo,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,size,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I,keyPanelMetaById,loginTbody,apikeyTbody}
+  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,loginChannels,apikeyChannels,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccDelete,um,openKeyModal,umClose,umSave,onModalImported,openInfo,disc,dl,scanning,authPath,discover,scan,scanCustom,clearPath,solo,soloBusy,soloSelected,startSoloLogin,cancelSolo,completeSolo,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,size,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I,keyPanelMetaById,loginTbody,apikeyTbody}
 },template:`
 <div>
   <div class="phead"><h1>通道管理</h1><p>定义通道 · 管理凭证 · 启用开关</p></div>
@@ -341,30 +339,6 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
     </div>
   </div>
 
-  <div v-if="activeCh" class="card" style="margin-top:16px">
-    <div class="card-h">凭证 · <strong style="font-family:var(--mono)">{{activeCh.id}}</strong><span class="sub" style="margin-left:8px">{{activeCh.display_name||activeCh.id}}</span></div>
-    <div class="card-p">
-
-      <!-- ── credential section ── -->
-      <div class="sec-h" style="margin-top:0">凭证</div>
-
-      <!-- key (apikey): entry button opens unified modal -->
-      <div v-if="keyMode" class="notebox">
-        <div class="detect-title">{{KEY_PANEL.name}} · 上游密钥</div>
-        <div class="hint">同一通道可保存多把密钥(不同 Key 各自成行、都参与调度),按权重/优先级轮换;不需要的行在下方列表停用即可。密钥通过浮窗添加或轮换,不会回显,列表只显示尾号。注意:这是上游通行证,与「API Keys」页发给客户端的网关 Key 是两回事。</div>
-        <div style="display:flex;gap:8px;margin-top:8px">
-          <button class="btn s pri" @click="openKeyModal()"><span v-html="I.plus"></span>添加/轮换密钥</button>
-          <span class="hint" style="margin:0;align-self:center">环境变量 <span class="mono">{{KEY_PANEL.env||'(未配置)'}}</span> 仍可用(无可用密钥时自动导入)</span>
-        </div>
-      </div>
-
-      <!-- login-type: reusable import component (also embedded in the unified modal) -->
-      <login-import v-else-if="activeCh" :channel-id="activeChannel" @added="loadAccounts"></login-import>
-
-      <!-- ── accounts list moved to standalone Card D below ── -->
-    </div>
-  </div>
-
   <!-- ── Card D: credentials list (global summary, independent of the selected channel) ── -->
   <div style="margin-top:16px">
   <div class="sec-h" style="margin-bottom:8px">凭证列表<span class="hint" style="margin-left:8px">全部通道的账号与密钥汇总;同一密钥型通道可并存多把 Key,按权重/优先级轮换</span></div>
@@ -374,7 +348,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
     <tr v-for="a in visibleAccounts" :key="a.id"><td style="font-weight:600">{{a.nickname||a.name}} <span class="tag warn" v-if="dirty(a)">未保存</span></td><td><span class="tag">{{a.provider||'workbuddy'}}</span></td><td class="mono">{{a.uid?.slice(0,8)}}…</td><td><span class="badge" :class="a.status">{{a.status}}</span></td><td><input class="numctl" v-model.number="a._weight" type="number" min="1" max="100"/></td><td><input class="numctl" v-model.number="a._priority" type="number" min="-100" max="100"/></td><td class="credit-cell"><input class="numctl credit" v-model.number="a._creditSnapshot" type="number" min="0" step="0.01" placeholder="0"/><div class="credit-meta" v-if="a.credit_snapshot>0">余 {{credit(a.credit_remaining)}} · 已用 {{creditPct(a)}}</div><div class="credit-meta" v-else-if="a.total_credits>0">累计消耗(估算) {{credit(a.total_credits)}}</div><div class="credit-meta" v-else>官方失败时可手动校准</div></td><td>{{tokenLife(a)}}</td><td>{{a.total_requests}}</td><td>{{tok(a.total_tokens)}}</td><td>{{credit(a.total_credits)}}</td><td><div class="ops"><button class="btn s" @click="saveMeta(a)" :disabled="!dirty(a)||busyKey(a.id,'save')">{{busyKey(a.id,'save')?'保存中':'保存'}}</button><button class="btn s" @click="toggle(a)" :disabled="busyKey(a.id,'toggle')">{{busyKey(a.id,'toggle')?'处理中':(a.status==='active'?'禁用':'启用')}}</button><button class="btn s" @click="testOne(a)" :disabled="tl===a.id">{{tl===a.id?'测试中':'测试'}}</button><button class="btn s" @click="ref2(a)" :disabled="busyKey(a.id,'refresh')">{{busyKey(a.id,'refresh')?'刷新中':'刷新'}}</button><button class="btn s danger" @click="del(a)">删除</button></div></td></tr>
     <tr v-if="!visibleAccounts.length"><td colspan="12" class="empty">没有匹配的账号</td></tr>
   </tbody></table></div></div>
-  <div class="card card-p empty" v-else><div class="em">🔌</div><p>暂无账号 · 登录型平台在上方「凭证」区域检测导入;密钥型通道通过浮窗添加密钥</p></div>
+  <div class="card card-p empty" v-else><div class="em">🔌</div><p>暂无账号 · 登录型平台在通道行内「详情」浮窗的凭证区检测导入;密钥型通道通过浮窗添加密钥</p></div>
   </div>
 
   <!-- 统一新增/编辑浮窗 -->
@@ -390,31 +364,33 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
       <div class="modal-b">
         <!-- info tab: read-only summary -->
         <template v-if="um.tab==='info'">
-          <div v-if="um.infoKind==='apikey' && ccOf(um.infoId)" style="border:1px solid var(--border);border-radius:6px;padding:12px;background:var(--bg-elevated)">
+          <div v-if="um.infoKind==='apikey'" style="border:1px solid var(--border);border-radius:6px;padding:12px;background:var(--bg-elevated)">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
               <div>
-                <div><span class="hint" style="margin:0">显示名</span> <strong>{{ccOf(um.infoId).display_name}}</strong></div>
-                <div><span class="hint" style="margin:0">Base URL</span> <code class="mono">{{ccOf(um.infoId).base_url}}</code></div>
-                <div><span class="hint" style="margin:0">模型</span> <span class="mono">{{(ccOf(um.infoId).models||[]).join(', ')}}</span></div>
-                <div><span class="hint" style="margin:0">别名</span> <span class="mono">{{Object.entries(ccOf(um.infoId).aliases||{}).map(([k,v])=>k+'→'+v).join(', ')||'无'}}</span></div>
-                <div><span class="hint" style="margin:0">环境变量</span> <span class="mono">{{ccOf(um.infoId).env_api_key||'-'}}</span></div>
-                <div v-if="ccOf(um.infoId).source"><span class="hint" style="margin:0">来源</span> <span class="tag">{{ccOf(um.infoId).source}}</span></div>
+                <div v-if="ccOf(um.infoId)"><span class="hint" style="margin:0">显示名</span> <strong>{{ccOf(um.infoId).display_name}}</strong></div>
+                <div v-if="ccOf(um.infoId)"><span class="hint" style="margin:0">Base URL</span> <code class="mono">{{ccOf(um.infoId).base_url}}</code></div>
+                <div v-if="ccOf(um.infoId)"><span class="hint" style="margin:0">模型</span> <span class="mono">{{(ccOf(um.infoId).models||[]).join(', ')}}</span></div>
+                <div v-if="ccOf(um.infoId)"><span class="hint" style="margin:0">别名</span> <span class="mono">{{Object.entries(ccOf(um.infoId).aliases||{}).map(([k,v])=>k+'→'+v).join(', ')||'无'}}</span></div>
+                <div v-if="ccOf(um.infoId)"><span class="hint" style="margin:0">环境变量</span> <span class="mono">{{ccOf(um.infoId).env_api_key||'-'}}</span></div>
+                <div v-if="ccOf(um.infoId)&&ccOf(um.infoId).source"><span class="hint" style="margin:0">来源</span> <span class="tag">{{ccOf(um.infoId).source}}</span></div>
+                <div v-if="!ccOf(um.infoId)"><span class="hint" style="margin:0">类型</span> <strong>密钥型</strong></div>
+                <div v-if="!ccOf(um.infoId)&&keyPanelMetaById[um.infoId]"><span class="hint" style="margin:0">Base URL</span> <code class="mono">{{keyPanelMetaById[um.infoId].base||'内置默认'}}</code></div>
+                <div v-if="!ccOf(um.infoId)&&keyPanelMetaById[um.infoId]"><span class="hint" style="margin:0">环境变量</span> <span class="mono">{{keyPanelMetaById[um.infoId].env||'-'}}</span></div>
               </div>
-              <div style="display:flex;gap:6px;flex-shrink:0">
+              <div style="display:flex;gap:6px;flex-shrink:0" v-if="ccOf(um.infoId)">
                 <button class="btn s pri" @click="um.tab='form'"><span v-html="I.plus"></span>编辑</button>
                 <button class="btn s danger" @click="ccDelete(ccOf(um.infoId))" v-if="ccOf(um.infoId).source!=='seed'" title="删除自定义通道">删除</button>
                 <button class="btn s danger" v-else disabled title="seed 通道不允许删除，请用「启用通道」开关停用">删除(禁用)</button>
               </div>
+              <div class="hint" style="margin:0" v-else>内置通道 · 定义不可编辑；启用 / 停用在上方开关</div>
             </div>
-          </div>
-          <div v-else-if="um.infoKind==='apikey'" style="border:1px solid var(--border);border-radius:6px;padding:12px;background:var(--bg-elevated)">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
-              <div>
-                <div><span class="hint" style="margin:0">类型</span> <strong>密钥型</strong></div>
-                <div v-if="keyPanelMetaById[um.infoId]"><span class="hint" style="margin:0">Base URL</span> <code class="mono">{{keyPanelMetaById[um.infoId].base||'内置默认'}}</code></div>
-                <div v-if="keyPanelMetaById[um.infoId]"><span class="hint" style="margin:0">环境变量</span> <span class="mono">{{keyPanelMetaById[um.infoId].env||'-'}}</span></div>
+            <div class="sec-h" style="margin:14px 0 6px">凭证 · 上游密钥</div>
+            <div class="notebox">
+              <div class="hint">同一通道可保存多把密钥(不同 Key 各自成行、都参与调度),按权重/优先级轮换;不需要的行在下方列表停用即可。密钥不回显,列表只显示尾号。注意:这是上游通行证,与「API Keys」页发给客户端的网关 Key 是两回事。</div>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <button class="btn s pri" @click="openKeyModal()"><span v-html="I.plus"></span>添加/轮换密钥</button>
+                <span class="hint" style="margin:0;align-self:center">环境变量 <span class="mono">{{keyPanelMetaById[um.infoId]?keyPanelMetaById[um.infoId].env||'(未配置)':'(未配置)'}}</span> 仍可用(无可用密钥时自动导入)</span>
               </div>
-              <div class="hint" style="margin:0">内置通道 · 定义不可编辑；启用 / 停用在上方开关</div>
             </div>
           </div>
           <div v-else style="border:1px solid var(--border);border-radius:6px;padding:12px;background:var(--bg-elevated)">
@@ -428,7 +404,8 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
               </div>
               <div class="hint" style="margin:0">内置通道 · 定义不可编辑；启用 / 停用在上方开关</div>
             </div>
-            <div class="notebox" style="margin-top:10px"><div class="hint">凭证在下方凭证区或浮窗向导中导入。</div></div>
+            <div class="sec-h" style="margin:14px 0 6px">凭证</div>
+            <login-import :channel-id="um.infoId" @added="loadAccounts"></login-import>
           </div>
         </template>
         <!-- form tab (create/edit) -->
