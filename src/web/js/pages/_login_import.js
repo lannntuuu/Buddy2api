@@ -129,7 +129,7 @@ export default {
         <div class="detect-box">
           <h4>默认扫描目录</h4>
           <div v-if="disc?.dirs?.length">
-            <div class="detect-path" v-for="d in disc.dirs" :key="d.path">
+            <div class="detect-path" v-for="d in disc.dirs" :key="d.path" :title="d.path">
               <span class="badge" :class="d.exists?(d.file_count?'ok':'inactive'):'err'">{{d.exists?d.file_count+' 个文件':'不存在'}}</span>
               <code :title="d.path">{{d.path}}</code>
             </div>

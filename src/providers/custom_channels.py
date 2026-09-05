@@ -27,6 +27,10 @@ from storage import database as db
 
 SETTINGS_KEY = "custom_channels"
 
+# When the admin omits `models` (or sends an empty list), the channel falls
+# back to this default whitelist. Slug char set [a-z0-9_-] uppercases cleanly.
+DEFAULT_MODELS = ("DeepSeek-V4-Flash",)
+
 # Definition validation ------------------------------------------------------
 
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -95,24 +99,31 @@ def validate_definition(
         )
 
     models = definition.get("models")
-    if not isinstance(models, list) or not models:
-        raise ValueError("models must be a non-empty array of model id strings")
+    # `models` is OPTIONAL. Omitted / None / empty list all mean "use the
+    # default whitelist" — the handler fills DEFAULT_MODELS before persisting.
+    # Validation only checks the values the admin actually provided
+    # (spec 23 §1). Keep this function pure.
     cleaned_models: list[str] = []
-    for m in models:
-        if not isinstance(m, str):
-            raise ValueError("models must be an array of strings")
-        text = m.strip()
-        if not text:
-            raise ValueError("models must be an array of non-empty strings")
-        cleaned_models.append(text)
-    if not cleaned_models:
-        raise ValueError("models must be a non-empty array of non-empty strings")
+    if models:
+        if not isinstance(models, list):
+            raise ValueError("models must be an array of model id strings")
+        for m in models:
+            if not isinstance(m, str):
+                raise ValueError("models must be an array of strings")
+            text = m.strip()
+            if not text:
+                raise ValueError("models must be an array of non-empty strings")
+            cleaned_models.append(text)
 
     aliases = definition.get("aliases")
     if aliases is None:
         aliases = {}
     if not isinstance(aliases, dict):
         raise ValueError("aliases must be an object mapping alias -> model id")
+    # Effective model set for alias validation: the admin-provided list, or the
+    # default whitelist when models is omitted (spec 23 §5: an alias value must
+    # point at the default model or a user-supplied model id).
+    _effective_models = cleaned_models or list(DEFAULT_MODELS)
     cleaned_aliases: dict[str, str] = {}
     for k, v in aliases.items():
         ak = str(k).strip()
@@ -121,7 +132,7 @@ def validate_definition(
             raise ValueError("alias keys must be non-empty")
         if not av:
             raise ValueError("alias values must be non-empty")
-        if av not in cleaned_models:
+        if av not in _effective_models:
             raise ValueError(
                 f"alias '{ak}' points to '{av}' which is not in the models list"
             )

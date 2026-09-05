@@ -450,6 +450,7 @@ tr:hover td{background:var(--accent-soft)}
 /* ---- form & inputs ----------------------------------------- */
 .field{margin-bottom:var(--sp-4)}
 .field label{display:block;font-size:var(--fs-b);font-weight:600;margin-bottom:4px;color:var(--fg)}
+.field label .req{color:var(--err);font-weight:700}
 .field input,.field textarea,.field select{width:100%;padding:7px 10px;
   border:1px solid var(--border-strong);border-radius:var(--r-m);
   font:inherit;font-size:var(--fs-m);outline:none;background:var(--bg-elevated);

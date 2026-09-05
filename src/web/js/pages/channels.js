@@ -68,10 +68,12 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
     const f=um.value.draft;
     if(!f.id.trim()||!f.display_name.trim()||!f.base_url.trim()){p.toast('id / 名称 / Base URL 必填','err');return}
     const models=f.modelsText.split(',').map(s=>s.trim()).filter(Boolean);
-    if(!models.length){p.toast('至少填一个模型 id(逗号分隔)','err');return}
+    // models 可选:为空不传,让后端补默认 ["DeepSeek-V4-Flash"](spec 23 §2.1)
     const aliases={};f.aliases.split(/\r?\n/).forEach(line=>{const [k,...rest]=line.split('→');const v=rest.join('→');const ak=(k||'').trim(),av=(v||'').trim();if(ak&&av)aliases[ak]=av});
-    const body={display_name:f.display_name.trim(),base_url:f.base_url.trim(),models,aliases};
-    if(f.env_api_key.trim())body.env_api_key=f.env_api_key.trim();else body.env_api_key='';
+    const body={display_name:f.display_name.trim(),base_url:f.base_url.trim(),aliases};
+    if(models.length)body.models=models;
+    // env_api_key 可选:为空不传,让后端生成 CB_<ID 大写>(spec 23 §2.1)
+    if(f.env_api_key.trim())body.env_api_key=f.env_api_key.trim();
     if(f.api_key.trim())body.api_key=f.api_key.trim();
     um.value.busy=true;
     try{
@@ -431,13 +433,13 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
         <!-- step 2b: apikey form -->
         <template v-else-if="um.kind==='apikey'">
           <div class="form-grid">
-            <div class="field"><label>通道 ID *<span class="hint" style="margin:0" v-if="um.mode==='create'">小写字母数字下划线连字符,32 字以内</span></label><input v-model="um.draft.id" :disabled="um.mode==='edit'" placeholder="如 siliconflow"/></div>
-            <div class="field"><label>显示名称 *</label><input v-model="um.draft.display_name" placeholder="如 硅基流动"/></div>
-            <div class="field"><label>Base URL *<span class="hint" style="margin:0">https:// 或 http://127.0.0.1[:port]</span></label><input v-model="um.draft.base_url" placeholder="https://api.example.com/v1"/></div>
-            <div class="field"><label>模型白名单 *<span class="hint" style="margin:0">逗号分隔,至少一个;保存后可在「模型配置」页调整</span></label><input v-model="um.draft.modelsText" placeholder="model-a, model-b"/></div>
+            <div class="field"><label>通道 ID <span class="req">*</span><span class="hint" style="margin:0" v-if="um.mode==='create'">小写字母数字下划线连字符,32 字以内</span></label><input v-model="um.draft.id" :disabled="um.mode==='edit'" placeholder="如 siliconflow"/></div>
+            <div class="field"><label>显示名称 <span class="req">*</span></label><input v-model="um.draft.display_name" placeholder="如 硅基流动"/></div>
+            <div class="field"><label>Base URL <span class="req">*</span><span class="hint" style="margin:0">https:// 或 http://127.0.0.1[:port]</span></label><input v-model="um.draft.base_url" placeholder="https://api.example.com/v1"/></div>
+            <div class="field"><label>模型白名单<span class="hint" style="margin:0">可选;留空默认 DeepSeek-V4-Flash,保存后可在「模型配置」页调整或用探活拉取</span></label><input v-model="um.draft.modelsText" placeholder="model-a, model-b"/></div>
             <div class="field"><label>别名<span class="hint" style="margin:0">每行 "别名→模型 id",可空</span></label><textarea v-model="um.draft.aliases" rows="2" style="font-family:var(--mono)" placeholder="auto→model-a"></textarea></div>
-            <div class="field"><label>环境变量名<span class="hint" style="margin:0">可选,匹配 ^CB_[A-Z0-9_]+$</span></label><input v-model="um.draft.env_api_key" placeholder="CB_MY_KEY"/></div>
-            <div class="field"><label>API Key *<span class="hint" style="margin:0">{{um.mode==='edit'?'留空保留旧 Key;填则追加/轮换(同 Key 跳过)':'裸 Key / Bearer xxx / {"api_key":"..."} 均可'}}</span></label><input v-model="um.draft.api_key" type="password" :placeholder="um.mode==='edit'?'留空不轮换':'粘贴上游 API Key'"/></div>
+            <div class="field"><label>环境变量名<span class="hint" style="margin:0">可选;留空自动生成 CB_&lt;通道ID大写&gt;</span></label><input v-model="um.draft.env_api_key" placeholder="CB_MY_KEY"/></div>
+            <div class="field"><label>API Key <span v-if="um.mode==='create'" class="req">*</span><span class="hint" style="margin:0">{{um.mode==='edit'?'留空保留旧 Key;填则追加/轮换(同 Key 跳过)':'裸 Key / Bearer xxx / {"api_key":"..."} 均可'}}</span></label><input v-model="um.draft.api_key" type="password" :placeholder="um.mode==='edit'?'留空不轮换':'粘贴上游 API Key'"/></div>
           </div>
           <div v-if="um.warning" class="callout" style="margin-top:10px;font-size:12px;background:var(--warn-bg);border-color:var(--warn-border);color:var(--warn-fg)">探活失败(HTTP {{um.warning.probe_status}}):{{um.warning.probe_error||'无返回内容'}}。定义已保存,可稍后调整 Base URL 重试。</div>
         </template>

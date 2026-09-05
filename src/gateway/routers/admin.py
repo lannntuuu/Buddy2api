@@ -267,6 +267,14 @@ async def admin_create_custom_channel(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Defaults (spec 23 §1): `models` optional → fall back to DEFAULT_MODELS;
+    # `env_api_key` left blank → auto-generate "CB_<ID uppercase>". Explicit
+    # values still pass through validate_definition's checks above.
+    if not data.get("models"):
+        data["models"] = list(custom_channels.DEFAULT_MODELS)
+    if not data.get("env_api_key"):
+        data["env_api_key"] = "CB_" + cid.upper()
+
     api_key = data.get("api_key")
     api_key = str(api_key).strip() if api_key is not None else ""
 
@@ -359,6 +367,16 @@ async def admin_update_custom_channel(
         custom_channels.validate_definition(merged, reserved_ids=reserved, exclude_id=cid)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Defaults (spec 23 §1): `models` optional → fall back to DEFAULT_MODELS;
+    # `env_api_key` left blank (or omitted — the frontend omits it when cleared,
+    # see §2) → auto-generate "CB_<ID uppercase>". Explicit non-empty values
+    # still passed through validate_definition's checks above; an omitted key
+    # that happens to be empty is treated as "clear → regenerate".
+    if not merged.get("models"):
+        merged["models"] = list(custom_channels.DEFAULT_MODELS)
+    if "env_api_key" not in data or not str(merged.get("env_api_key") or "").strip():
+        merged["env_api_key"] = "CB_" + cid.upper()
 
     api_key = data.get("api_key")
     api_key_present = api_key is not None

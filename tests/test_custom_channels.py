@@ -320,3 +320,182 @@ def test_definition_default_used_when_id_models_unset(isolated_db):
     view = control_plane.channel_model_view("zchan2")
     assert view["models"] == ["seed-only"]
     assert view["defaults"]["models"] == ["seed-only"]
+
+
+# ---------------------------------------------------------------------------
+# spec 23 §1：models / env_api_key 可选化（纯校验层不报错）
+# ---------------------------------------------------------------------------
+
+
+def test_validate_accepts_omitted_models():
+    """models 缺省 / None / 空数组都通过纯校验（默认补值放 handler）。"""
+    base = {"id": "ok", "display_name": "X", "base_url": "https://x/v1"}
+    cc.validate_definition({**base}, reserved_ids=set())
+    cc.validate_definition({**base, "models": None}, reserved_ids=set())
+    cc.validate_definition({**base, "models": []}, reserved_ids=set())
+
+
+def test_validate_accepts_omitted_env_name():
+    """env_api_key 缺省 / None / 空字符串都通过纯校验。"""
+    base = {"id": "ok", "display_name": "X", "base_url": "https://x/v1"}
+    cc.validate_definition({**base}, reserved_ids=set())
+    cc.validate_definition({**base, "env_api_key": None}, reserved_ids=set())
+    cc.validate_definition({**base, "env_api_key": ""}, reserved_ids=set())
+
+
+def test_validate_alias_may_point_to_default_model_when_models_omitted():
+    """models 缺省时用默认模型做别名校验;指向默认模型的别名放行(§5)。"""
+    cc.validate_definition(
+        {
+            "id": "ok",
+            "display_name": "X",
+            "base_url": "https://x/v1",
+            "aliases": {"auto": "DeepSeek-V4-Flash"},
+        },
+        reserved_ids=set(),
+    )
+
+
+def test_validate_rejects_alias_pointing_to_unknown_model():
+    """别名指向既非用户模型也非默认模型的 id 仍报错。"""
+    with pytest.raises(ValueError, match="not in the models list"):
+        cc.validate_definition(
+            {
+                "id": "ok",
+                "display_name": "X",
+                "base_url": "https://x/v1",
+                "aliases": {"auto": "does-not-exist"},
+            },
+            reserved_ids=set(),
+        )
+
+
+# ---------------------------------------------------------------------------
+# spec 23 §1 handler 级：POST /admin/channels/custom 不带 models/env → 补默认
+# ---------------------------------------------------------------------------
+
+
+def _make_request(body: dict):
+    """构造一个最小 Starlette Request, body 走 _read_json_object 的 stream()。"""
+    import json
+    from starlette.requests import Request
+
+    raw = json.dumps(body).encode("utf-8")
+
+    async def receive():
+        return {"type": "http.request", "body": raw, "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/admin/channels/custom",
+        "headers": [(b"content-type", b"application/json")],
+        "query_string": b"",
+    }
+    return Request(scope, receive=receive)
+
+
+def test_post_custom_fills_default_models_and_generated_env(isolated_db, monkeypatch):
+    """POST 不带 models / env_api_key(但带 api_key 走完整链路)→
+    definition.models == ['DeepSeek-V4-Flash'] 且 env_api_key == 'CB_<ID 大写>'。"""
+    import asyncio
+    from gateway import deps as _deps
+    from gateway.routers import admin as _admin
+
+    # 关掉管理鉴权,让 handler 直接跑
+    monkeypatch.setattr(_deps, "ALLOW_NO_ADMIN_AUTH", True)
+
+    cid = "siliconflow"
+
+    async def run():
+        req = _make_request(
+            {
+                "id": cid,
+                "display_name": "硅基流动",
+                "base_url": "https://api.siliconflow.cn/v1",
+                "api_key": "sk-test-siliconflow-1234567890",
+            }
+        )
+        return await _admin.admin_create_custom_channel(req, authorization=None)
+
+    out = asyncio.run(run())
+    assert out["id"] == cid
+    assert out["models"] == ["DeepSeek-V4-Flash"]
+    assert out["env_api_key"] == "CB_" + cid.upper()
+
+    # 持久化定义也确认
+    stored = cc.get_definition(cid)
+    assert stored["models"] == ["DeepSeek-V4-Flash"]
+    assert stored["env_api_key"] == "CB_" + cid.upper()
+
+
+def test_post_custom_explicit_models_and_env_passthrough(isolated_db, monkeypatch):
+    """显式传 models / env_api_key 仍原样保存(不覆盖)。"""
+    import asyncio
+    from gateway import deps as _deps
+    from gateway.routers import admin as _admin
+
+    monkeypatch.setattr(_deps, "ALLOW_NO_ADMIN_AUTH", True)
+    cid = "deepseekx"
+
+    async def run():
+        req = _make_request(
+            {
+                "id": cid,
+                "display_name": "DSX",
+                "base_url": "https://api.dsx/v1",
+                "models": ["m1", "m2"],
+                "env_api_key": "CB_DSX_KEY",
+                "api_key": "sk-dsx-test-1234567890",
+            }
+        )
+        return await _admin.admin_create_custom_channel(req, authorization=None)
+
+    out = asyncio.run(run())
+    assert out["models"] == ["m1", "m2"]
+    assert out["env_api_key"] == "CB_DSX_KEY"
+
+
+def test_put_custom_blank_env_generates_by_path_param(isolated_db, monkeypatch):
+    """edit 模式 PUT,body 不带 env_api_key → 按路径参数 cid 生成 CB_<大写>。"""
+    import asyncio
+    import json
+    from starlette.requests import Request
+    from gateway import deps as _deps
+    from gateway.routers import admin as _admin
+
+    monkeypatch.setattr(_deps, "ALLOW_NO_ADMIN_AUTH", True)
+    cid = "editchan"
+    cc.save_definitions(
+        [
+            {
+                "id": cid,
+                "display_name": "Edit",
+                "base_url": "https://edit.example.com/v1",
+                "models": ["a"],
+                "env_api_key": "CB_OLD",
+            }
+        ]
+    )
+
+    async def receive():
+        raw = json.dumps({"display_name": "Edit2", "models": []}).encode("utf-8")
+        return {"type": "http.request", "body": raw, "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "PUT",
+        "path": f"/admin/channels/custom/{cid}",
+        "headers": [(b"content-type", b"application/json")],
+        "query_string": b"",
+    }
+
+    async def run():
+        req = Request(scope, receive=receive)
+        return await _admin.admin_update_custom_channel(cid, req, authorization=None)
+
+    out = asyncio.run(run())
+    assert out["env_api_key"] == "CB_" + cid.upper()
+    # 未传的 models 仍落默认
+    assert out["models"] == ["DeepSeek-V4-Flash"]
+
