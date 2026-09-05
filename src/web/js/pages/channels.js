@@ -29,24 +29,24 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
   const apikeyChannels=computed(()=>list.value.filter(c=>c.kind==='apikey'));
 
   // ────────── unified add/edit modal ──────────
-  const um=ref({open:false,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',draft:{},warning:null,busy:false});
+  const um=ref({open:false,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',draft:{},warning:null,busy:false,envTouched:false});
   function umEmptyDraft(){return {id:'',display_name:'',base_url:'',modelsText:'',aliasRows:[{k:'',v:''}],env_api_key:'',api_key:''}}
   function openKeyModal(def){  // def: existing definition for edit; omit for create
-    if(def){um.value={open:true,mode:'edit',kind:'apikey',channelId:def.id,tab:'form',infoId:'',infoKind:'',warning:null,busy:false,draft:{
+    if(def){um.value={open:true,mode:'edit',kind:'apikey',channelId:def.id,tab:'form',infoId:'',infoKind:'',warning:null,busy:false,envTouched:false,draft:{
       id:def.id,display_name:def.display_name||'',base_url:def.base_url||'',
       modelsText:(def.models||[]).join(', '),
       aliasRows:Object.entries(def.aliases||{}).map(([k,v])=>({k,v})).concat([{k:'',v:''}]),
       env_api_key:def.env_api_key||'',api_key:''}};}
-    else{um.value={open:true,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',warning:null,busy:false,draft:umEmptyDraft()}}
+    else{um.value={open:true,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',warning:null,busy:false,envTouched:false,draft:umEmptyDraft()}}
   }
   // 别名行编辑器:添加/删除行(对齐 models.js 各平台设置)
   function addAliasRow(){um.value.draft.aliasRows.push({k:'',v:''})}
   function rmAliasRow(i){um.value.draft.aliasRows.splice(i,1)}
-  function umClose(){um.value={open:false,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',warning:null,busy:false,draft:umEmptyDraft()}}
+  function umClose(){um.value={open:false,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',warning:null,busy:false,envTouched:false,draft:umEmptyDraft()}}
   // info tab: read-only summary opened from a row's 「详情」 button
   function openInfo(c){
     const isAk=c.kind==='apikey';
-    um.value={open:true,tab:'info',mode:isAk&&ccOf(c.id)?'edit':'create',kind:isAk?'apikey':'login',channelId:c.id,infoId:c.id,infoKind:c.kind,warning:null,busy:false,draft:umEmptyDraft()};
+    um.value={open:true,tab:'info',mode:isAk&&ccOf(c.id)?'edit':'create',kind:isAk?'apikey':'login',channelId:c.id,infoId:c.id,infoKind:c.kind,warning:null,busy:false,envTouched:false,draft:umEmptyDraft()};
   }
   // ────────── drag sort (SortableJS, global window.Sortable) ──────────
   const loginTbody=ref(null),apikeyTbody=ref(null),sortInst=[];
@@ -302,8 +302,21 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
   });
   watch(list,()=>refreshKeyMeta(),{deep:false});
   watch(ccList,()=>refreshKeyMeta(),{deep:false});
+  // env 动态预填:create 模式下,id 变化时若 env 仍为空或等于上一个自动值,
+  // 实时预填 'CB_'+id.trim().toUpperCase()(spec 25 §1.2)。用户手动改过(envTouched)
+  // 且当前值既不是空也不是自动值才不覆盖;清空手动值后 envTouched 复位,改 id 重新跟随。
+  let _lastAutoEnv='';
+  watch(()=>um.value.draft.id,()=>{
+    if(um.value.mode!=='create'){_lastAutoEnv='';return}
+    const id=(um.value.draft.id||'').trim();
+    const cur=(um.value.draft.env_api_key||'').trim();
+    const auto=id?('CB_'+id.toUpperCase()):'';
+    if(um.value.envTouched && cur!=='' && cur!==_lastAutoEnv){return}
+    if(cur===''||cur===_lastAutoEnv){um.value.draft.env_api_key=auto;_lastAutoEnv=auto}
+  });
+  function onEnvInput(){um.value.envTouched=true}
 
-  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,loginChannels,apikeyChannels,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccDelete,um,openKeyModal,umClose,umSave,addAliasRow,rmAliasRow,onModalImported,openInfo,disc,dl,scanning,authPath,discover,scan,scanCustom,clearPath,solo,soloBusy,soloSelected,startSoloLogin,cancelSolo,completeSolo,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,size,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I,keyPanelMetaById,loginTbody,apikeyTbody}
+  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,loginChannels,apikeyChannels,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccDelete,um,openKeyModal,umClose,umSave,addAliasRow,rmAliasRow,onEnvInput,onModalImported,openInfo,disc,dl,scanning,authPath,discover,scan,scanCustom,clearPath,solo,soloBusy,soloSelected,startSoloLogin,cancelSolo,completeSolo,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,size,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I,keyPanelMetaById,loginTbody,apikeyTbody}
 },template:`
 <div>
   <div class="phead"><h1>通道管理</h1><p>定义通道 · 管理凭证 · 启用开关</p></div>
@@ -439,8 +452,8 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
           <div class="form-grid">
             <div class="field"><label>通道 ID <span class="req">*</span><span class="hint" style="margin:0" v-if="um.mode==='create'">小写字母数字下划线连字符,32 字以内</span></label><input v-model="um.draft.id" :disabled="um.mode==='edit'" placeholder="如 siliconflow"/></div>
             <div class="field"><label>显示名称 <span class="req">*</span></label><input v-model="um.draft.display_name" placeholder="如 硅基流动"/></div>
-            <div class="field"><label>API Key <span v-if="um.mode==='create'" class="req">*</span><span class="hint" style="margin:0">{{um.mode==='edit'?'留空保留旧 Key;填则追加/轮换(同 Key 跳过)':'裸 Key / Bearer xxx / {"api_key":"..."} 均可'}}</span></label><input v-model="um.draft.api_key" type="password" :placeholder="um.mode==='edit'?'留空不轮换':'粘贴上游 API Key'"/></div>
             <div class="field"><label>Base URL <span class="req">*</span><span class="hint" style="margin:0">https:// 或 http://127.0.0.1[:port]</span></label><input v-model="um.draft.base_url" placeholder="https://api.example.com/v1"/></div>
+            <div class="field"><label>API Key <span v-if="um.mode==='create'" class="req">*</span><span class="hint" style="margin:0">{{um.mode==='edit'?'留空保留旧 Key;填则追加/轮换(同 Key 跳过)':'裸 Key / Bearer xxx / {"api_key":"..."} 均可'}}</span></label><input v-model="um.draft.api_key" type="password" :placeholder="um.mode==='edit'?'留空不轮换':'粘贴上游 API Key'"/></div>
             <div class="field"><label>模型白名单<span class="hint" style="margin:0">可选;留空默认 DeepSeek-V4-Flash,保存后可在「模型配置」页调整或用探活拉取</span></label><input v-model="um.draft.modelsText" placeholder="model-a, model-b"/></div>
             <div class="field" style="grid-column:1 / -1"><label>别名<span class="hint" style="margin:0">别名 → 模型 ID,可空;删空后保存 = 无别名</span></label>
               <div v-for="(r,i) in um.draft.aliasRows" :key="i" style="display:flex;gap:8px;margin-bottom:6px;align-items:center">
@@ -451,7 +464,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
               </div>
               <button class="btn s" @click="addAliasRow" style="font-size:11px;padding:3px 10px"><span v-html="I.plus"></span>添加别名</button>
             </div>
-            <div class="field"><label>环境变量名<span class="hint" style="margin:0">可选;留空自动生成 CB_&lt;通道ID大写&gt;</span></label><input v-model="um.draft.env_api_key" placeholder="CB_MY_KEY"/></div>
+            <div class="field"><label>环境变量名<span class="hint" style="margin:0">可选;留空自动生成 CB_&lt;通道ID大写&gt;</span></label><input v-model="um.draft.env_api_key" @input="onEnvInput" placeholder="CB_MY_KEY"/></div>
           </div>
           <div v-if="um.warning" class="callout" style="margin-top:10px;font-size:12px;background:var(--warn-bg);border-color:var(--warn-border);color:var(--warn-fg)">探活失败(HTTP {{um.warning.probe_status}}):{{um.warning.probe_error||'无返回内容'}}。定义已保存,可稍后调整 Base URL 重试。</div>
         </template>
