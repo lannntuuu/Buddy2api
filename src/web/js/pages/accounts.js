@@ -3,19 +3,42 @@ import {I} from '../icons.js';
 const{ref,reactive,computed,onMounted}=Vue;
 
 export default {props:['token','toast'],setup(p){
-  const l=ref([]),ld=ref(true),sa=ref(false),ai=ref(''),nm=ref(''),disc=ref(null),dl=ref(false),scanning=ref(false),adding=ref(false),authPath=ref(''),test=ref(null),tl=ref(0),busy=ref({}),discChannel=ref('workbuddy'),channels=ref([{id:'workbuddy',display_name:'WorkBuddy'},{id:'qclaw',display_name:'QClaw'},{id:'qwenwork',display_name:'QwenWork / 千问办公'},{id:'traework',display_name:'TraeWork'},{id:'traesolo',display_name:'Trae SOLO'},{id:'gmi',display_name:'GMI Cloud'},{id:'bailian',display_name:'阿里百炼'}]);
-  // API Key 类通道（单 key、无本机登录文件）：选中时渲染粘贴导入面板而非文件检测 UI。
-  const APIKEY_CHANNELS={'gmi':{name:'GMI Cloud',base:'https://api.gmi-serving.com/v1',env:'CB_GMI_API_KEY'},'bailian':{name:'阿里百炼',base:'https://llm-7dqe434wikmhz0wa.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',env:'CB_BAILIAN_API_KEY'}};
-  const gmiKey=ref(''),gmiNick=ref(''),gmiBase=ref(''),gmiBusy=ref(false);
-  const gmiMode=computed(()=>APIKEY_CHANNELS[discChannel.value]?discChannel.value:'');
-  const APIKEY_PANEL=computed(()=>APIKEY_CHANNELS[gmiMode.value]||{name:'',base:'',env:''});
+  const l=ref([]),ld=ref(true),sa=ref(false),ai=ref(''),nm=ref(''),disc=ref(null),dl=ref(false),scanning=ref(false),adding=ref(false),authPath=ref(''),test=ref(null),tl=ref(0),busy=ref({}),discChannel=ref('workbuddy'),channels=ref([]);
+  // API Key 类通道（单 key、无本机登录文件）的元信息（base / env），由 /admin/channels + /admin/channels/custom 合并而来；选中时渲染粘贴导入面板而非文件检测 UI。
+  const KEY_PANEL_META=ref({});  // id -> {name, base, env}
+  const keyKey=ref(''),keyNick=ref(''),keyBase=ref(''),keyBusy=ref(false);
+  const keyMode=computed(()=>{const c=channels.value.find(x=>x.id===discChannel.value);return c&&c.kind==='apikey'?discChannel.value:''});
+  const KEY_PANEL=computed(()=>KEY_PANEL_META.value[keyMode.value]||{name:'',base:'',env:''});
   const solo=reactive({pending:false,url:'',pendingId:'',callbackUrl:'',state:'',uid:'',error:'',manual:''}),soloBusy=ref(false);let soloTimer=null,soloGen=0;
   const filters=reactive({q:'',status:'all',sort:'priority'});
   function hydrate(a){return {...a,_weight:a.weight||1,_priority:a.priority||0,_creditSnapshot:a.credit_snapshot||a.credit_limit||0,_baseWeight:a.weight||1,_basePriority:a.priority||0,_baseCreditSnapshot:a.credit_snapshot||a.credit_limit||0}}
   function dirty(a){return Number(a._weight||1)!==Number(a._baseWeight||1)||Number(a._priority||0)!==Number(a._basePriority||0)||Number(a._creditSnapshot||0)!==Number(a._baseCreditSnapshot||0)}
   function busyKey(id,k){return busy.value[id+'-'+k]}
   async function load(){ld.value=true;try{l.value=(await api.get('/admin/accounts',p.token)).map(hydrate)}catch(e){p.toast(apiErr(e),'err')}ld.value=false}
-  async function loadChannels(){try{const ch=await api.get('/admin/channels',p.token);if(ch.channels?.length)channels.value=ch.channels.filter(c=>c.enabled)}catch(e){}}
+  async function loadChannels(){
+    try{
+      const ch=await api.get('/admin/channels',p.token);
+      const enabled=ch.channels?.filter(c=>c.enabled)||[];
+      channels.value=enabled;
+      // 同步拉取自定义渠道，把 base_url / env_api_key 合并到 KEY_PANEL_META；kind==='apikey' 的内置通道（gmi/bailian）也用 seed 默认值兜底
+      let customList=[];
+      try{const r=await api.get('/admin/channels/custom',p.token);customList=r.channels||[]}catch(e){}
+      const meta={};
+      const SEED_DEFAULT={gmi:{base:'https://api.gmi-serving.com/v1',env:'CB_GMI_API_KEY'},bailian:{base:'https://llm-7dqe434wikmhz0wa.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',env:'CB_BAILIAN_API_KEY'}};
+      for(const c of enabled){
+        if(c.kind!=='apikey')continue;
+        const seed=SEED_DEFAULT[c.id]||{};
+        const custom=c.id&&customList.find(x=>x.id===c.id);
+        meta[c.id]={name:c.display_name||c.id,base:(custom&&custom.base_url)||seed.base||'',env:(custom&&custom.env_api_key)||seed.env||''};
+      }
+      // 用户自定义的 apikey 通道：channels 里可能 c.custom=true，但若 enabled 列表没列也兜底补一下
+      for(const x of customList){
+        if(!(x.id in meta)){meta[x.id]={name:x.display_name||x.id,base:x.base_url||'',env:x.env_api_key||''};if(!enabled.some(c=>c.id===x.id))channels.value=[...channels.value,{id:x.id,display_name:x.display_name,enabled:true,kind:'apikey',custom:true}]}
+      }
+      KEY_PANEL_META.value=meta;
+      if(!enabled.some(c=>c.id===discChannel.value))discChannel.value=enabled[0]?.id||'workbuddy';
+    }catch(e){}
+  }
   async function discover(path=''){dl.value=true;try{const qs=new URLSearchParams();if(path&&path.trim())qs.set('auth_dir',path.trim());if(discChannel.value)qs.set('channel',discChannel.value);const q=qs.toString();disc.value=await api.get('/admin/accounts/discover'+(q?'?'+q:''),p.token)}catch(e){p.toast(apiErr(e,'检测失败'),'err')}dl.value=false}
   async function scan(path=''){if(scanning.value)return;scanning.value=true;try{if(disc.value?.preview_token){const body={channel:disc.value.channel||'workbuddy',preview_token:disc.value.preview_token};if(path&&path.trim())body.auth_dir=path.trim();const r=await api.post('/admin/accounts/import',body,p.token);p.toast('导入 '+r.imported+' · 更新 '+r.updated+' · 跳过 '+r.skipped)}else{const body=path&&path.trim()?{auth_dir:path.trim()}:{};const r=await api.post('/admin/accounts/scan',body,p.token);p.toast('导入 '+r.imported+' · 更新 '+r.updated+' · 跳过 '+r.skipped)}await load();await discover(path)}catch(e){p.toast(apiErr(e,'扫描失败'),'err')}scanning.value=false}
   async function scanCustom(){const path=authPath.value.trim();if(!path){p.toast('请先填写目录或 .info 文件路径','err');return}await scan(path)}
@@ -36,19 +59,19 @@ export default {props:['token','toast'],setup(p){
     }catch(e){p.toast('失败:'+e.message,'err')}adding.value=false
   }
   async function addApiKey(){
-    const ch=APIKEY_CHANNELS[gmiMode.value];if(!ch||gmiBusy.value)return;
-    if(!gmiKey.value.trim()){p.toast('请先粘贴 '+ch.name+' API Key','err');return}
-    gmiBusy.value=true;
+    const ch=KEY_PANEL.value;if(!keyMode.value||keyBusy.value)return;
+    if(!keyKey.value.trim()){p.toast('请先粘贴 '+(ch.name||keyMode.value)+' API Key','err');return}
+    keyBusy.value=true;
     try{
-      const body={provider:gmiMode.value,api_key:gmiKey.value.trim()};
-      if(gmiNick.value.trim())body.nickname=gmiNick.value.trim();
-      if(gmiBase.value.trim())body.base_url=gmiBase.value.trim();
+      const body={provider:keyMode.value,api_key:keyKey.value.trim()};
+      if(keyNick.value.trim())body.nickname=keyNick.value.trim();
+      if(keyBase.value.trim())body.base_url=keyBase.value.trim();
       const r=await api.post('/admin/accounts',body,p.token);
       p.toast((r.updated?'Key 已更新 · ':'导入成功 · ')+(r.uid||''),'ok');
-      gmiKey.value='';gmiNick.value='';gmiBase.value='';
+      keyKey.value='';keyNick.value='';keyBase.value='';
       await load();
     }catch(e){p.toast(apiErr(e,'导入失败'),'err')}
-    gmiBusy.value=false;
+    keyBusy.value=false;
   }
   async function withBusy(a,k,fn){busy.value={...busy.value,[a.id+'-'+k]:true};try{return await fn()}finally{const o={...busy.value};delete o[a.id+'-'+k];busy.value=o}}
   async function ref2(a){await withBusy(a,'refresh',async()=>{try{await api.post('/admin/accounts/'+a.id+'/refresh',{},p.token);p.toast('刷新成功');await load()}catch(e){p.toast(apiErr(e,'刷新失败'),'err')}})}
@@ -60,8 +83,8 @@ export default {props:['token','toast'],setup(p){
   function credit(v){v=Number(v||0);return v.toLocaleString('zh-CN',{maximumFractionDigits:4})}
   function creditPct(a){return Math.max(0,Math.min(100,Number(a.credit_used_pct||0)))+'%'}
   function tokenLife(a){
-    // api_key 类通道（gmi 等）无过期概念，不显示误导性的 "0h"。
-    if(a.account_type==='api_key'||a.provider&&APIKEY_CHANNELS[a.provider])return '-';
+    // api_key 类通道（gmi / bailian / 自定义 apikey 通道）无过期概念，不显示误导性的 "0h"。
+    if(a.account_type==='api_key'||a.provider&&KEY_PANEL_META.value[a.provider])return '-';
     if(a.token_expired)return '过期';const h=Number(a.remaining_hours||0);if(h>=72)return '约 '+Math.floor(h/24)+' 天';if(h>=24)return Math.floor(h/24)+' 天 '+(h%24)+'h';return h+'h'
   }
   const visibleAccounts=computed(()=>{
@@ -87,7 +110,7 @@ export default {props:['token','toast'],setup(p){
   async function cancelSolo(){if(!solo.pendingId)return;stopSoloPoll();soloGen++;try{await api.post('/admin/traesolo/login/cancel',{pending_id:solo.pendingId},p.token);solo.pending=false;solo.state='canceled';solo.error=''}catch(e){}}
   async function completeSolo(){const u=solo.manual.trim();if(!u){p.toast('请先粘贴完整回调 URL','err');return}soloBusy.value=true;try{const r=await api.post('/admin/traesolo/login/complete',{callback:u},p.token);if(r.ok){p.toast('SOLO 账号已添加'+(r.uid?'（'+r.uid+'）':''),'ok');solo.manual='';await load();await discover()}else{p.toast(r.error||'导入失败','err')}}catch(e){p.toast(apiErr(e,'导入失败'),'err')}soloBusy.value=false}
 
-  onMounted(()=>{loadChannels();load();if(!gmiMode.value)discover()});return{l,visibleAccounts,filters,ld,sa,ai,nm,disc,dl,scanning,adding,authPath,test,tl,busyKey,dirty,load,discover,scan,scanCustom,add,addApiKey,ref2,saveMeta,toggle,testOne,del,fmt,size,credit,tok,creditPct,tokenLife,clearPath,I,discChannel,channels,gmiMode,gmiKey,gmiNick,gmiBase,gmiBusy,APIKEY_PANEL,solo,soloBusy,startSoloLogin,cancelSolo,completeSolo}
+  onMounted(()=>{loadChannels();load();if(!keyMode.value)discover()});return{l,visibleAccounts,filters,ld,sa,ai,nm,disc,dl,scanning,adding,authPath,test,tl,busyKey,dirty,load,discover,scan,scanCustom,add,addApiKey,ref2,saveMeta,toggle,testOne,del,fmt,size,credit,tok,creditPct,tokenLife,clearPath,I,discChannel,channels,keyMode,keyKey,keyNick,keyBase,keyBusy,KEY_PANEL,solo,soloBusy,startSoloLogin,cancelSolo,completeSolo}
 },template:`
 <div>
   <div class="phead"><h1>账号管理</h1><p>账号导入 · 调度权重与优先级 · 连通性测试（官方额度与积分领取在「额度与积分」页）</p></div>
@@ -96,13 +119,13 @@ export default {props:['token','toast'],setup(p){
     <div class="card-p">
       <div class="detect-summary">
         <div>
-          <div class="detect-title" v-if="gmiMode">{{APIKEY_PANEL.name}} · API Key 导入</div>
+          <div class="detect-title" v-if="keyMode">{{KEY_PANEL.name}} · API Key 导入</div>
           <div class="detect-title" v-else-if="disc">检测到 {{disc.file_count}} 个登录文件，其中 {{disc.valid_count}} 个有效</div>
           <div class="detect-title" v-else>正在检测本机登录文件</div>
-          <div class="hint" v-if="gmiMode">粘贴 API Key 即可入库。也支持环境变量 <span class="mono">{{APIKEY_PANEL.env}}</span>（无活跃账号时自动导入）。凭据不会回显，列表里只显示尾号。</div>
+          <div class="hint" v-if="keyMode">粘贴 API Key 即可入库。也支持环境变量 <span class="mono">{{KEY_PANEL.env}}</span>（无活跃账号时自动导入）。凭据不会回显，列表里只显示尾号。</div>
           <div class="hint" v-else>三个通道默认都能选。先选通道再检测导入；没登录的通道检测为空。启动默认不再自动入库。已导入账号默认只更新 token，不改权重/优先级。</div>
         </div>
-        <div class="detect-actions" v-if="!gmiMode">
+        <div class="detect-actions" v-if="!keyMode">
           <select class="selectctl" v-model="discChannel" @change="discover(authPath)"><option v-for="c in channels" :key="c.id" :value="c.id">{{c.display_name||c.id}}</option></select>
           <button class="btn s pri" @click="scan('')" :disabled="dl||scanning||!disc?.valid_count"><span v-html="I.scan"></span>{{scanning?'导入中':'一键导入本机登录'}}</button>
           <button class="btn s" @click="discover('')" :disabled="dl"><span v-html="I.refresh"></span>重新检测</button>
@@ -111,15 +134,15 @@ export default {props:['token','toast'],setup(p){
           <select class="selectctl" v-model="discChannel"><option v-for="c in channels" :key="c.id" :value="c.id">{{c.display_name||c.id}}</option></select>
         </div>
       </div>
-      <div v-if="gmiMode" class="notebox">
-        <div class="field"><label>API Key（支持裸 Key / "Bearer xxx" / {"api_key":"..."} 三种粘贴形态）</label><textarea v-model="gmiKey" placeholder="粘贴 API Key" style="font-family:var(--mono)"></textarea></div>
+      <div v-if="keyMode" class="notebox">
+        <div class="field"><label>API Key（支持裸 Key / "Bearer xxx" / {"api_key":"..."} 三种粘贴形态）</label><textarea v-model="keyKey" placeholder="粘贴 API Key" style="font-family:var(--mono)"></textarea></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <div class="field" style="flex:1;min-width:180px"><label>昵称（可选）</label><input v-model="gmiNick" placeholder="如 main"/></div>
-          <div class="field" style="flex:2;min-width:260px"><label>Base URL（可选，默认 {{APIKEY_PANEL.base}}）</label><input v-model="gmiBase" :placeholder="APIKEY_PANEL.base"/></div>
+          <div class="field" style="flex:1;min-width:180px"><label>昵称（可选）</label><input v-model="keyNick" placeholder="如 main"/></div>
+          <div class="field" style="flex:2;min-width:260px"><label>Base URL（可选，默认 {{KEY_PANEL.base||'由渠道定义决定'}}）</label><input v-model="keyBase" :placeholder="KEY_PANEL.base"/></div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
-          <button class="btn s pri" @click="addApiKey" :disabled="gmiBusy">{{gmiBusy?'导入中':'导入 API Key'}}</button>
-          <button class="btn s" @click="gmiKey='';gmiNick='';gmiBase=''">清空</button>
+          <button class="btn s pri" @click="addApiKey" :disabled="keyBusy">{{keyBusy?'导入中':'导入 API Key'}}</button>
+          <button class="btn s" @click="keyKey='';keyNick='';keyBase=''">清空</button>
           <span class="hint" style="margin:0">导入后可在下方列表点「测试」验证连通性。</span>
         </div>
       </div>

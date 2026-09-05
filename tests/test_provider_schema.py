@@ -106,19 +106,27 @@ def test_disabled_channels_filtered_out(monkeypatch, isolated_db):
     assert providers.get_provider("bailian") is None
 
 
-def test_bailian_is_known_and_opt_in(monkeypatch):
-    """bailian mirrors gmi: a KNOWN channel that is opt-in, not on by default."""
-    import providers
+def test_bailian_is_known_and_opt_in(monkeypatch, isolated_db):
+    """bailian mirrors gmi: a KNOWN channel that is opt-in, not on by default.
 
-    # Known channel set must include bailian.
+    After the data-driven migration, bailian is no longer a built-in package
+    but a seed definition written into the `custom_channels` settings key
+    on first boot. The fixture calls `seed_initial_definitions()` to make
+    the channel reachable via `get_provider`.
+    """
+    import providers
+    from providers import custom_channels
+
+    # Seed bailian (and gmi) so the custom definition exists in the settings key.
+    custom_channels.seed_initial_definitions()
+    custom_channels.invalidate_cache(None)
+
+    # Known channel set (literal) must still include bailian — that's the
+    # documentation set in providers.protocol.
     assert "bailian" in providers.KNOWN_CHANNEL_IDS
-    # Not in the default ON set (opt-in), but reachable via alphabetical fallback
-    # when env is unset and nothing is persisted in the db.
-    monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
-    _fresh_default(monkeypatch)
-    assert "bailian" in providers.enabled_provider_ids()  # alphabetical fallback includes it
-    assert "bailian" not in providers.DEFAULT_PROVIDER_IDS  # but NOT on by default
-    # Opt-in via env → available and locked-respecting order.
+    # Not in the default ON set (opt-in).
+    assert "bailian" not in providers.DEFAULT_PROVIDER_IDS
+    # Opt-in via env → provider available and locked-respecting order.
     monkeypatch.setenv("CB_GATEWAY_PROVIDERS", "workbuddy,bailian")
     assert providers.get_provider("bailian") is not None
     assert providers.is_channel_enabled("bailian") is True

@@ -11,16 +11,18 @@ export default {props:['token','toast'],setup(p){
   async function loadAll(){
     umLd.value=true;chLoaded.value=false;umErr.value='';chErr.value='';
     try{
-      const [uv,cr]=await Promise.all([api.get('/admin/unified-models',p.token),api.get('/admin/channels',p.token)]);
+      const [uv,cr,ccR]=await Promise.all([api.get('/admin/unified-models',p.token),api.get('/admin/channels',p.token),api.get('/admin/channels/custom',p.token)]);
       channels.value=(uv.channels&&uv.channels.length)?uv.channels:(cr.channels||[]).filter(c=>c.enabled).map(c=>c.id);
       um.value=(uv.models||[]).map(x=>({name:x.name||'',mappings:{...x.mappings}}));
+      const kindById={};(cr.channels||[]).forEach(c=>{kindById[c.id]=c.kind||'builtin'});
+      ccList.value=ccR.channels||[];
       const ids=(cr.channels||[]).filter(c=>c.enabled&&c.loaded).map(c=>c.id);
       chs.value=await Promise.all(ids.map(async id=>{
         try{
           const v=await api.get('/admin/channels/'+id+'/models',p.token);
           const rateById={};(v.model_details||[]).forEach(d=>{rateById[d.id]=d});
-          return {...v,modelRows:(v.models||[]).map(mid=>{const d=rateById[mid]||{};return{id:mid,rate:d.rate,display_name:d.display_name,official:!!d.official,reasoning:(v.reasoning&&v.reasoning[mid])||''}}),aliasRows:Object.entries(v.aliases||{}).map(([k,val])=>({k,v:val})),reasoningDefault:v.reasoning_default||'',reasoningSupported:!!v.reasoning_supported,reasoningCustomized:!!v.reasoning_customized}
-        }catch(e){return{channel:id,error:String(e.message),modelRows:[],aliasRows:[]}}
+          return {...v,kind:kindById[id]||'builtin',modelRows:(v.models||[]).map(mid=>{const d=rateById[mid]||{};return{id:mid,rate:d.rate,display_name:d.display_name,official:!!d.official,reasoning:(v.reasoning&&v.reasoning[mid])||''}}),aliasRows:Object.entries(v.aliases||{}).map(([k,val])=>({k,v:val})),reasoningDefault:v.reasoning_default||'',reasoningSupported:!!v.reasoning_supported,reasoningCustomized:!!v.reasoning_customized}
+        }catch(e){return{channel:id,kind:kindById[id]||'builtin',error:String(e.message),modelRows:[],aliasRows:[]}}
       }));
       if(!chs.value.some(c=>c.channel===activeCh.value))activeCh.value=chs.value.length?chs.value[0].channel:'';
     }catch(e){umErr.value=apiErr(e,'加载失败')}
@@ -35,6 +37,71 @@ export default {props:['token','toast'],setup(p){
   function rmRow(c,i){c.aliasRows.splice(i,1)}
   function addModelRow(c){c.modelRows.push({id:''})}
   function rmModelRow(c,i){c.modelRows.splice(i,1)}
+
+  // 自定义渠道（OpenAI 兼容 / 「一个 URL + 一个 Key」类）CRUD
+  const ccList=ref([]),ccLd=ref(false),ccBusy=ref(false),ccErr=ref('');
+  const ccEditing=ref(null);  // {id, display_name, base_url, models, aliases, env_api_key, api_key, source}
+  const ccForm=ref({mode:'create',draft:emptyCcDraft(),warning:null});
+  function emptyCcDraft(){return {id:'',display_name:'',base_url:'',modelsText:'',aliases:'',env_api_key:'',api_key:''}}
+  function ccOf(id){return ccList.value.find(x=>x.id===id)}
+  async function loadCCAll(){
+    ccLd.value=true;ccErr.value='';
+    try{const r=await api.get('/admin/channels/custom',p.token);ccList.value=r.channels||[]}
+    catch(e){ccErr.value=apiErr(e,'加载自定义渠道失败')}
+    ccLd.value=false;
+  }
+  function ccStartCreate(){ccForm.value={mode:'create',draft:emptyCcDraft(),warning:null}}
+  function ccStartEdit(c){
+    ccForm.value={mode:'edit',warning:null,draft:{
+      id:c.id,display_name:c.display_name||'',base_url:c.base_url||'',
+      modelsText:(c.models||[]).join(', '),
+      aliases:Object.entries(c.aliases||{}).map(([k,v])=>k+'→'+v).join('\n'),
+      env_api_key:c.env_api_key||'',api_key:''
+    }};
+  }
+  function ccCancel(){ccForm.value={mode:'create',draft:emptyCcDraft(),warning:null}}
+  async function ccSave(){
+    if(ccBusy.value)return;
+    const f=ccForm.value.draft;
+    if(!f.id.trim()||!f.display_name.trim()||!f.base_url.trim()){p.toast('id / 名称 / Base URL 必填','err');return}
+    const models=f.modelsText.split(',').map(s=>s.trim()).filter(Boolean);
+    if(!models.length){p.toast('至少填一个模型 id（逗号分隔）','err');return}
+    const aliases={};f.aliases.split(/\r?\n/).forEach(line=>{const [k,...rest]=line.split('→');const v=rest.join('→');const ak=(k||'').trim(),av=(v||'').trim();if(ak&&av)aliases[ak]=av});
+    const body={display_name:f.display_name.trim(),base_url:f.base_url.trim(),models,aliases};
+    if(f.env_api_key.trim())body.env_api_key=f.env_api_key.trim();else body.env_api_key='';
+    if(f.api_key.trim())body.api_key=f.api_key.trim();
+    ccBusy.value=true;
+    try{
+      if(ccForm.value.mode==='create'){
+        body.id=f.id.trim();
+        const r=await api.post('/admin/channels/custom',body,p.token);
+        if(r&&r.status==='saved_with_warning'&&r.warning){
+          ccForm.value.warning=r.warning;p.toast('已保存，但探活失败：HTTP '+r.warning.probe_status,'err');
+        }else{p.toast('已添加 '+body.id)}
+        ccCancel();
+      }else{
+        if(!f.api_key.trim())delete body.api_key;
+        const r=await api.put('/admin/channels/custom/'+encodeURIComponent(f.id),body,p.token);
+        if(r&&r.status==='saved_with_warning'&&r.warning){
+          ccForm.value.warning=r.warning;p.toast('已保存，但探活失败：HTTP '+r.warning.probe_status,'err');
+        }else{p.toast('已更新 '+f.id)}
+        ccCancel();
+      }
+      await Promise.all([loadCCAll(),loadAll()]);
+    }catch(e){p.toast(apiErr(e,'保存失败'),'err')}
+    ccBusy.value=false;
+  }
+  async function ccDelete(c){
+    if(!confirm('删除自定义渠道 '+c.id+' ？该渠道账号行将全部置 inactive（D6）。'))return;
+    try{
+      await api.del('/admin/channels/custom/'+encodeURIComponent(c.id),p.token);
+      p.toast('已删除 '+c.id);
+      await Promise.all([loadCCAll(),loadAll()]);
+    }catch(e){
+      const m=String(e.message||'');
+      p.toast(m==='409'?'seed 渠道不允许删除，请用「启用通道」开关停用':'删除失败：'+apiErr(e),'err');
+    }
+  }
 
   async function saveChActive(){
     const c=chOf();if(!c||chBusyOf(c))return;
@@ -66,7 +133,7 @@ export default {props:['token','toast'],setup(p){
     catch(e){p.toast('重置失败：'+apiErr(e),'err')}
     setChBusy(c,false);
   }
-  function canRefreshOfficial(c){return c&&(c.channel==='traesolo'||c.channel==='gmi'||c.channel==='bailian')}
+  function canRefreshOfficial(c){return c&&(c.kind==='apikey'||c.channel==='traesolo')}
   async function refreshOfficialModels(){
     const c=chOf();if(!c||chBusyOf(c)||!canRefreshOfficial(c))return;
     setChBusy(c,true);
@@ -111,7 +178,8 @@ export default {props:['token','toast'],setup(p){
     umBusy.value=false;
   }
 
-  onMounted(loadAll);return{um,umLd,umErr,umBusy,channels,addUM,rmUM,umCell,umSet,umWarn,saveUM,chs,chLoaded,chErr,activeCh,chOf,chBusyOf,addRow,rmRow,addModelRow,rmModelRow,chDefaultText,saveChActive,resetChActive,canRefreshOfficial,refreshOfficialModels,I}
+  onMounted(()=>{loadAll();loadCCAll()});
+  return{um,umLd,umErr,umBusy,channels,addUM,rmUM,umCell,umSet,umWarn,saveUM,chs,chLoaded,chErr,activeCh,chOf,chBusyOf,addRow,rmRow,addModelRow,rmModelRow,chDefaultText,saveChActive,resetChActive,canRefreshOfficial,refreshOfficialModels,ccList,ccLd,ccBusy,ccErr,ccEditing,ccForm,ccStartCreate,ccStartEdit,ccCancel,ccSave,ccDelete,I}
 },template:`
 <div>
   <div class="phead"><h1>通道与模型</h1><p>通道视角集中管理：统一模型翻译 · 各通道白名单与别名 · 改动即时生效</p></div>
@@ -214,6 +282,43 @@ export default {props:['token','toast'],setup(p){
         <div v-if="chOf().credit_rate_customized" class="tag" style="margin-top:6px">已自定义换算率</div>
       </div>
       <div v-if="chOf().error" style="margin-top:10px;font-size:12px;color:var(--err)">{{chOf().error}}</div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:16px"><div class="card-h">自定义渠道<span class="sub">OpenAI 兼容 · 一个 Base URL + 一个 API Key · Key 写 accounts 表，定义只存描述</span><div style="margin-left:auto;display:flex;gap:6px"><button class="btn s pri" @click="ccStartCreate" v-if="ccForm.mode==='edit'||!ccEditing"><span v-html="I.plus"></span>新增</button><button v-if="ccForm.mode!=='create'||ccEditing" class="btn s" @click="ccCancel">取消</button></div></div>
+    <div v-if="ccLd" class="load"><div class="spin"></div></div>
+    <div v-else-if="ccErr" style="padding:16px;color:var(--err);font-size:12px">{{ccErr}}</div>
+    <div v-else class="card-p">
+      <div v-if="ccForm.mode==='edit'||ccEditing" style="margin-bottom:14px;border:1px solid var(--border);border-radius:6px;padding:12px;background:var(--bg-sunken)">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><strong style="font-family:var(--mono)">{{ccForm.mode==='create'?'新增自定义渠道':'编辑 '+ccForm.draft.id}}</strong><span class="hint" style="margin:0">{{ccForm.mode==='edit'?'带 * 字段可改；api_key 留空保留旧 Key':''}}</span></div>
+        <div class="form-grid">
+            <div class="field"><label>渠道 ID *</label><input v-model="ccForm.draft.id" :disabled="ccForm.mode==='edit'" placeholder="小写字母数字下划线连字符，32 字以内"/></div>
+            <div class="field"><label>显示名称 *</label><input v-model="ccForm.draft.display_name" placeholder="如 内部代理 / 第三方镜像"/></div>
+            <div class="field"><label>Base URL *<span class="hint" style="margin:0">https:// 或 http://127.0.0.1[:port]/localhost[:port]</span></label><input v-model="ccForm.draft.base_url" placeholder="https://api.example.com/v1"/></div>
+            <div class="field"><label>模型白名单 *<span class="hint" style="margin:0">逗号分隔，至少一个</span></label><input v-model="ccForm.draft.modelsText" placeholder="model-a, model-b, ..."/></div>
+            <div class="field"><label>别名<span class="hint" style="margin:0">每行 "别名→模型 id"，可空</span></label><textarea v-model="ccForm.draft.aliases" rows="3" placeholder="auto→model-a&#10;fast→model-b" style="font-family:var(--mono)"></textarea></div>
+            <div class="field"><label>环境变量名<span class="hint" style="margin:0">留空 = 不接 env；填则匹配 ^CB_[A-Z0-9_]+$</span></label><input v-model="ccForm.draft.env_api_key" placeholder="CB_MY_KEY"/></div>
+            <div class="field" v-if="ccForm.mode==='create'"><label>API Key<span class="hint" style="margin:0">创建时粘贴后写 accounts 表并探活；失败仍可保存（200 + warning）</span></label><input v-model="ccForm.draft.api_key" type="password" placeholder="粘贴 API Key（可空，仅添加不探活）"/></div>
+            <div class="field" v-else><label>API Key（轮换）<span class="hint" style="margin:0">留空保留旧 Key；填则轮换（uid 不变则同 key 跳过；新 key 触发 inactive 旧行）</span></label><input v-model="ccForm.draft.api_key" type="password" placeholder="留空不轮换"/></div>
+          </div>
+          <div v-if="ccForm.warning" class="callout" style="margin-top:10px;font-size:12px;background:var(--warn-bg);border-color:var(--warn-border);color:var(--warn-fg)">探活失败（HTTP {{ccForm.warning.probe_status}}）：{{ccForm.warning.probe_error||'无返回内容'}}。已保存定义，可后续在「账号」页重试或调整 Base URL。</div>
+          <div style="display:flex;gap:8px;margin-top:12px"><button class="btn s pri" @click="ccSave" :disabled="ccBusy">{{ccBusy?'保存中…':'保存'}}</button><button class="btn s" @click="ccCancel" :disabled="ccBusy">取消</button></div>
+        </div>
+      <div v-if="ccList.length" class="table-scroll"><table>
+        <thead><tr><th>ID</th><th>显示名</th><th>Base URL</th><th>模型</th><th>别名</th><th>env</th><th>来源</th><th style="width:170px"></th></tr></thead>
+        <tbody>
+          <tr v-for="c in ccList" :key="c.id">
+            <td style="font-family:var(--mono)">{{c.id}}</td>
+            <td>{{c.display_name}}</td>
+            <td class="mono" :title="c.base_url" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{c.base_url}}</td>
+            <td style="font-family:var(--mono);font-size:12px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="(c.models||[]).join(', ')">{{(c.models||[]).join(', ')}}</td>
+            <td style="font-family:var(--mono);font-size:12px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="Object.entries(c.aliases||{}).map(([k,v])=>k+'→'+v).join(', ')">{{Object.keys(c.aliases||{}).length}} 项</td>
+            <td style="font-family:var(--mono);font-size:11px;color:var(--fg3)">{{c.env_api_key||'-'}}</td>
+            <td><span v-if="c.source==='seed'" class="tag">seed</span><span v-else class="tag" style="background:var(--bg-sunken);color:var(--fg3)">user</span></td>
+            <td><button class="btn s" @click="ccStartEdit(c)">编辑</button><button class="btn s danger" style="margin-left:6px" @click="ccDelete(c)" :disabled="c.source==='seed'" :title="c.source==='seed'?'seed 渠道不允许删除，请用启用通道开关停用':''">{{c.source==='seed'?'删除(禁用)':'删除'}}</button></td>
+          </tr>
+        </tbody>
+      </table></div>
+      <div v-else class="empty" style="padding:18px">尚无自定义渠道。点「新增」配置第一个兼容端点。</div>
     </div>
   </div>
 </div>`};

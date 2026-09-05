@@ -421,13 +421,8 @@ Buddy2api/
 │  │  ├─ credential_crypto.py
 │  │  └─ fingerprint.py
 │  ├─ providers/            # Channel adapters
-│  │  ├─ workbuddy/
-│  │  ├─ qclaw/
-│  │  ├─ qwenwork/
-│  │  ├─ traework/
-│  │  ├─ traesolo/
-│  │  ├─ gmi/               # v2.2 new, opt-in
-│  │  └─ bailian/           # v2.2 new, opt-in
+│  │  ├─ openai_compat.py   # Base class for OpenAI-compatible channels (one URL + one key)
+│  │  └─ custom_channels.py # Custom channel definitions (settings key custom_channels; gmi / bailian ship as built-in seeds)
 │  └─ web/                  # Admin UI
 │      ├─ index.html
 │      ├─ css/app.css
@@ -487,8 +482,8 @@ powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1
 
 Compared to 1.4 / 2.0 / 2.1:
 
-- **GMI channel**: new opt-in channel (OpenAI-compatible, Web-imported API key). Off by default; enable by appending `gmi` to `CB_GATEWAY_PROVIDERS`.
-- **Bailian channel**: new opt-in channel for Alibaba Bailian (MaaS) using a single API key. Off by default; enable by appending `bailian` to `CB_GATEWAY_PROVIDERS` or by pasting the key in the admin UI / `CB_BAILIAN_API_KEY`.
+- **GMI / Bailian channels**: built-in seed channels (editable). Both are "one URL + one API key" OpenAI-compatible channels whose definitions live in the `custom_channels` settings key (seeded on first startup; ids unchanged, so existing accounts and configuration carry over). Off by default; enable by appending `gmi` / `bailian` to `CB_GATEWAY_PROVIDERS`, or set `CB_BAILIAN_API_KEY` / paste the key in the admin UI.
+- **Custom channels**: add / edit / delete any OpenAI-compatible platform (a Base URL + an API key + model ids) directly in the admin UI under "Channels & Models → Custom channels" — zero code, hot reload; all of them share the `providers/openai_compat.py` base class.
 - **Admin UI vendoring**: Vue 3.4.21 and SortableJS 1.15.6 moved off jsdelivr CDN into `web/vendor/`, served by the FastAPI StaticFiles mount. The admin UI now works fully offline. `tests/test_web_assets.py` guards against any future CDN reference creeping back in.
 - **Backend monolith split**:
   - `storage/database.py` is now a re-export facade; modules live in `storage/repos/{accounts, api_keys, logs, settings, stats, _common}.py`.

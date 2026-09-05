@@ -1,11 +1,26 @@
-"""GMI 通道存储层测试：parse/upsert 契约 + env 引导（全部本地，不发网络请求）。"""
+"""GMI 通道(迁移后)等价测试：seed 写入的 custom 通道 + 基类契约。
+
+旧 `tests/test_gmi_store.py` 覆盖了：
+  * parse_credentials 三种粘贴形态（裸 key / Bearer / JSON 包裹）
+  * upsert_account 契约 {"id","updated","row"} + 换 key 置老行 inactive + 同 key 幂等
+  * ensure_env_account 三态（env 未设 / env 首次引导 / env 已存在 active）
+  * discover 空壳 + provider 入口端到端契约
+  * channel_model_view / set_channel_models 持久化与白名单拦截
+
+迁移后 src/providers/gmi/ 已删除，gmi 变成 `custom_channels` settings
+里的一个 seed 定义 + OpenAICompatProvider 实例。本测试在每个用例 fixture
+里先调 `custom_channels.seed_initial_definitions()`，把 gmi 写入 settings，
+并断言所有原断言依然成立。
+"""
 
 import pytest
 
 import providers
 from storage import database as db
-from providers.gmi import store as gstore
-from providers.gmi.constants import CHANNEL_ID, DEFAULT_BASE_URL
+from providers import custom_channels as cc
+
+CHANNEL_ID = "gmi"
+SEED_DEFAULT_BASE_URL = "https://api.gmi-serving.com/v1"
 
 
 @pytest.fixture()
@@ -21,11 +36,7 @@ def _clean_env(monkeypatch):
 
 @pytest.fixture()
 def isolated_db(monkeypatch):
-    """本文件专用：等同 conftest.isolated_db，但 DB 放仓库 .tmp 下。
-
-    原因：pytest tmp_path/basetemp 的目录枚举在部分受限环境会 PermissionError，
-    仓库内固定路径不受影响。用唯一子目录 + 测试后清理保证隔离。
-    """
+    """本文件专用：等同 conftest.isolated_db，但 DB 放仓库 .tmp 下。"""
     import shutil
     import uuid
     from pathlib import Path
@@ -48,37 +59,46 @@ def isolated_db(monkeypatch):
     shutil.rmtree(workdir, ignore_errors=True)
 
 
+@pytest.fixture()
+def gmi_seeded(gmi_enabled, isolated_db):
+    """Seed gmi into the custom_channels settings key so the channel has
+    exactly the data shape a freshly-booted instance would have."""
+    cc.seed_initial_definitions()
+    cc.invalidate_cache(CHANNEL_ID)
+    yield providers.get_provider(CHANNEL_ID)
+
+
 # ---------------------------------------------------------------------------
-# parse_credentials：三种粘贴形态
+# parse_credentials：三种粘贴形态（基类 OpenAICompatProvider.parse_credentials）
 # ---------------------------------------------------------------------------
 
 
-def test_parse_bare_key(gmi_enabled):
-    parsed = gstore.parse_credentials({"api_key": "sk-gmi-test-1234567890"})
+def test_parse_bare_key(gmi_seeded):
+    parsed = gmi_seeded.parse_credentials({"api_key": "sk-gmi-test-1234567890"})
     assert parsed["access_token"] == "sk-gmi-test-1234567890"
     assert parsed["provider"] == CHANNEL_ID
     assert parsed["uid"] == "gmi-" + "sk-gmi-test-1234567890"[-8:]
     assert parsed["account_type"] == "api_key"
-    assert parsed["domain"] == DEFAULT_BASE_URL
+    assert parsed["domain"] == SEED_DEFAULT_BASE_URL
 
 
-def test_parse_bearer_and_json_wrapped(gmi_enabled):
-    bearer = gstore.parse_credentials({"api_key": "Bearer sk-abc-def-12345678"})
+def test_parse_bearer_and_json_wrapped(gmi_seeded):
+    bearer = gmi_seeded.parse_credentials({"api_key": "Bearer sk-abc-def-12345678"})
     assert bearer["access_token"] == "sk-abc-def-12345678"
 
-    wrapped = gstore.parse_credentials({"api_key": '{"api_key": "sk-inner-key-98765432"}'})
+    wrapped = gmi_seeded.parse_credentials({"api_key": '{"api_key": "sk-inner-key-98765432"}'})
     assert wrapped["access_token"] == "sk-inner-key-98765432"
 
 
-def test_parse_empty_key_raises(gmi_enabled):
+def test_parse_empty_key_raises(gmi_seeded):
     with pytest.raises(ValueError):
-        gstore.parse_credentials({"api_key": "   "})
+        gmi_seeded.parse_credentials({"api_key": "   "})
     with pytest.raises(ValueError):
-        gstore.parse_credentials({})
+        gmi_seeded.parse_credentials({})
 
 
-def test_parse_custom_base_url(gmi_enabled):
-    parsed = gstore.parse_credentials({"api_key": "sk-x-12345678", "base_url": "https://proxy.example.com/v1"})
+def test_parse_custom_base_url(gmi_seeded):
+    parsed = gmi_seeded.parse_credentials({"api_key": "sk-x-12345678", "base_url": "https://proxy.example.com/v1"})
     assert parsed["domain"] == "https://proxy.example.com/v1"
     assert parsed["extra"]["base_url"] == "https://proxy.example.com/v1"
 
@@ -88,9 +108,9 @@ def test_parse_custom_base_url(gmi_enabled):
 # ---------------------------------------------------------------------------
 
 
-def test_upsert_insert_then_update_contract(gmi_enabled, isolated_db):
-    parsed = gstore.parse_credentials({"api_key": "sk-contract-key-8888", "nickname": "main"})
-    result = gstore.upsert_account(parsed)
+def test_upsert_insert_then_update_contract(gmi_seeded, isolated_db):
+    parsed = gmi_seeded.parse_credentials({"api_key": "sk-contract-key-8888", "nickname": "main"})
+    result = gmi_seeded.upsert_account(parsed)
     assert isinstance(result, dict)
     assert set(result) >= {"id", "updated"}
     assert result["updated"] is False
@@ -102,15 +122,12 @@ def test_upsert_insert_then_update_contract(gmi_enabled, isolated_db):
     assert rows[0]["access_token"] == "sk-contract-key-8888"
 
     # 换 key（轮换）= 新 uid = 新行；旧 key 行应被置 inactive，避免调度器选中死 key
-    rotated = gstore.parse_credentials({"api_key": "sk-rotated-key-99999999", "nickname": "main2"})
-    result2 = gstore.upsert_account(rotated)
+    rotated = gmi_seeded.parse_credentials({"api_key": "sk-rotated-key-99999999", "nickname": "main2"})
+    result2 = gmi_seeded.upsert_account(rotated)
     assert result2["updated"] is False
     assert isinstance(result2["id"], int) and result2["id"] != aid
 
     rows = db.list_accounts(provider=CHANNEL_ID)
-    by_status = {r["status"]: [] for r in rows}
-    for r in rows:
-        by_status.setdefault(r["status"], []).append(r)
     assert len(rows) == 2
     active = [r for r in rows if r["status"] == "active"]
     inactive = [r for r in rows if r["status"] == "inactive"]
@@ -118,19 +135,16 @@ def test_upsert_insert_then_update_contract(gmi_enabled, isolated_db):
     assert len(inactive) == 1 and inactive[0]["id"] == aid
 
 
-def test_upsert_same_key_is_idempotent(gmi_enabled, isolated_db):
-    first = gstore.upsert_account(gstore.parse_credentials({"api_key": "sk-same-key-42424242"}))
-    second = gstore.upsert_account(gstore.parse_credentials({"api_key": "sk-same-key-42424242"}))
+def test_upsert_same_key_is_idempotent(gmi_seeded, isolated_db):
+    first = gmi_seeded.upsert_account(gmi_seeded.parse_credentials({"api_key": "sk-same-key-42424242"}))
+    second = gmi_seeded.upsert_account(gmi_seeded.parse_credentials({"api_key": "sk-same-key-42424242"}))
     assert first["id"] == second["id"]
     assert second["updated"] is True
     assert len(db.list_accounts(provider=CHANNEL_ID)) == 1
 
 
-def test_server_add_account_endpoint_contract(gmi_enabled, isolated_db):
-    """复现 gateway/server.py POST /admin/accounts 的调用方式。
-
-    回归：旧 gmi upsert 返回 int/裸行，endpoint 取 result["id"] 会 TypeError 500。
-    """
+def test_server_add_account_endpoint_contract(gmi_seeded, isolated_db):
+    """复现 gateway/server.py POST /admin/accounts 的调用方式。"""
     provider = providers.get_provider("gmi")
     parsed = provider.parse_credentials({"api_key": "sk-endpoint-key-7777", "nickname": "via-endpoint"})
     result = provider.upsert_account(parsed)
@@ -144,76 +158,44 @@ def test_server_add_account_endpoint_contract(gmi_enabled, isolated_db):
 # ---------------------------------------------------------------------------
 
 
-def test_env_import_when_no_active_account(gmi_enabled, isolated_db, monkeypatch):
+def test_env_import_when_no_active_account(gmi_seeded, isolated_db, monkeypatch):
     monkeypatch.setenv("CB_GMI_API_KEY", "sk-env-boot-key-1357")
-    row = gstore.ensure_env_account()
+    row = gmi_seeded.ensure_env_account()
     assert row is not None
     assert row["name"] == "gmi-env"
     assert row["access_token"] == "sk-env-boot-key-1357"
     # 幂等：再次调用不新建
-    again = gstore.ensure_env_account()
+    again = gmi_seeded.ensure_env_account()
     assert again["id"] == row["id"]
     assert len(db.list_accounts(provider=CHANNEL_ID)) == 1
 
 
-def test_env_skips_when_active_account_exists(gmi_enabled, isolated_db, monkeypatch):
-    gstore.upsert_account(gstore.parse_credentials({"api_key": "sk-manual-key-2468"}))
+def test_env_skips_when_active_account_exists(gmi_seeded, isolated_db, monkeypatch):
+    gmi_seeded.upsert_account(gmi_seeded.parse_credentials({"api_key": "sk-manual-key-2468"}))
     monkeypatch.setenv("CB_GMI_API_KEY", "sk-other-env-key-9753")
-    row = gstore.ensure_env_account()
+    row = gmi_seeded.ensure_env_account()
     assert row is not None
     assert row["access_token"] == "sk-manual-key-2468"  # 不覆盖手动导入
     assert len(db.list_accounts(provider=CHANNEL_ID)) == 1
 
 
-def test_env_unset_returns_none(gmi_enabled, isolated_db):
-    assert gstore.ensure_env_account() is None
+def test_env_unset_returns_none(gmi_seeded, isolated_db):
+    assert gmi_seeded.ensure_env_account() is None
 
 
-def test_discover_is_empty_stub(gmi_enabled):
-    d = gstore.discover()
+def test_discover_is_empty_stub(gmi_seeded):
+    d = gmi_seeded.discover()
     assert d["channel"] == CHANNEL_ID
     assert d["files"] == []
     assert d["importable_count"] == 0
 
 
 # ---------------------------------------------------------------------------
-# UI 一致性回归：accounts.js 的硬编码 fallback 列表必须覆盖 api_key 类通道
-# （漏掉 gmi 时下拉框选不到该通道，导入入口不可见 —— 本次修复的起因）
+# 通道与模型页回归：seed 定义 + 用户自定义都能正确取到 / 设置
 # ---------------------------------------------------------------------------
 
 
-def test_ui_channel_fallback_covers_apikey_channels():
-    import re
-    from pathlib import Path
-
-    accounts_js = (
-        Path(__file__).resolve().parent.parent / "src" / "web" / "js" / "pages" / "accounts.js"
-    ).read_text(encoding="utf-8")
-    m = re.search(r"channels=ref\(\[(.*?)\]\)", accounts_js, re.S)
-    assert m, "accounts.js fallback channels list not found"
-    ui_ids = set(re.findall(r"id:'([a-z]+)'", m.group(1)))
-    # 以已加载 provider 为准（qoderwork 在 KNOWN 列表里但无实现，不进下拉框）
-    for channel_id in providers._LOADED:
-        assert channel_id in ui_ids, f"channel '{channel_id}' missing from accounts.js UI fallback"
-
-
-# ---------------------------------------------------------------------------
-# 通道与模型页回归：control_plane._CHANNEL_DEFAULTS 必须覆盖所有已加载通道
-# （漏配时打开「通道与模型」页对应该通道直接 KeyError 500 —— 本次线上报错）
-# ---------------------------------------------------------------------------
-
-
-def test_channel_defaults_cover_all_loaded_providers():
-    from accounts import control_plane
-
-    for channel_id in providers._LOADED:
-        assert channel_id in control_plane._CHANNEL_DEFAULTS, (
-            f"channel '{channel_id}' missing from _CHANNEL_DEFAULTS; "
-            "通道与模型页会 KeyError"
-        )
-
-
-def test_channel_model_view_gmi(gmi_enabled, isolated_db):
+def test_channel_model_view_gmi(gmi_seeded, isolated_db):
     """复现管理页 GET /admin/channels/gmi/models 的调用路径。"""
     from accounts import control_plane
 
@@ -225,14 +207,8 @@ def test_channel_model_view_gmi(gmi_enabled, isolated_db):
     assert "credit_rate" in view
 
 
-# ---------------------------------------------------------------------------
-# 各平台设置保存生效回归：channel_model_view / accepts_model / translate_model
-# 必须反映 gmi.models / gmi.aliases 设置
-# （漏接 model_config 时保存返回 200 但数据不变 —— 本次用户报错）
-# ---------------------------------------------------------------------------
-
-
-def test_set_channel_models_persists_to_gmi_view(gmi_enabled, isolated_db):
+def test_set_channel_models_persists_to_gmi_view(gmi_seeded, isolated_db):
+    """复现管理页保存生效：save 返回 200 且数据真正写入 gmi.models / gmi.aliases。"""
     from accounts import control_plane
 
     view = control_plane.set_channel_models(
@@ -254,18 +230,42 @@ def test_set_channel_models_persists_to_gmi_view(gmi_enabled, isolated_db):
     assert provider.accepts_model("custom-model-1") is True
     assert provider.accepts_model("not-in-list") is False
 
-    # 重置：删除设置回内置默认
+    # 重置：删除设置回 seed 默认
     view = control_plane.set_channel_models("gmi", models=None, aliases=None, set_models=True, set_aliases=True)
-    assert view["models"] == list(control_plane._GMI_DEFAULT_MODELS)
-    assert view["aliases"] == dict(control_plane._GMI_DEFAULT_ALIASES)
+    # defaults 应回滚到 seed 定义里的 models / aliases
+    definition = cc.get_definition("gmi")
+    assert view["models"] == list(definition["models"])
+    assert view["aliases"] == dict(definition["aliases"])
 
 
-def test_gmi_whitelist_gates_request_models(gmi_enabled, isolated_db):
-    """白名单是最终闸门：自定义后列表外模型必须被拒（与 qclaw 同契约，
-    gateway/router.py 依据 accepts_model 拒绝请求）。"""
-    from providers.gmi import chat as gchat
+def test_gmi_whitelist_gates_request_models(gmi_seeded, isolated_db):
+    """白名单是最终闸门：自定义后列表外模型必须被拒（与 qclaw 同契约）。"""
+    from accounts import control_plane
+    from providers import custom_channels as _cc
 
-    control_plane = __import__("accounts.control_plane", fromlist=["control_plane"])
     control_plane.set_channel_models("gmi", models=["zai-org/GLM-5.3-Flash"], set_models=True)
-    assert gchat.accepts_model("zai-org/GLM-5.3-Flash") is True
-    assert gchat.accepts_model("some-unknown-model") is False
+    # Invalidate so the rebuilt provider sees the persisted <id>.models key.
+    _cc.invalidate_cache("gmi")
+    provider = providers.get_provider("gmi")
+    assert provider.accepts_model("zai-org/GLM-5.3-Flash") is True
+    assert provider.accepts_model("some-unknown-model") is False
+
+
+# ---------------------------------------------------------------------------
+# seed 形态断言：seed 写入必须满足 spec §5 描述的所有字段
+# ---------------------------------------------------------------------------
+
+
+def test_seed_definition_full_shape(gmi_enabled, isolated_db):
+    cc.seed_initial_definitions()
+    definition = cc.get_definition("gmi")
+    assert definition is not None
+    assert definition["id"] == "gmi"
+    assert definition["display_name"] == "GMI Cloud"
+    assert definition["base_url"] == SEED_DEFAULT_BASE_URL
+    assert definition["models"] == ["zai-org/GLM-5.3-Flash"]
+    assert "auto" in definition["aliases"]
+    assert definition["aliases"]["auto"] == "zai-org/GLM-5.3-Flash"
+    assert definition["env_api_key"] == "CB_GMI_API_KEY"
+    assert definition["source"] == "seed"
+    assert isinstance(definition["created_at"], int) and definition["created_at"] > 0

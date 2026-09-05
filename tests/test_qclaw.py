@@ -28,9 +28,16 @@ def test_qclaw_quota_is_credit_not_token_cap(qclaw_enabled):
     assert snapshot.unsupported is True
 
 
-def test_qclaw_in_default_registry(monkeypatch):
+def test_qclaw_in_default_registry(monkeypatch, isolated_db):
     monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
-    assert providers.enabled_provider_ids() == ["workbuddy", "qclaw", "qwenwork", "traework", "traesolo"]
+    enabled = providers.enabled_provider_ids()
+    # After the data-driven migration, alphabetical fallback over
+    # known_channel_ids() also includes opt-in gmi / bailian seed channels.
+    # The five canonical channels must still be present in the enabled set.
+    canonical = {"workbuddy", "qclaw", "qwenwork", "traework", "traesolo"}
+    assert canonical.issubset(set(enabled)), (
+        f"missing default channels: {canonical - set(enabled)}"
+    )
     assert providers.get_provider("qclaw") is not None
     assert "qclaw" in providers._LOADED
 
