@@ -6,46 +6,51 @@ const{ref,reactive,computed,onMounted,watch}=Vue;
 // 复用：通道管理页 Card C 选中通道的导入区 + 统一浮窗向导第二步共用此组件。
 // 通过 props 传入 token/toast/通道 id；emit 'added' 让父级刷新凭证列表。
 export default {
-  props:['p','channelId'],
+  props:['token','toast','channelId'],
   emits:['added'],
   setup(props,ctx){
     const chId=computed(()=>props.channelId||'');
     const disc=ref(null),dl=ref(false),scanning=ref(false),authPath=ref('');
     const solo=reactive({pending:false,url:'',pendingId:'',callbackUrl:'',state:'',uid:'',error:'',manual:''}),soloBusy=ref(false);
     let soloTimer=null,soloGen=0;
+    // 统一出口:toast 走注入的函数,兜底 console
+    function notify(m,t){const f=props.toast;if(typeof f==='function')f(m,t);else console.log('[login-import]',m)}
+    function tk(){return props.token||''}
 
     async function discover(path=''){
-      if(!chId.value){props.p.toast('请先选中一个通道','err');return}
+      if(!chId.value){notify('请先选中一个通道','err');return}
       dl.value=true;
       try{
         const qs=new URLSearchParams();
         if(path&&path.trim())qs.set('auth_dir',path.trim());
         if(chId.value)qs.set('channel',chId.value);
         const q=qs.toString();
-        disc.value=await api.get('/admin/accounts/discover'+(q?'?'+q:''),props.p.token);
-      }catch(e){props.p.toast(apiErr(e,'检测失败'),'err')}
+        disc.value=await api.get('/admin/accounts/discover'+(q?'?'+q:''),tk());
+      }catch(e){notify(apiErr(e,'检测失败'),'err')}
       dl.value=false;
     }
     async function scan(path=''){
       if(scanning.value)return;
       scanning.value=true;
       try{
+        let msg='导入完成';
         if(disc.value?.preview_token){
           const body={channel:disc.value.channel||'workbuddy',preview_token:disc.value.preview_token};
           if(path&&path.trim())body.auth_dir=path.trim();
-          const r=await api.post('/admin/accounts/import',body,props.p.token);
-          props.p.toast('导入 '+r+' · 完成');
+          const r=await api.post('/admin/accounts/import',body,tk());
+          msg='导入 '+r.imported+' · 更新 '+r.updated+' · 跳过 '+r.skipped;
         }else{
           const body=path&&path.trim()?{auth_dir:path.trim()}:{};
-          const r=await api.post('/admin/accounts/scan',body,props.p.token);
-          props.p.toast('导入 '+r+' · 完成');
+          const r=await api.post('/admin/accounts/scan',body,tk());
+          msg='导入 '+r.imported+' · 更新 '+r.updated+' · 跳过 '+r.skipped;
         }
+        notify(msg,'ok');
         ctx.emit('added');
         await discover(path);
-      }catch(e){props.p.toast(apiErr(e,'扫描失败'),'err')}
+      }catch(e){notify(apiErr(e,'扫描失败'),'err')}
       scanning.value=false;
     }
-    function scanCustom(){const path=authPath.value.trim();if(!path){props.p.toast('请先填写目录或 .info 文件路径','err');return}scan(path)}
+    function scanCustom(){const path=authPath.value.trim();if(!path){notify('请先填写目录或 .info 文件路径','err');return}scan(path)}
     function clearPath(){authPath.value='';discover('')}
     function size(v){v=Number(v||0);if(v>=1024*1024)return(v/1024/1024).toFixed(1)+' MB';if(v>=1024)return(v/1024).toFixed(1)+' KB';return v+' B'}
 
@@ -55,36 +60,36 @@ export default {
       stopSoloPoll();soloGen++;
       const gen=soloGen;soloBusy.value=true;
       try{
-        const r=await api.post('/admin/traesolo/login/start',{},props.p.token);
+        const r=await api.post('/admin/traesolo/login/start',{},tk());
         if(gen!==soloGen)return;
         solo.pending=true;solo.url=r.login_url||'';solo.pendingId=r.pending_id||'';
         solo.callbackUrl=r.callback_url||'';solo.state='pending';solo.uid='';solo.error='';
         window.open(r.login_url,'_blank');pollSolo(gen);
-      }catch(e){if(gen===soloGen){solo.pending=false;solo.error=''}props.p.toast(apiErr(e,'发起 SOLO 登录失败'),'err')}
+      }catch(e){if(gen===soloGen){solo.pending=false;solo.error=''}notify(apiErr(e,'发起 SOLO 登录失败'),'err')}
       soloBusy.value=false;
     }
     async function pollSolo(gen){
       if(gen!==soloGen)return;if(!solo.pendingId)return;
       try{
-        const r=await api.get('/admin/traesolo/login/result?pending_id='+encodeURIComponent(solo.pendingId),props.p.token);
+        const r=await api.get('/admin/traesolo/login/result?pending_id='+encodeURIComponent(solo.pendingId),tk());
         if(gen!==soloGen)return;
         if(!r||r.found===false){stopSoloPoll();solo.pending=false;solo.state='expired';solo.error='登录会话已过期，可重新发起登录';return}
         solo.state=r.state||'';
-        if(r.state==='success'){stopSoloPoll();solo.uid=r.uid||'';solo.pending=false;solo.error='';props.p.toast('SOLO 账号已添加'+(r.uid?'（'+r.uid+'）':''),'ok');ctx.emit('added');return}
+        if(r.state==='success'){stopSoloPoll();solo.uid=r.uid||'';solo.pending=false;solo.error='';notify('SOLO 账号已添加'+(r.uid?'（'+r.uid+'）':''),'ok');ctx.emit('added');return}
         else if(r.state==='failed'){stopSoloPoll();solo.pending=false;solo.error=r.error||'登录失败';return}
         else if(r.state==='canceled'){stopSoloPoll();solo.pending=false;solo.error='';return}
         soloTimer=setTimeout(()=>pollSolo(gen),2500);
-      }catch(e){if(gen!==soloGen)return;stopSoloPoll();solo.pending=false;if(e.message==='404'){solo.state='expired';solo.error='登录会话已过期，可重新发起登录'}else{solo.error='登录状态查询失败：'+apiErr(e);props.p.toast(solo.error,'err')}}
+      }catch(e){if(gen!==soloGen)return;stopSoloPoll();solo.pending=false;if(e.message==='404'){solo.state='expired';solo.error='登录会话已过期，可重新发起登录'}else{solo.error='登录状态查询失败：'+apiErr(e);notify(solo.error,'err')}}
     }
-    async function cancelSolo(){if(!solo.pendingId)return;stopSoloPoll();soloGen++;try{await api.post('/admin/traesolo/login/cancel',{pending_id:solo.pendingId},props.p.token);solo.pending=false;solo.state='canceled';solo.error=''}catch(e){}}
+    async function cancelSolo(){if(!solo.pendingId)return;stopSoloPoll();soloGen++;try{await api.post('/admin/traesolo/login/cancel',{pending_id:solo.pendingId},tk());solo.pending=false;solo.state='canceled';solo.error=''}catch(e){}}
     async function completeSolo(){
-      const u=solo.manual.trim();if(!u){props.p.toast('请先粘贴完整回调 URL','err');return}
+      const u=solo.manual.trim();if(!u){notify('请先粘贴完整回调 URL','err');return}
       soloBusy.value=true;
       try{
-        const r=await api.post('/admin/traesolo/login/complete',{callback:u},props.p.token);
-        if(r.ok){props.p.toast('SOLO 账号已添加'+(r.uid?'（'+r.uid+'）':''),'ok');solo.manual='';ctx.emit('added')}
-        else{props.p.toast(r.error||'导入失败','err')}
-      }catch(e){props.p.toast(apiErr(e,'导入失败'),'err')}
+        const r=await api.post('/admin/traesolo/login/complete',{callback:u},tk());
+        if(r.ok){notify('SOLO 账号已添加'+(r.uid?'（'+r.uid+'）':''),'ok');solo.manual='';ctx.emit('added')}
+        else{notify(r.error||'导入失败','err')}
+      }catch(e){notify(apiErr(e,'导入失败'),'err')}
       soloBusy.value=false;
     }
 

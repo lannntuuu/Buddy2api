@@ -319,7 +319,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
             <td>{{c.display_name||c.id}}</td>
             <td class="mono">{{c.id}}</td>
             <td><span class="tag">{{c.kind||'builtin'}}</span><span v-if="c.id==='workbuddy'" class="tag" style="margin-left:4px">必选</span><span v-else-if="!c.loaded" class="tag warn" style="margin-left:4px">未加载</span></td>
-            <td style="text-align:right;white-space:nowrap"><button class="btn s" style="margin-right:8px" @click.stop="openInfo(c)">详情</button><input type="checkbox" :checked="c.enabled" :disabled="envLocked||c.id==='workbuddy'||toggling[c.id]" @change="toggleChannel(c.id,$event.target.checked)" @click.stop/></td>
+            <td style="text-align:right;white-space:nowrap"><button class="btn s" style="margin-right:8px" @click.stop="openInfo(c)">详情</button><button class="btn s" :class="c.enabled?'warn':'ok'" style="min-width:52px" :disabled="envLocked||c.id==='workbuddy'||toggling[c.id]" :title="envLocked?'CB_GATEWAY_PROVIDERS 环境变量锁定中':(c.id==='workbuddy'?'常驻通道,不可停用':'')" @click.stop="toggleChannel(c.id,!c.enabled)">{{toggling[c.id]?'…':(c.enabled?'停用':'启用')}}</button></td>
           </tr>
           </template>
         </tbody>
@@ -331,7 +331,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
             <td>{{c.display_name||c.id}}</td>
             <td class="mono">{{c.id}}</td>
             <td><span class="tag apikey">{{c.kind||'apikey'}}</span><span v-if="c.custom" class="tag" style="margin-left:4px;background:var(--accent-soft);color:var(--accent)">custom</span><span v-else-if="c.source==='seed'||c.id==='gmi'||c.id==='bailian'" class="tag" style="margin-left:4px">seed</span><span v-else-if="!c.loaded" class="tag warn" style="margin-left:4px">未加载</span></td>
-            <td style="text-align:right;white-space:nowrap"><button class="btn s" style="margin-right:8px" @click.stop="openInfo(c)">详情</button><input type="checkbox" :checked="c.enabled" :disabled="envLocked||toggling[c.id]" @change="toggleChannel(c.id,$event.target.checked)" @click.stop/></td>
+            <td style="text-align:right;white-space:nowrap"><button class="btn s" style="margin-right:8px" @click.stop="openInfo(c)">详情</button><button class="btn s" :class="c.enabled?'warn':'ok'" style="min-width:52px" :disabled="envLocked||toggling[c.id]" :title="envLocked?'CB_GATEWAY_PROVIDERS 环境变量锁定中':''" @click.stop="toggleChannel(c.id,!c.enabled)">{{toggling[c.id]?'…':(c.enabled?'停用':'启用')}}</button></td>
           </tr>
           </template>
         </tbody>
@@ -405,7 +405,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
               <div class="hint" style="margin:0">内置通道 · 定义不可编辑；启用 / 停用在上方开关</div>
             </div>
             <div class="sec-h" style="margin:14px 0 6px">凭证</div>
-            <login-import :channel-id="um.infoId" @added="loadAccounts"></login-import>
+            <login-import :token="token" :toast="toast" :channel-id="um.infoId" @added="loadAccounts"></login-import>
           </div>
         </template>
         <!-- form tab (create/edit) -->
@@ -426,7 +426,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
               <option v-for="c in loginChannels" :key="c.id" :value="c.id">{{c.display_name||c.id}}</option>
             </select>
           </div>
-          <login-import v-if="um.channelId" :channel-id="um.channelId" @added="onModalImported"></login-import>
+          <login-import v-if="um.channelId" :token="token" :toast="toast" :channel-id="um.channelId" @added="onModalImported"></login-import>
         </template>
         <!-- step 2b: apikey form -->
         <template v-else-if="um.kind==='apikey'">
