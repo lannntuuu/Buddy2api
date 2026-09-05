@@ -353,7 +353,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
 
   <!-- 统一新增/编辑浮窗 -->
   <div class="ov" v-if="um.open" @click.self="umClose()">
-    <div class="modal" style="min-width:560px;max-width:720px">
+    <div class="modal wide" style="width:860px;max-width:94vw">
       <div class="modal-h">
         <div>
           <h3 style="margin-bottom:6px">{{um.tab==='info'?'通道详情 · '+(um.infoId||'') : (um.mode==='create'?'新增通道凭证':'编辑密钥型通道 · '+um.draft.id)}}</h3>
