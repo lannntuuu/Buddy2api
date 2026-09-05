@@ -18,7 +18,7 @@ import providers
 from accounts import auth_manager
 import providers.model_config as model_config
 from providers.model_config import _channel_keys, _ids_from_raw, is_customized, unified_models
-from providers.protocol import KNOWN_CHANNEL_SET
+from providers.protocol import KNOWN_CHANNEL_SET  # noqa: F401  (kept for legacy callers)
 from providers.qclaw.constants import ALIASES as _QCLAW_DEFAULT_ALIASES
 from providers.qclaw.constants import STATIC_MODELS as _QCLAW_DEFAULT_MODELS
 from providers.qwenwork.constants import ALIASES as _QWENWORK_DEFAULT_ALIASES
@@ -27,8 +27,6 @@ from providers.traework.constants import ALIASES as _TRAEWORK_DEFAULT_ALIASES
 from providers.traework.constants import STATIC_MODELS as _TRAEWORK_DEFAULT_MODELS
 from providers.traesolo.constants import ALIASES as _TRAESOLO_DEFAULT_ALIASES
 from providers.traesolo.constants import STATIC_MODELS as _TRAESOLO_DEFAULT_MODELS
-from providers.gmi.constants import ALIASES as _GMI_DEFAULT_ALIASES
-from providers.gmi.constants import STATIC_MODELS as _GMI_DEFAULT_MODELS
 
 logger = logging.getLogger(__name__)
 
@@ -347,8 +345,46 @@ _CHANNEL_DEFAULTS: dict[str, tuple[list[str], dict[str, str]]] = {
     "qwenwork": (list(_QWENWORK_DEFAULT_MODELS), dict(_QWENWORK_DEFAULT_ALIASES)),
     "traework": (list(_TRAEWORK_DEFAULT_MODELS), dict(_TRAEWORK_DEFAULT_ALIASES)),
     "traesolo": (list(_TRAESOLO_DEFAULT_MODELS), dict(_TRAESOLO_DEFAULT_ALIASES)),
-    "gmi": (list(_GMI_DEFAULT_MODELS), dict(_GMI_DEFAULT_ALIASES)),
 }
+
+
+def _custom_default_models_and_aliases(channel: str) -> tuple[list[str], dict[str, str]] | None:
+    """For custom OpenAI-compat channels: pull the built-in defaults straight
+    from the persisted definition. Return None when the channel isn't a
+    custom definition (so callers can fall back to the built-in dict).
+
+    Editing a definition's models/aliases updates the default here too —
+    but only matters to admins who haven't written their own <id>.models
+    override (D8). The model surface itself reads from `<id>.models` if set
+    via channel_model_ids() (handled by providers.openai_compat).
+    """
+    try:
+        from providers import custom_channels
+    except Exception:
+        return None
+    definition = custom_channels.get_definition(channel)
+    if not definition:
+        return None
+    models = [str(m) for m in (definition.get("models") or []) if str(m).strip()]
+    aliases_raw = definition.get("aliases") or {}
+    aliases = {
+        str(k).strip(): str(v).strip()
+        for k, v in aliases_raw.items()
+        if str(k).strip() and str(v).strip()
+    }
+    return models, aliases
+
+
+def _resolve_default_models_and_aliases(channel: str) -> tuple[list[str], dict[str, str]]:
+    """`_CHANNEL_DEFAULTS` for built-ins, definition-derived defaults for
+    custom channels. Raises KeyError only for unknown ids — callers must
+    pre-check."""
+    if channel in _CHANNEL_DEFAULTS:
+        return _CHANNEL_DEFAULTS[channel]
+    custom = _custom_default_models_and_aliases(channel)
+    if custom is not None:
+        return custom
+    raise KeyError(channel)
 
 
 def _validate_models(models) -> list[str]:
@@ -380,7 +416,7 @@ def _validate_aliases(aliases) -> dict[str, str]:
 def channel_model_view(channel: str) -> dict:
     """通道当前生效的模型列表 / 别名，附内置默认与自定义标记。"""
     channel = str(channel or "").strip()
-    if channel not in KNOWN_CHANNEL_SET:
+    if not providers.is_known_channel(channel):
         raise ValueError(f"Unknown channel '{channel}'")
     provider = providers.get_provider(channel)
     if provider is None:
@@ -389,7 +425,7 @@ def channel_model_view(channel: str) -> dict:
         str(item["id"]) if isinstance(item, dict) else str(item)
         for item in provider.list_models()
     ]
-    default_ids, default_aliases = _CHANNEL_DEFAULTS[channel]
+    default_ids, default_aliases = _resolve_default_models_and_aliases(channel)
     # per-model 明细（含官方消耗倍率）。无 fetch_model_rates 钩子的通道回退到白名单。
     rates_fn = getattr(provider, "fetch_model_rates", None)
     if callable(rates_fn):
@@ -425,7 +461,7 @@ async def refresh_channel_models(channel: str) -> dict:
     非动态通道返回 refreshed=false 并附说明。
     """
     channel = str(channel or "").strip()
-    if channel not in KNOWN_CHANNEL_SET:
+    if not providers.is_known_channel(channel):
         raise ValueError(f"Unknown channel '{channel}'")
     provider = providers.get_provider(channel)
     if provider is None:
@@ -465,7 +501,7 @@ def set_channel_models(
     """设置或重置通道模型列表 / 别名 / credit 换算率 / 按模型思考档位。
     None 表示重置为默认。返回最新视图。"""
     channel = str(channel or "").strip()
-    if channel not in KNOWN_CHANNEL_SET:
+    if not providers.is_known_channel(channel):
         raise ValueError(f"Unknown channel '{channel}'")
     if providers.get_provider(channel) is None:
         raise ValueError(f"Channel '{channel}' is not enabled")
@@ -549,7 +585,7 @@ def _validate_unified_models(models) -> list[dict]:
             inner_s = str(inner).strip()
             if not channel_s or not inner_s:
                 raise ValueError(f"unified model '{name}' has an empty channel or inner id")
-            if channel_s not in KNOWN_CHANNEL_SET:
+            if not providers.is_known_channel(channel_s):
                 raise ValueError(f"unified model '{name}' references unknown channel '{channel_s}'")
             cleaned[channel_s] = inner_s
         if not cleaned:

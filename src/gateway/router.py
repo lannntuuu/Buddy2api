@@ -14,7 +14,7 @@ from providers.protocol import (
     BindResult,
     InvalidModel,
     KeyChannelMismatch,
-    KNOWN_CHANNEL_SET,
+    KNOWN_CHANNEL_SET,  # noqa: F401  (kept for legacy callers; use providers.is_known_channel for runtime)
     UnknownChannel,
     UnknownModel,
 )
@@ -47,7 +47,7 @@ def bind(payload: dict, api_key_info: dict | None) -> BindResult:
     key_channel = _key_channel(api_key_info)
 
     first, sep, rest = original.partition("/")
-    if sep and first in KNOWN_CHANNEL_SET:
+    if sep and providers.is_known_channel(first):
         channel = first
         inner = rest
         if not inner:

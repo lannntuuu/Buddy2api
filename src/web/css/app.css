@@ -221,6 +221,12 @@ button{font-family:inherit}
 .btn.pri:hover{background:var(--accent-strong);border-color:var(--accent-strong)}
 .btn.danger{background:var(--bg-elevated);color:var(--err);border-color:var(--accent-border)}
 .btn.danger:hover{background:var(--err-bg);border-color:var(--err)}
+.btn.ok{background:var(--ok-bg);color:var(--ok);border-color:var(--ok-border)}
+.btn.ok:hover{background:var(--ok);color:#fff;border-color:var(--ok)}
+.btn.warn{background:var(--warn-bg);color:var(--warn);border-color:var(--accent-border)}
+.btn.warn:hover{background:var(--warn);color:#fff;border-color:var(--warn)}
+.btn.plain{background:var(--bg-elevated);color:var(--fg-2);border-color:var(--border-strong)}
+.btn.plain:hover{background:var(--bg-sunken);color:var(--fg);border-color:var(--fg-3)}
 .btn:disabled,.btn[aria-disabled="true"]{opacity:.45;cursor:not-allowed;transform:none}
 .btn svg{width:13px;height:13px}
 
@@ -323,6 +329,7 @@ tr:hover td{background:var(--accent-soft)}
 .hint{font-size:var(--fs-s);color:var(--fg-3);margin-top:3px}
 .cache-note{font-size:var(--fs-s);color:var(--fg-3);margin-top:3px}
 .warn-text{color:var(--warn)}
+.calc-mark{color:var(--warn);cursor:help;font-size:10px;margin-left:4px;vertical-align:middle}
 
 /* ---- today-usage card -------------------------------------- */
 .today-usage{background:var(--bg-elevated);border:1px solid var(--border);
@@ -450,6 +457,7 @@ tr:hover td{background:var(--accent-soft)}
 /* ---- form & inputs ----------------------------------------- */
 .field{margin-bottom:var(--sp-4)}
 .field label{display:block;font-size:var(--fs-b);font-weight:600;margin-bottom:4px;color:var(--fg)}
+.field label .req{color:var(--err);font-weight:700}
 .field input,.field textarea,.field select{width:100%;padding:7px 10px;
   border:1px solid var(--border-strong);border-radius:var(--r-m);
   font:inherit;font-size:var(--fs-m);outline:none;background:var(--bg-elevated);

@@ -31,7 +31,7 @@ from starlette.concurrency import run_in_threadpool
 
 from storage import database as db
 import providers
-from providers.protocol import KNOWN_CHANNEL_SET
+from providers.protocol import KNOWN_CHANNEL_SET  # noqa: F401  (kept for legacy callers)
 from gateway.version import VERSION
 
 
@@ -251,7 +251,7 @@ def _validate_key_channel(channel: str) -> str:
     value = str(channel or "").strip()
     if not value:
         raise HTTPException(status_code=400, detail="default_channel is required")
-    if value not in KNOWN_CHANNEL_SET:
+    if not providers.is_known_channel(value):
         raise HTTPException(status_code=400, detail=f"Unknown channel '{value}'")
     if not providers.is_channel_enabled(value) or providers.get_provider(value) is None:
         raise HTTPException(status_code=400, detail=f"Channel '{value}' is not enabled")

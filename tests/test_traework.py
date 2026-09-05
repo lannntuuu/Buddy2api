@@ -21,9 +21,13 @@ def traework_enabled(monkeypatch):
     monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
 
 
-def test_traework_in_default_registry(monkeypatch):
+def test_traework_in_default_registry(monkeypatch, isolated_db):
     monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
-    assert providers.enabled_provider_ids() == ["workbuddy", "qclaw", "qwenwork", "traework", "traesolo"]
+    enabled = providers.enabled_provider_ids()
+    canonical = {"workbuddy", "qclaw", "qwenwork", "traework", "traesolo"}
+    assert canonical.issubset(set(enabled)), (
+        f"missing default channels: {canonical - set(enabled)}"
+    )
     assert providers.get_provider("traework") is not None
     assert "traework" in providers._LOADED
 

@@ -2,6 +2,10 @@
 
 Admin can point a channel at a mirror / internal proxy without touching
 provider constants. Unset fields fall back to the provider's default.
+
+Note: gmi and bailian used to live here; they moved into the data-driven
+custom-channel definitions (`custom_channels` settings key) — change base
+URL by editing the channel definition, not via `channel_hosts`.
 """
 from __future__ import annotations
 from storage import database as db
@@ -11,7 +15,6 @@ from storage import database as db
 # route. Phase A covers single-host channels; Phase B adds multi-host
 # channels (qclaw, traesolo, traework).
 CHANNEL_HOST_FIELDS: dict[str, tuple[str, ...]] = {
-    "gmi": ("base_url",),
     "qwenwork": ("gateway",),
     "qclaw": ("jprx_gateway", "aizone_base"),
     "traesolo": ("oauth_host", "console_host", "agent_host"),

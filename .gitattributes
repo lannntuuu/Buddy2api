@@ -1,0 +1,6 @@
+# 统一 LF:仓库源文件一律 LF 入库、检出不转 CRLF
+# 背景:tests/test_docs_encoding.py 守卫 README 无 CR;core.autocrlf=true 的
+# 环境检出时会把 LF smudge 成 CRLF,导致守卫误报。此文件强制不做转换。
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
