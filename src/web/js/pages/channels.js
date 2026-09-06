@@ -1,7 +1,7 @@
-import {api,apiErr,fmt,tok} from '../api.js';
+import {api,apiErr,fmt,tok,respRow,patchRowById} from '../api.js';
 import {I} from '../icons.js';
 import LoginImport from './_login_import.js';
-const{ref,reactive,computed,onMounted,watch,nextTick}=Vue;
+const{ref,reactive,computed,onMounted,onUnmounted,watch,nextTick}=Vue;
 
 export default {props:['token','toast'],components:{'login-import':LoginImport},setup(p){
   // ────────── master list ──────────
@@ -27,6 +27,12 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
   const activeCh=computed(()=>list.value.find(c=>c.id===activeChannel.value));
   const loginChannels=computed(()=>list.value.filter(c=>c.kind!=='apikey'));
   const apikeyChannels=computed(()=>list.value.filter(c=>c.kind==='apikey'));
+  // 键盘可达(spec WS-3 §2):通道行 tabindex=0,Enter/Space 与 click 同义。
+  // 只在事件目标就是行本身时触发,避免行内按钮聚焦按 Enter 时二次触发。
+  function rowKey(e,fn){
+    if(e.target!==e.currentTarget)return;
+    if(e.key==='Enter'||e.key===' '){e.preventDefault();fn()}
+  }
 
   // ────────── unified add/edit modal ──────────
   const um=ref({open:false,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',draft:{},warning:null,busy:false,envTouched:false});
@@ -121,8 +127,11 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
     if(!confirm('删除自定义通道 '+c.id+' ？该通道账号行将全部置 inactive。'))return;
     try{
       await api.del('/admin/channels/custom/'+encodeURIComponent(c.id),p.token);
+      // 本地回写:直接从定义表/通道表移除,免整表重拉(spec WS-3 §3)
+      ccList.value=ccList.value.filter(x=>x.id!==c.id);
+      list.value=list.value.filter(x=>x.id!==c.id);
+      if(activeChannel.value===c.id)activeChannel.value=list.value.find(x=>x.enabled)?.id||list.value[0]?.id||'';
       p.toast('已删除 '+c.id);
-      await Promise.all([loadCC(),loadList()]);
     }catch(e){
       p.toast('删除失败：'+apiErr(e),'err');
     }
@@ -147,7 +156,11 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
   const keyKey=ref(''),keyNick=ref(''),keyBase=ref(''),keyBusy=ref(false);
 
   const disc=ref(null),dl=ref(false),scanning=ref(false),authPath=ref('');
-  const solo=reactive({pending:false,url:'',pendingId:'',callbackUrl:'',state:'',uid:'',error:'',manual:''}),soloBusy=ref(false);let soloTimer=null,soloGen=0;
+  const solo=reactive({pending:false,url:'',pendingId:'',callbackUrl:'',state:'',uid:'',error:'',manual:''}),soloBusy=ref(false);
+  let soloTimer=null,soloGen=0,soloAbort=null;
+  // 生命周期(spec WS-3 §4):切页/卸载时停轮询 + 中断在途请求,防残留轮询。
+  function stopSoloPoll(){if(soloTimer){clearTimeout(soloTimer);soloTimer=null}}
+  function abortSoloPoll(){if(soloAbort){try{soloAbort.abort()}catch(_){}soloAbort=null}}
   const soloSelected=computed(()=>activeChannel.value==='traesolo');
   async function discover(path=''){
     if(!activeChannel.value){p.toast('请先选中一个通道','err');return}
@@ -168,11 +181,11 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
       if(disc.value?.preview_token){
         const body={channel:disc.value.channel||'workbuddy',preview_token:disc.value.preview_token};
         if(path&&path.trim())body.auth_dir=path.trim();
-        const r=await api.post('/admin/accounts/import',body,p.token);
+        const r=await api.post('/admin/accounts/import',body,p.token,{timeoutMs:120000});
         p.toast('导入 '+r.imported+' · 更新 '+r.updated+' · 跳过 '+r.skipped);
       }else{
         const body=path&&path.trim()?{auth_dir:path.trim()}:{};
-        const r=await api.post('/admin/accounts/scan',body,p.token);
+        const r=await api.post('/admin/accounts/scan',body,p.token,{timeoutMs:120000});
         p.toast('导入 '+r.imported+' · 更新 '+r.updated+' · 跳过 '+r.skipped);
       }
       await loadAccounts();await discover(path);
@@ -182,7 +195,6 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
   async function scanCustom(){const path=authPath.value.trim();if(!path){p.toast('请先填写目录或 .info 文件路径','err');return}await scan(path)}
   function clearPath(){authPath.value='';discover('')}
   // (keyKey 粘贴逻辑已迁入统一浮窗 umSave;密钥型入口改为「添加/轮换密钥」按钮)
-  function stopSoloPoll(){if(soloTimer){clearTimeout(soloTimer);soloTimer=null}}
   async function startSoloLogin(){
     if(soloBusy.value)return;
     stopSoloPoll();soloGen++;
@@ -198,8 +210,9 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
   }
   async function pollSolo(gen){
     if(gen!==soloGen)return;if(!solo.pendingId)return;
+    soloAbort=new AbortController();
     try{
-      const r=await api.get('/admin/traesolo/login/result?pending_id='+encodeURIComponent(solo.pendingId),p.token);
+      const r=await api.get('/admin/traesolo/login/result?pending_id='+encodeURIComponent(solo.pendingId),p.token,{signal:soloAbort.signal});
       if(gen!==soloGen)return;
       if(!r||r.found===false){stopSoloPoll();solo.pending=false;solo.state='expired';solo.error='登录会话已过期，可重新发起登录';return}
       solo.state=r.state||'';
@@ -207,7 +220,13 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
       else if(r.state==='failed'){stopSoloPoll();solo.pending=false;solo.error=r.error||'登录失败';return}
       else if(r.state==='canceled'){stopSoloPoll();solo.pending=false;solo.error='';return}
       soloTimer=setTimeout(()=>pollSolo(gen),2500);
-    }catch(e){if(gen!==soloGen)return;stopSoloPoll();solo.pending=false;if(e.message==='404'){solo.state='expired';solo.error='登录会话已过期，可重新发起登录'}else{solo.error='登录状态查询失败：'+apiErr(e);p.toast(solo.error,'err')}}
+    }catch(e){
+      if(gen!==soloGen)return; // 已取消/已卸载:静默退出(onUnmounted 会 bump soloGen)
+      stopSoloPoll();soloAbort=null;
+      if(e.message==='504'){soloTimer=setTimeout(()=>pollSolo(gen),2500);return} // 瞬时超时:继续轮询
+      solo.pending=false;
+      if(e.message==='404'){solo.state='expired';solo.error='登录会话已过期，可重新发起登录'}else{solo.error='登录状态查询失败：'+apiErr(e);p.toast(solo.error,'err')}
+    }finally{soloAbort=null}
   }
   async function cancelSolo(){if(!solo.pendingId)return;stopSoloPoll();soloGen++;try{await api.post('/admin/traesolo/login/cancel',{pending_id:solo.pendingId},p.token);solo.pending=false;solo.state='canceled';solo.error=''}catch(e){}}
   async function completeSolo(){
@@ -220,6 +239,8 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
     }catch(e){p.toast(apiErr(e,'导入失败'),'err')}
     soloBusy.value=false;
   }
+  // 卸载清理:bump soloGen 使在途回调失效 + 停轮询 + 中断在途请求
+  onUnmounted(()=>{soloGen++;stopSoloPoll();abortSoloPoll()});
 
   // ────────── accounts list (full table from accounts.js) ──────────
   const accs=ref([]),accLd=ref(false),accBusy=ref({}),test=ref(null),tl=ref(0),filters=reactive({q:'',status:'all',sort:'priority',provider:'all'});
@@ -258,10 +279,25 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
     return rows;
   });
   async function withBusy(a,k,fn){accBusy.value={...accBusy.value,[a.id+'-'+k]:true};try{return await fn()}finally{const o={...accBusy.value};delete o[a.id+'-'+k];accBusy.value=o}}
-  async function ref2(a){await withBusy(a,'refresh',async()=>{try{await api.post('/admin/accounts/'+a.id+'/refresh',{},p.token);p.toast('刷新成功');await loadAccounts()}catch(e){p.toast(apiErr(e,'刷新失败'),'err')}})}
-  async function saveMeta(a){await withBusy(a,'save',async()=>{try{const creditSnapshot=Math.max(0,Number(a._creditSnapshot)||0);const body={weight:parseInt(a._weight)||1,priority:parseInt(a._priority)||0};if(Number(a._creditSnapshot||0)!==Number(a._baseCreditSnapshot||0))body.credit_limit=creditSnapshot;await api.put('/admin/accounts/'+a.id,body,p.token);a._baseWeight=parseInt(a._weight)||1;a._basePriority=parseInt(a._priority)||0;a._baseCreditSnapshot=creditSnapshot;p.toast(body.credit_limit!==undefined?'已保存余额快照':'已保存');await loadAccounts()}catch(e){p.toast(apiErr(e,'保存失败'),'err')}})}
-  async function toggle(a){await withBusy(a,'toggle',async()=>{try{await api.put('/admin/accounts/'+a.id,{status:a.status==='active'?'inactive':'active'},p.token);p.toast(a.status==='active'?'已禁用':'已启用');await loadAccounts()}catch(e){p.toast(apiErr(e,'操作失败'),'err')}})}
-  async function testOne(a){tl.value=a.id;test.value=null;try{const r=await api.post('/admin/accounts/'+a.id+'/test',{model:'auto',prompt:'ping'},p.token);test.value={account:a.nickname||a.name,result:r};p.toast(r.ok?'测试成功':'测试失败',r.ok?'ok':'err');await loadAccounts()}catch(e){p.toast(apiErr(e,'测试失败'),'err');test.value={account:a.nickname||a.name,result:{ok:false,status_code:0,message:e.message}}}tl.value=0}
+  async function ref2(a){await withBusy(a,'refresh',async()=>{try{await api.post('/admin/accounts/'+a.id+'/refresh',{},p.token,{timeoutMs:60000});p.toast('刷新成功');await loadAccounts()}catch(e){p.toast(apiErr(e,'刷新失败'),'err')}})}
+  async function saveMeta(a){await withBusy(a,'save',async()=>{try{const creditSnapshot=Math.max(0,Number(a._creditSnapshot)||0);const body={weight:parseInt(a._weight)||1,priority:parseInt(a._priority)||0};if(Number(a._creditSnapshot||0)!==Number(a._baseCreditSnapshot||0))body.credit_limit=creditSnapshot;
+    // 契约 3/6:PUT 返回 account 行对象 → 本地回写;缺行对象或形状不符 → 回退整表 loadAccounts()
+    const r=await api.put('/admin/accounts/'+a.id,body,p.token);
+    const row=respRow(r,'account',x=>x&&x.id!=null);
+    if(row&&patchRowById(accs.value,hydrate(row))){
+      const nu=accs.value.find(x=>Number(x.id)===Number(a.id));
+      if(nu){nu._baseWeight=body.weight;nu._basePriority=body.priority;if(body.credit_limit!==undefined)nu._baseCreditSnapshot=creditSnapshot}
+    }else{await loadAccounts()}
+    p.toast(body.credit_limit!==undefined?'已保存余额快照':'已保存');
+  }catch(e){p.toast(apiErr(e,'保存失败'),'err')}})}
+  async function toggle(a){await withBusy(a,'toggle',async()=>{try{
+    // 契约 3/6:行对象本地回写,失败/形状不符回退整表
+    const r=await api.put('/admin/accounts/'+a.id,{status:a.status==='active'?'inactive':'active'},p.token);
+    const row=respRow(r,'account',x=>x&&x.id!=null);
+    if(!(row&&patchRowById(accs.value,hydrate(row))))await loadAccounts();
+    p.toast(a.status==='active'?'已禁用':'已启用');
+  }catch(e){p.toast(apiErr(e,'操作失败'),'err')}})}
+  async function testOne(a){tl.value=a.id;test.value=null;try{const r=await api.post('/admin/accounts/'+a.id+'/test',{model:'auto',prompt:'ping'},p.token,{timeoutMs:180000});test.value={account:a.nickname||a.name,result:r};p.toast(r.ok?'测试成功':'测试失败',r.ok?'ok':'err');await loadAccounts()}catch(e){p.toast(apiErr(e,'测试失败'),'err');test.value={account:a.nickname||a.name,result:{ok:false,status_code:0,message:e.message}}}tl.value=0}
   async function del(a){if(!confirm('删除账号 '+(a.nickname||a.name||a.id)+' ?'))return;await api.del('/admin/accounts/'+a.id,p.token);p.toast('已删除');await loadAccounts();await discover(authPath.value)}
 
   // ────────── 高级手动添加 (modal) ──────────
@@ -283,12 +319,20 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
     adding.value=false;
   }
 
+  function destroySortable(){
+    sortInst.forEach(s=>{try{s.destroy()}catch(_){}});
+    sortInst.length=0;
+  }
+  // 幂等守卫:先销毁旧实例再创建。tbody 会因 ld 翻转/二次进页重建,
+  // 旧实例绑定的是已脱离 DOM 的节点,不销毁会导致拖拽失效(spec WS-3 §4)。
   function initSortable(){
-    if(sortInst.length||typeof window.Sortable==='undefined')return;
+    if(typeof window.Sortable==='undefined')return;
+    destroySortable();
     const opt={handle:'.drag-handle',animation:120,onMove:e=>!e.related.classList.contains('grp-h')};
     if(loginTbody.value)sortInst.push(window.Sortable.create(loginTbody.value,{...opt,onEnd:onLoginEnd}));
     if(apikeyTbody.value)sortInst.push(window.Sortable.create(apikeyTbody.value,{...opt,onEnd:onApikeyEnd}));
   }
+  onUnmounted(destroySortable);
   onMounted(async()=>{
     await Promise.all([loadList(),loadCC(),loadAccounts()]);
     refreshKeyMeta();
@@ -322,7 +366,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
   });
   function onEnvInput(){um.value.envTouched=true}
 
-  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,loginChannels,apikeyChannels,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccDelete,um,openKeyModal,umEditFromInfo,umClose,umSave,addAliasRow,rmAliasRow,onEnvInput,onModalImported,openInfo,disc,dl,scanning,authPath,discover,scan,scanCustom,clearPath,solo,soloBusy,soloSelected,startSoloLogin,cancelSolo,completeSolo,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,size,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I,keyPanelMetaById,loginTbody,apikeyTbody}
+  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,loginChannels,apikeyChannels,rowKey,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccDelete,um,openKeyModal,umEditFromInfo,umClose,umSave,addAliasRow,rmAliasRow,onEnvInput,onModalImported,openInfo,disc,dl,scanning,authPath,discover,scan,scanCustom,clearPath,solo,soloBusy,soloSelected,startSoloLogin,cancelSolo,completeSolo,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,size,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I,keyPanelMetaById,loginTbody,apikeyTbody}
 },template:`
 <div>
   <div class="phead"><h1>通道管理</h1><p>定义通道 · 管理凭证 · 启用开关</p></div>
@@ -339,7 +383,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
         <tbody ref="loginTbody">
           <tr class="grp-h"><td colspan="5" style="background:var(--bg-sunken);font-weight:600;font-size:12px;color:var(--fg-2)">登录型平台<span class="hint" style="margin-left:8px;font-weight:400">硬编码配置模板 · 本机登录/网页登录导入 · 一个平台可挂多个凭证 · 行首 ≡ 拖拽排序</span></td></tr>
           <template v-for="c in loginChannels" :key="c.id">
-          <tr @click="activeChannel=c.id" :class="{on:activeChannel===c.id}" style="cursor:pointer" :data-id="c.id">
+          <tr @click="activeChannel=c.id" @keydown="rowKey($event,()=>{activeChannel=c.id})" tabindex="0" :class="{on:activeChannel===c.id}" style="cursor:pointer" :data-id="c.id">
             <td class="drag-handle" @click.stop style="width:18px;text-align:center;color:var(--fg-2);cursor:grab" title="拖拽排序">≡</td>
             <td>{{c.display_name||c.id}}</td>
             <td class="mono">{{c.id}}</td>
@@ -351,7 +395,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
         <tbody ref="apikeyTbody">
           <tr class="grp-h"><td colspan="5" style="background:var(--bg-sunken);font-weight:600;font-size:12px;color:var(--fg-2)">密钥型通道<span class="hint" style="margin-left:8px;font-weight:400">通用模板 · Base URL + API Key · 零代码新增 · 行首 ≡ 拖拽排序</span><button class="btn s pri" style="float:right;margin:2px 0" @click="openKeyModal()"><span v-html="I.plus"></span>新增</button></td></tr>
           <template v-for="c in apikeyChannels" :key="c.id">
-          <tr @click="activeChannel=c.id" :class="{on:activeChannel===c.id}" style="cursor:pointer" :data-id="c.id">
+          <tr @click="activeChannel=c.id" @keydown="rowKey($event,()=>{activeChannel=c.id})" tabindex="0" :class="{on:activeChannel===c.id}" style="cursor:pointer" :data-id="c.id">
             <td class="drag-handle" @click.stop style="width:18px;text-align:center;color:var(--fg-2);cursor:grab" title="拖拽排序">≡</td>
             <td>{{c.display_name||c.id}}</td>
             <td class="mono">{{c.id}}</td>

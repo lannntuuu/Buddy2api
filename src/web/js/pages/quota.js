@@ -1,4 +1,4 @@
-import {api,apiErr,fmt} from '../api.js';
+import {api,apiErr,fmt,respList} from '../api.js';
 import {I} from '../icons.js';
 const{ref,reactive,computed,onMounted}=Vue;
 
@@ -10,12 +10,38 @@ export default {props:['token','toast'],setup(p){
   async function load(){ld.value=true;try{l.value=await api.get('/admin/accounts',p.token)}catch(e){p.toast(apiErr(e),'err')}ld.value=false;await Promise.all([loadCheckins(false),loadCredit(false)])}
   async function loadCredit(force){try{creditSum.value=await api.get('/admin/credit-summary'+(force?'?force=1':''),p.token)}catch(e){if(force)p.toast(apiErr(e,'官方额度加载失败'),'err')}}
   async function loadCheckins(force=false){checkinLoading.value=true;try{const r=await api.get('/admin/accounts/checkin-status-all'+(force?'?force=1':''),p.token);checkinSummary.value=r;const map={};(r.results||[]).forEach(x=>{map[x.account_id]=x});checkins.value=map}catch(e){if(force)p.toast(apiErr(e,'签到状态加载失败'),'err')}checkinLoading.value=false}
-  async function refreshAllResources(){if(officialRefreshing.value)return;officialRefreshing.value=true;const targets=l.value.filter(a=>a.status==='active');await Promise.all(targets.map(a=>refreshResource(a,true,true)));officialRefreshing.value=false;p.toast('官方额度已刷新 '+targets.length+' 个账号','ok')}
-  async function refreshResource(a,silent=false,force=false){return await withBusy(a.id,'resource',async()=>{try{const r=await api.get('/admin/accounts/'+a.id+'/resources'+(force?'?force=1':''),p.token);a.official_resource=r;if(!silent)p.toast(r.ok?(r.stale?'已显示旧额度缓存':'官方额度已刷新'):('官方额度失败：'+(r.message||r.status_code)),r.ok?'ok':'err');return r}catch(e){const r={ok:false,account_id:a.id,message:apiErr(e,'官方额度加载失败'),packages:[]};a.official_resource=r;if(!silent)p.toast(r.message,'err');return r}})}
+  // 契约 5/6:一次批量端点替代 N 个逐账号请求;结果行与单账号 resources
+  // 同形,直接本地回写 a.official_resource。批量不可用或 results 形状不符
+  // 时回退旧的逐账号刷新(保底),不整体失败。
+  async function refreshAllResources(){
+    if(officialRefreshing.value)return;
+    officialRefreshing.value=true;
+    const targets=l.value.filter(a=>a.status==='active');
+    const ids=targets.map(a=>a.id);
+    if(!ids.length){officialRefreshing.value=false;p.toast('官方额度已刷新 0 个账号','ok');return}
+    try{
+      const r=await api.post('/admin/accounts/resources/batch',{account_ids:ids,force:true},p.token,{timeoutMs:120000});
+      const results=respList(r,'results');
+      if(!results)throw new Error('502');
+      let okCount=0;
+      for(const item of results){
+        if(!item||typeof item!=='object')continue;
+        const a=l.value.find(x=>Number(x.id)===Number(item.account_id));
+        if(a)a.official_resource=item;
+        if(item.ok)okCount++;
+      }
+      p.toast('官方额度已刷新 '+okCount+'/'+targets.length+' 个账号',okCount?'ok':'err');
+    }catch(e){
+      await Promise.all(targets.map(a=>refreshResource(a,true,true)));
+      p.toast(apiErr(e,'批量刷新失败，已回退逐个刷新'),'err');
+    }
+    officialRefreshing.value=false;
+  }
+  async function refreshResource(a,silent=false,force=false){return await withBusy(a.id,'resource',async()=>{try{const r=await api.get('/admin/accounts/'+a.id+'/resources'+(force?'?force=1':''),p.token,{timeoutMs:60000});a.official_resource=r;if(!silent)p.toast(r.ok?(r.stale?'已显示旧额度缓存':'官方额度已刷新'):('官方额度失败：'+(r.message||r.status_code)),r.ok?'ok':'err');return r}catch(e){const r={ok:false,account_id:a.id,message:apiErr(e,'官方额度加载失败'),packages:[]};a.official_resource=r;if(!silent)p.toast(r.message,'err');return r}})}
   async function openPackages(a){if(!a.official_resource&&!busyKey(a.id,'resource'))await refreshResource(a,true);pkg.value={account:a,resource:a.official_resource||{ok:false,message:'未获取官方额度',packages:[]}}}
   async function refreshPackages(){if(!pkg.value)return;const r=await refreshResource(pkg.value.account,true);pkg.value={account:pkg.value.account,resource:r||pkg.value.account.official_resource||pkg.value.resource}}
-  async function claimOne(a){await withBusy(a.id,'claim',async()=>{try{const r=await api.post('/admin/accounts/'+a.id+'/checkin',{},p.token);checkins.value={...checkins.value,[a.id]:r};claim.value={title:'领取结果',results:[r]};p.toast(r.claimed?'领取成功':(r.already_claimed?'今日已领':'领取失败'),r.ok?'ok':'err');await loadCredit(true);await loadCheckins(true)}catch(e){p.toast(apiErr(e,'领取失败'),'err')}})}
-  async function claimAll(){if(claimingAll.value)return;claimingAll.value=true;try{const r=await api.post('/admin/accounts/checkin-all',{},p.token);claim.value={title:'一键领取结果',summary:r,results:r.results||[]};p.toast('领取 '+r.claimed+' · 已领 '+r.already_claimed+' · 失败 '+r.failed,r.failed?'err':'ok');await load();await loadCredit(true)}catch(e){p.toast(apiErr(e,'一键领取失败'),'err')}claimingAll.value=false}
+  async function claimOne(a){await withBusy(a.id,'claim',async()=>{try{const r=await api.post('/admin/accounts/'+a.id+'/checkin',{},p.token,{timeoutMs:60000});checkins.value={...checkins.value,[a.id]:r};claim.value={title:'领取结果',results:[r]};p.toast(r.claimed?'领取成功':(r.already_claimed?'今日已领':'领取失败'),r.ok?'ok':'err');await loadCredit(true);await loadCheckins(true)}catch(e){p.toast(apiErr(e,'领取失败'),'err')}})}
+  async function claimAll(){if(claimingAll.value)return;claimingAll.value=true;try{const r=await api.post('/admin/accounts/checkin-all',{},p.token,{timeoutMs:120000});claim.value={title:'一键领取结果',summary:r,results:r.results||[]};p.toast('领取 '+r.claimed+' · 已领 '+r.already_claimed+' · 失败 '+r.failed,r.failed?'err':'ok');await load();await loadCredit(true)}catch(e){p.toast(apiErr(e,'一键领取失败'),'err')}claimingAll.value=false}
   function credit(v){v=Number(v||0);return v.toLocaleString('zh-CN',{maximumFractionDigits:4})}
   function age(v){v=Number(v||0);if(v<60)return v+'s';if(v<3600)return Math.floor(v/60)+'m';return Math.floor(v/3600)+'h'}
   function officialBalance(a){const r=a.official_resource;if(!r||!r.ok||r.unsupported)return null;if((a.provider||'workbuddy')!=='workbuddy'&&r.unit&&r.unit!=='credit')return null;const v=r.total_dosage??r.available_total??r.remaining;if(v==null||v==='')return null;return Number(v)}

@@ -625,7 +625,7 @@ tr:hover td{background:var(--accent-soft)}
 /* ---- toasts ------------------------------------------------- */
 .toasts{position:fixed;top:72px;right:var(--sp-4);z-index:2000;
   display:flex;flex-direction:column;gap:6px}
-.toast{padding:8px var(--sp-3);border-radius:var(--r-m);
+.toast{display:flex;align-items:center;gap:8px;padding:8px var(--sp-3);border-radius:var(--r-m);
   font-size:var(--fs-m);color:#fff;cursor:pointer;
   box-shadow:0 10px 30px rgba(0,0,0,.14);
   animation:tin var(--dur-base) var(--ease);
@@ -635,6 +635,13 @@ tr:hover td{background:var(--accent-soft)}
 .toast.ok{background:var(--ok)}
 .toast.err{background:var(--err)}
 .toast.info{background:var(--fg)}
+.toast-msg{flex:1;min-width:0}
+.toast-act,.toast-x{flex-shrink:0;border:0;background:rgba(255,255,255,.16);color:#fff;
+  border-radius:var(--r-s);cursor:pointer;font-family:inherit;line-height:1;
+  transition:background var(--dur-fast) var(--ease)}
+.toast-act{padding:4px 8px;font-size:var(--fs-s);font-weight:600}
+.toast-x{padding:2px 7px;font-size:14px}
+.toast-act:hover,.toast-x:hover{background:rgba(255,255,255,.3)}
 
 /* ---- channel toggles (channels page) ----------------------- */
 .field.chk{margin-bottom:0}

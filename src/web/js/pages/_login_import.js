@@ -1,6 +1,6 @@
 import {api,apiErr,fmt} from '../api.js';
 import {I} from '../icons.js';
-const{ref,reactive,computed,onMounted,watch}=Vue;
+const{ref,reactive,computed,onMounted,onUnmounted,watch}=Vue;
 
 // 登录型通道「本机检测 → 文件表 → 一键导入」+ Trae SOLO 网页登录向导。
 // 复用：通道管理页 Card C 选中通道的导入区 + 统一浮窗向导第二步共用此组件。
@@ -12,7 +12,10 @@ export default {
     const chId=computed(()=>props.channelId||'');
     const disc=ref(null),dl=ref(false),scanning=ref(false),authPath=ref('');
     const solo=reactive({pending:false,url:'',pendingId:'',callbackUrl:'',state:'',uid:'',error:'',manual:''}),soloBusy=ref(false);
-    let soloTimer=null,soloGen=0;
+    let soloTimer=null,soloGen=0,soloAbort=null;
+    // 生命周期(spec WS-3 §4):卸载时停轮询 + 中断在途请求,防残留轮询
+    function stopSoloPoll(){if(soloTimer){clearTimeout(soloTimer);soloTimer=null}}
+    function abortSoloPoll(){if(soloAbort){try{soloAbort.abort()}catch(_){}soloAbort=null}}
     // 统一出口:toast 走注入的函数,兜底 console
     function notify(m,t){const f=props.toast;if(typeof f==='function')f(m,t);else console.log('[login-import]',m)}
     function tk(){return props.token||''}
@@ -54,7 +57,6 @@ export default {
     function clearPath(){authPath.value='';discover('')}
     function size(v){v=Number(v||0);if(v>=1024*1024)return(v/1024/1024).toFixed(1)+' MB';if(v>=1024)return(v/1024).toFixed(1)+' KB';return v+' B'}
 
-    function stopSoloPoll(){if(soloTimer){clearTimeout(soloTimer);soloTimer=null}}
     async function startSoloLogin(){
       if(soloBusy.value)return;
       stopSoloPoll();soloGen++;
@@ -70,8 +72,9 @@ export default {
     }
     async function pollSolo(gen){
       if(gen!==soloGen)return;if(!solo.pendingId)return;
+      soloAbort=new AbortController();
       try{
-        const r=await api.get('/admin/traesolo/login/result?pending_id='+encodeURIComponent(solo.pendingId),tk());
+        const r=await api.get('/admin/traesolo/login/result?pending_id='+encodeURIComponent(solo.pendingId),tk(),{signal:soloAbort.signal});
         if(gen!==soloGen)return;
         if(!r||r.found===false){stopSoloPoll();solo.pending=false;solo.state='expired';solo.error='登录会话已过期，可重新发起登录';return}
         solo.state=r.state||'';
@@ -79,7 +82,13 @@ export default {
         else if(r.state==='failed'){stopSoloPoll();solo.pending=false;solo.error=r.error||'登录失败';return}
         else if(r.state==='canceled'){stopSoloPoll();solo.pending=false;solo.error='';return}
         soloTimer=setTimeout(()=>pollSolo(gen),2500);
-      }catch(e){if(gen!==soloGen)return;stopSoloPoll();solo.pending=false;if(e.message==='404'){solo.state='expired';solo.error='登录会话已过期，可重新发起登录'}else{solo.error='登录状态查询失败：'+apiErr(e);notify(solo.error,'err')}}
+      }catch(e){
+        if(gen!==soloGen)return; // 已取消/已卸载:静默退出(onUnmounted 会 bump soloGen)
+        stopSoloPoll();soloAbort=null;
+        if(e.message==='504'){soloTimer=setTimeout(()=>pollSolo(gen),2500);return} // 瞬时超时:继续轮询
+        solo.pending=false;
+        if(e.message==='404'){solo.state='expired';solo.error='登录会话已过期，可重新发起登录'}else{solo.error='登录状态查询失败：'+apiErr(e);notify(solo.error,'err')}
+      }finally{soloAbort=null}
     }
     async function cancelSolo(){if(!solo.pendingId)return;stopSoloPoll();soloGen++;try{await api.post('/admin/traesolo/login/cancel',{pending_id:solo.pendingId},tk());solo.pending=false;solo.state='canceled';solo.error=''}catch(e){}}
     async function completeSolo(){
@@ -94,7 +103,9 @@ export default {
     }
 
     onMounted(()=>{if(chId.value&&chId.value!=='traesolo')discover('')});
-    watch(chId,(v,old)=>{if(!v||v===old)return;disc.value=null;authPath.value='';stopSoloPoll();Object.assign(solo,{pending:false,url:'',pendingId:'',state:'',uid:'',error:'',manual:''});if(v!=='traesolo')discover('')});
+    // 卸载清理:bump soloGen 使在途回调失效 + 停轮询 + 中断在途请求
+    onUnmounted(()=>{soloGen++;stopSoloPoll();abortSoloPoll()});
+    watch(chId,(v,old)=>{if(!v||v===old)return;disc.value=null;authPath.value='';soloGen++;stopSoloPoll();abortSoloPoll();Object.assign(solo,{pending:false,url:'',pendingId:'',state:'',uid:'',error:'',manual:''});if(v!=='traesolo')discover('')});
 
     return{disc,dl,scanning,authPath,discover,scan,scanCustom,clearPath,solo,soloBusy,startSoloLogin,cancelSolo,completeSolo,fmt,size,I}
   },

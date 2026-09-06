@@ -4,7 +4,7 @@ const{ref,reactive,computed,onMounted}=Vue;
 
 export default {props:['token','toast'],setup(p){
   const s=ref({base_url:'http://127.0.0.1:8787/v1',data_file:'codebuddy_gateway.db'}),ld=ref(true),copied=ref(''),setupTab=ref('codex');
-  const keysList=ref([]),codexKeyInput=ref(''),codexStatus=ref(null),codexBusy=ref(false),codexResult=ref(null);
+  const codexKeyInput=ref(''),codexStatus=ref(null),codexBusy=ref(false),codexResult=ref(null);
   const presets={
     codex:{name:'Codex (OpenAI)',base:'http://127.0.0.1:8787/v1',model:'auto',note:'Codex 强制使用 Responses API (wire_api="responses")。本网关已内置协议转换层，自动将 /v1/responses 映射到后端 Chat Completions。模型别名、内容清洗均自动启用。'},
     opencode:{name:'OpenCode / OpenClaw',base:'http://127.0.0.1:8787/v1',model:'auto',note:'运行在宿主机上的客户端直接使用 127.0.0.1。'},
@@ -14,7 +14,8 @@ export default {props:['token','toast'],setup(p){
     generic:{name:'通用 OpenAI Compatible',base:'http://127.0.0.1:8787/v1',model:'auto',note:'支持 /v1/chat/completions、/v1/responses 和 /v1/models；Base URL 填写到 /v1。'},
     curl:{name:'curl',base:'http://127.0.0.1:8787/v1',model:'auto',note:'用于快速验证服务、Key 和模型映射是否正常。'},
   };
-  async function load(){ld.value=true;try{const cfg=await api.get('/admin/settings',p.token);s.value={...s.value,...cfg};keysList.value=await api.get('/admin/api-keys',p.token);if(keysList.value.length&&!codexKeyInput.value)codexKeyInput.value=keysList.value.find(k=>k.key)?.key||'';try{codexStatus.value=await api.get('/admin/codex/status',p.token)}catch(e){}}catch(e){p.toast(apiErr(e,'加载失败'),'err')}ld.value=false}
+  // 契约 1:列表不再返回明文 key,Key 输入框由用户粘贴(API Keys 页「查看」可取回)
+  async function load(){ld.value=true;try{const cfg=await api.get('/admin/settings',p.token);s.value={...s.value,...cfg};try{codexStatus.value=await api.get('/admin/codex/status',p.token)}catch(e){}}catch(e){p.toast(apiErr(e,'加载失败'),'err')}ld.value=false}
   async function codexSetup(){
     if(codexBusy.value)return;
     if(!codexKeyInput.value||!codexKeyInput.value.startsWith('sk-cb-')){p.toast('请输入有效的 sk-cb- 开头的 API Key','err');return}
@@ -41,7 +42,7 @@ export default {props:['token','toast'],setup(p){
     }
     const x=currentPreset.value;return `curl ${x.base}/chat/completions \\\n  -H "Authorization: Bearer YOUR_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"${x.model}","messages":[{"role":"user","content":"hi"}]}'`
   }
-  onMounted(load);return{s,ld,copied,setupTab,presets,currentPreset,envBlock,curlBlock,load,copy,codexSetup,keysList,codexKeyInput,codexStatus,codexBusy,codexResult}
+  onMounted(load);return{s,ld,copied,setupTab,presets,currentPreset,envBlock,curlBlock,load,copy,codexSetup,codexKeyInput,codexStatus,codexBusy,codexResult}
 },template:`
 <div>
   <div class="phead"><h1>接入指南</h1><p>客户端接入唯一参考 · Base URL / 模型 / 各客户端配置模板 / Codex 一键配置</p></div>
