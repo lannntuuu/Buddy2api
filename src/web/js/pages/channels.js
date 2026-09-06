@@ -408,13 +408,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
               </div>
               <div class="hint" style="margin:0" v-else>内置通道 · 定义不可编辑；启用 / 停用在上方开关</div>
             </div>
-            <div class="sec-h" style="margin:14px 0 6px">凭证 · 上游密钥</div>
-            <div class="notebox">
-              <div class="hint">添加 / 轮换密钥：点上方「<strong>编辑</strong>」，在 API Key 栏粘贴即可（留空不轮换；不同 Key 各自成行、都参与调度，按权重/优先级轮换；不需要的行在下方列表停用）。密钥不回显，列表只显示尾号。注意：这是上游通行证，与「API Keys」页发给客户端的网关 Key 是两回事。</div>
-              <div style="display:flex;gap:8px;margin-top:8px">
-                <span class="hint" style="margin:0;align-self:center">环境变量 <span class="mono">{{keyPanelMetaById[um.infoId]?keyPanelMetaById[um.infoId].env||'(未配置)':'(未配置)'}}</span> 仍可用(无可用密钥时自动导入)</span>
-              </div>
-            </div>
+            <div class="hint" style="margin-top:10px">添加 / 轮换密钥：点「编辑」在 API Key 栏粘贴（不同 Key 各自成行、都参与调度；密钥不回显只显尾号）。多把密钥的启停与权重在下方「凭证列表」管理。</div>
           </div>
           <div v-else style="border:1px solid var(--border);border-radius:6px;padding:12px;background:var(--bg-elevated)">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
