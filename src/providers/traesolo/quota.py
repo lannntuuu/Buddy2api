@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import httpx
 
+from providers.host_override import channel_host
 from providers.store_common import checkin_row
 from providers.protocol import QuotaSnapshot
 from providers.traesolo.constants import (
@@ -22,7 +23,7 @@ def _checkin_row(account: dict, **kwargs) -> dict:
 
 async def _post_json(account: dict, path: str, timeout: float = 30.0):
     """POST 空 JSON 到 ug 端点，返回 (status_code, data, error_message)。"""
-    url = f"{UG_HOST}{path}"
+    url = f"{channel_host(CHANNEL_ID, 'ug_host', UG_HOST)}{path}"
     try:
         client = _quota_client()
         response = await client.post(url, headers=ug_headers(account), json={}, timeout=timeout)

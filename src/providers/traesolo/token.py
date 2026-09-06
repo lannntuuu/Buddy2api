@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from providers.traesolo.constants import (
@@ -30,6 +30,9 @@ from providers.traesolo.constants import (
     USER_AGENT,
 )
 from providers.host_override import channel_host
+
+if TYPE_CHECKING:
+    import httpx
 
 
 class TraeSoloAuthError(RuntimeError):

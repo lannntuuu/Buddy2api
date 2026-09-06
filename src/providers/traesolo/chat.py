@@ -637,6 +637,33 @@ def _handle_kind(aid: int, kind: str, reason: str = "") -> None:
             auth_manager.mark_account_failure(aid, 502)
 
 
+# expired 账号 refresh 失败的负缓存（模式同 _model_cache.last_fail_at）：
+# 60s 内不重试同一账号，避免上游不可达时每个请求都原样重放 refresh 请求。
+_refresh_fail_at: dict[int, float] = {}
+_refresh_fail_lock = threading.Lock()
+_REFRESH_FAIL_TTL_S = 60.0
+
+
+def _refresh_recently_failed(aid: int, now: float) -> bool:
+    with _refresh_fail_lock:
+        last = _refresh_fail_at.get(aid, 0.0)
+        return bool(last) and (now - last) < _REFRESH_FAIL_TTL_S
+
+
+def _note_refresh_failure(aid: int) -> None:
+    now = time.monotonic()
+    with _refresh_fail_lock:
+        # 顺手清掉已过期条目，dict 不随时间无界增长
+        for key in [k for k, v in _refresh_fail_at.items() if now - v >= _REFRESH_FAIL_TTL_S]:
+            _refresh_fail_at.pop(key, None)
+        _refresh_fail_at[aid] = now
+
+
+def _reset_refresh_fail_cache() -> None:
+    with _refresh_fail_lock:
+        _refresh_fail_at.clear()
+
+
 async def _pick(tried: set[int]) -> dict | None:
     """选账号：项目路由 + SOLO 冷却过滤 + 过期账号刷新兜底。"""
     for _ in range(8):  # 上限保护，防无限循环
@@ -654,11 +681,19 @@ async def _pick(tried: set[int]) -> dict | None:
         and int(row.get("id") or 0) not in tried
         and not pool.cooling(int(row.get("id") or 0))
     ]
+    now = time.monotonic()
     for row in expired:
-        try:
-            return await refresh_account(row)
-        except Exception:
+        aid = int(row.get("id") or 0)
+        if _refresh_recently_failed(aid, now):
             continue
+        try:
+            fresh = await refresh_account(row)
+        except Exception:
+            _note_refresh_failure(aid)
+            continue
+        with _refresh_fail_lock:
+            _refresh_fail_at.pop(aid, None)
+        return fresh
     return None
 
 
@@ -731,7 +766,6 @@ async def fetch_model_details(account: dict) -> list[dict]:
     except ValueError as exc:
         raise TraeSoloAuthError("models returned non-JSON") from exc
     out: list[dict] = []
-    import json as _json
     for cfg in data.get("config_info_list") or []:
         if not isinstance(cfg, dict):
             continue
@@ -747,7 +781,7 @@ async def fetch_model_details(account: dict) -> list[dict]:
         raw_dc = cfg.get("display_contact_config")
         if isinstance(raw_dc, str) and raw_dc.strip():
             try:
-                dcj = _json.loads(raw_dc)
+                dcj = json.loads(raw_dc)
                 rate = dcj.get("consumption_rate", {}).get("data", {}).get("rate")
             except ValueError:
                 pass
@@ -762,11 +796,6 @@ async def fetch_model_details(account: dict) -> list[dict]:
     if not out:
         raise TraeSoloAuthError("models api returned empty list")
     return out
-
-
-async def fetch_models(account: dict) -> list[str]:
-    """兼容旧调用：仅返回 config_name 列表。"""
-    return [m["id"] for m in await fetch_model_details(account)]
 
 
 async def refresh_dynamic_models(force: bool = False) -> bool:
@@ -921,7 +950,7 @@ async def _close(client: httpx.AsyncClient, response: httpx.Response) -> None:
 # 日志
 # ---------------------------------------------------------------------------
 
-def _log(
+async def _log(
     api_key_info: dict | None,
     account: dict | None,
     model_name: str,
@@ -966,13 +995,14 @@ def _log(
         factor = mr if mr is not None else 1.0
         credit = round(total / scale * factor, 6)
     try:
-        import json as _json
         # 存整个 usage 字典（未来再加字段也不丢）
         try:
-            usage_json = _json.dumps(usage, ensure_ascii=False) if usage else None
+            usage_json = json.dumps(usage, ensure_ascii=False) if usage else None
         except (TypeError, ValueError):
             usage_json = None
-        db.record_request(
+        # record_request 是 BEGIN IMMEDIATE 写事务，放到线程池执行，避免阻塞事件循环
+        await asyncio.to_thread(
+            db.record_request,
             {
                 "api_key_id": api_key_info["id"] if api_key_info else None,
                 "api_key_name": api_key_info["name"] if api_key_info else None,
@@ -1024,7 +1054,7 @@ async def _run_once(
         if rerr is not None:
             _handle_kind(aid, rkind, f"refresh: {rerr}")
             last_error = str(rerr)
-            _log(api_key_info, account, client_model, False, "error", 503, str(rerr)[:240], t0)
+            await _log(api_key_info, account, client_model, False, "error", 503, str(rerr)[:240], t0)
             continue
 
         body = prepare_body(payload)
@@ -1033,7 +1063,7 @@ async def _run_once(
         except httpx.HTTPError as exc:
             pool.note_error(aid)
             last_error = str(exc)
-            _log(api_key_info, account, client_model, False, "error", 502, str(exc)[:240], t0)
+            await _log(api_key_info, account, client_model, False, "error", 502, str(exc)[:240], t0)
             continue
 
         if response.status_code >= 400:
@@ -1043,7 +1073,7 @@ async def _run_once(
             kind = classify(response.status_code, text)
             _handle_kind(aid, kind)
             last_error = f"upstream {response.status_code} ({kind})"
-            _log(api_key_info, account, client_model, False, "error", response.status_code, text[:240], t0)
+            await _log(api_key_info, account, client_model, False, "error", response.status_code, text[:240], t0)
             continue
 
         try:
@@ -1053,20 +1083,20 @@ async def _run_once(
             await _close(client, response)
             pool.note_error(aid)
             last_error = str(exc)
-            _log(api_key_info, account, client_model, False, "error", 502, str(exc)[:240], t0)
+            await _log(api_key_info, account, client_model, False, "error", 502, str(exc)[:240], t0)
             continue
         await _close(client, response)
         if stream_err is not None:
             _handle_kind(aid, stream_err.kind())
             last_error = str(stream_err)
-            _log(api_key_info, account, client_model, False, "error", 502, str(stream_err)[:240], t0)
+            await _log(api_key_info, account, client_model, False, "error", 502, str(stream_err)[:240], t0)
             continue
 
         data["model"] = client_model
         finish = str((data.get("choices") or [{}])[0].get("finish_reason") or "stop")
         auth_manager.mark_account_success(aid)
         pool.note_success(aid)
-        _log(api_key_info, account, client_model, False, finish, 200, "", t0, data.get("usage"))
+        await _log(api_key_info, account, client_model, False, finish, 200, "", t0, data.get("usage"))
         return "json", data
 
     status, detail = _no_accounts_error(last_error)
@@ -1107,7 +1137,7 @@ async def _run_stream(
         if rerr is not None:
             _handle_kind(aid, rkind, f"refresh: {rerr}")
             last_error = str(rerr)
-            _log(api_key_info, account, client_model, True, "error", 503, str(rerr)[:240], t0)
+            await _log(api_key_info, account, client_model, True, "error", 503, str(rerr)[:240], t0)
             continue
 
         body = prepare_body(payload)
@@ -1116,7 +1146,7 @@ async def _run_stream(
         except httpx.HTTPError as exc:
             pool.note_error(aid)
             last_error = str(exc)
-            _log(api_key_info, account, client_model, True, "error", 502, str(exc)[:240], t0)
+            await _log(api_key_info, account, client_model, True, "error", 502, str(exc)[:240], t0)
             continue
 
         if response.status_code >= 400:
@@ -1126,7 +1156,7 @@ async def _run_stream(
             kind = classify(response.status_code, text)
             _handle_kind(aid, kind)
             last_error = f"upstream {response.status_code} ({kind})"
-            _log(api_key_info, account, client_model, True, "error", response.status_code, text[:240], t0)
+            await _log(api_key_info, account, client_model, True, "error", response.status_code, text[:240], t0)
             continue
 
         # 2xx → 锁定该账号，开始转换流
@@ -1152,7 +1182,7 @@ async def _run_stream(
             yield "data: [DONE]\n\n"
         finally:
             await _close(client, response)
-        _log(
+        await _log(
             api_key_info,
             account,
             client_model,
