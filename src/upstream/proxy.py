@@ -21,9 +21,8 @@ import asyncio
 import json
 import logging
 import os
-import threading
 import time
-from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Optional
 
 import httpx
@@ -57,6 +56,7 @@ from upstream.compaction import (  # noqa: E402,F401
     _is_11128_error,
     _arm_channel,
     _channel_armed,
+    _record_11128_retry,
     _smart_compact_messages,
     _compact_text,
     _compact_tools,
@@ -68,14 +68,58 @@ from accounts import auth_manager
 from providers.store_common import extract_cache_tokens
 
 BACKEND = "https://copilot.tencent.com"
-RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+# 共享 retry.py 的瞬时错误集合;401/403 仅参与账号 failover 判定(_is_retryable_status),
+# 不参与同账号重试。
+from providers.retry import RETRYABLE_STATUS, retry_delay as _retry_delay  # noqa: E402
+
+RETRYABLE_STATUS_CODES = RETRYABLE_STATUS | {401, 403}
 
 def _is_retryable_status(status: int) -> bool:
-    return status in RETRYABLE_STATUS_CODES or status in {401, 403}
+    return status in RETRYABLE_STATUS_CODES
+
+# 进程级长寿命上游客户端(keep-alive 复用,降低每次转发的 TCP+TLS 建连成本)。
+# 与 openai_compat._get_client / storage.http_pool 同模式:按"当前事件循环"绑定,
+# 单 loop 生产环境全程复用;测试里每个 asyncio.run 是新 loop,自动重建,
+# 从而每条用例的 httpx.AsyncClient 全局 fake 都能被重新拾取,不跨用例串味。
+# 不直接复用 storage.http_pool:该池的 is_closed 探测对测试注入的无 is_closed
+# fake 会 AttributeError,且会把 fake 缓存进全局池。
+_upstream_client: httpx.AsyncClient | None = None
+_upstream_client_loop: asyncio.AbstractEventLoop | None = None
 
 
-async def _retry_delay(attempt: int):
-    await asyncio.sleep(min(2.0, 0.25 * (2 ** attempt)))
+def _get_client() -> httpx.AsyncClient:
+    global _upstream_client, _upstream_client_loop
+    try:
+        loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if (
+        _upstream_client is None
+        or getattr(_upstream_client, "is_closed", False)
+        or (loop is not None and _upstream_client_loop is not loop)
+    ):
+        _upstream_client = httpx.AsyncClient(
+            limits=httpx.Limits(
+                max_connections=32,
+                max_keepalive_connections=12,
+                keepalive_expiry=60.0,
+            ),
+            # 每次请求经 client.stream(..., timeout=...) 传入具体超时
+            timeout=httpx.Timeout(60.0),
+        )
+        _upstream_client_loop = loop
+    return _upstream_client
+
+
+@asynccontextmanager
+async def _shared_client_cm():
+    """Yield the shared long-lived upstream client without closing it.
+
+    Replaces the old per-request `async with httpx.AsyncClient(...)` so
+    connections are reused across requests and retry attempts. Per-request
+    timeouts are passed at the `client.stream(...)` call sites instead.
+    """
+    yield _get_client()
 
 PASSTHROUGH_BODY_KEYS = {
     "model", "messages", "tools", "tool_choice", "temperature",
@@ -154,7 +198,7 @@ def _has_terminal_choice(payload: dict) -> bool:
     )
 
 
-_MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024
+from upstream.sse import SSEDecoder, _MAX_EVENT_BYTES as _MAX_SSE_EVENT_BYTES  # noqa: E402
 
 
 def _repair_json_arguments(raw: str) -> str:
@@ -459,99 +503,8 @@ class _ChatStreamObserver:
         return _json_sse_event(payload)
 
 
-class _SSEEventDecoder:
-    """Decode complete SSE data fields from arbitrary byte chunks."""
-
-    def __init__(self):
-        self.parser_error: str | None = None
-        self._buffer = b""
-        self._data_lines: list[bytes] = []
-        self._event_bytes = 0
-
-    def feed(self, chunk: bytes) -> list[bytes]:
-        if self.parser_error:
-            return []
-        self._buffer += chunk
-        events: list[bytes] = []
-        while True:
-            line = self._take_line()
-            if line is None:
-                break
-            event = self._consume_line(line)
-            if event is not None:
-                events.append(event)
-            if self.parser_error:
-                break
-        if not self.parser_error and len(self._buffer) > _MAX_SSE_EVENT_BYTES:
-            self._fail("The upstream SSE line exceeded the 8 MiB limit.")
-        return events
-
-    def finish(self) -> list[bytes]:
-        if self.parser_error:
-            return []
-        events: list[bytes] = []
-        while True:
-            line = self._take_line(final=True)
-            if line is None:
-                break
-            event = self._consume_line(line)
-            if event is not None:
-                events.append(event)
-            if self.parser_error:
-                return events
-        if self._data_lines:
-            events.append(b"\n".join(self._data_lines))
-            self._data_lines = []
-            self._event_bytes = 0
-        return events
-
-    def _take_line(self, *, final: bool = False) -> bytes | None:
-        for index, value in enumerate(self._buffer):
-            if value == 0x0A:
-                line = self._buffer[:index]
-                self._buffer = self._buffer[index + 1:]
-                return line[:-1] if line.endswith(b"\r") else line
-            if value == 0x0D:
-                if index + 1 == len(self._buffer) and not final:
-                    return None
-                end = index + 2 if self._buffer[index + 1:index + 2] == b"\n" else index + 1
-                line = self._buffer[:index]
-                self._buffer = self._buffer[end:]
-                return line
-        if final and self._buffer:
-            line = self._buffer
-            self._buffer = b""
-            return line
-        return None
-
-    def _consume_line(self, line: bytes) -> bytes | None:
-        if len(line) > _MAX_SSE_EVENT_BYTES:
-            self._fail("The upstream SSE line exceeded the 8 MiB limit.")
-            return None
-        if not line:
-            if not self._data_lines:
-                return None
-            event = b"\n".join(self._data_lines)
-            self._data_lines = []
-            self._event_bytes = 0
-            return event
-        if not line.startswith(b"data:"):
-            return None
-        data = line[5:]
-        if data.startswith(b" "):
-            data = data[1:]
-        self._event_bytes += len(data) + 1
-        if self._event_bytes > _MAX_SSE_EVENT_BYTES:
-            self._fail("The upstream SSE event exceeded the 8 MiB limit.")
-            return None
-        self._data_lines.append(data)
-        return None
-
-    def _fail(self, message: str) -> None:
-        self.parser_error = message
-        self._buffer = b""
-        self._data_lines = []
-        self._event_bytes = 0
+# SSE 解析统一走 upstream.sse.SSEDecoder(兼容旧名)。
+_SSEEventDecoder = SSEDecoder
 
 
 _extract_cache_tokens = extract_cache_tokens
@@ -638,7 +591,7 @@ def _log_request(api_key_info, account, model_name, stream,
         # fire-and-forget：吞掉 executor 内抛出的异常，避免“异常从未被读取”告警
         fut.add_done_callback(lambda f: f.exception() if f.cancelled() is False else None)
     except Exception:
-        pass
+        logger.debug("log enqueue failed", exc_info=True)
 
 
 async def proxy_chat_completions(
@@ -721,8 +674,7 @@ async def proxy_chat_completions(
             _arm_channel(channel, client)
             _smart_compact_messages(body, channel=channel, client_tag=client)
             body["_compacted_11128"] = True
-            with _COMPACTION_LOCK:
-                _COMPACTION_STATS["retried_11128"] += 1
+            _record_11128_retry()
             retry_t0 = time.time()
             retry_result = await _collect_stream(
                 url, headers, body, account, api_key_info, model_name, retry_t0
@@ -882,8 +834,8 @@ async def _stream_upstream(
                 write=30,
                 pool=10,
             )
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream("POST", url, headers=headers, json=body) as response:
+            async with _shared_client_cm() as client:
+                async with client.stream("POST", url, headers=headers, json=body, timeout=timeout) as response:
                     if response.status_code != 200:
                         raw_error = await response.aread()
                         # 11128 大内容拦截：武装通道 + 激进精简后原地重试（自愈）。
@@ -894,8 +846,7 @@ async def _stream_upstream(
                                 client_tag=(api_key_info or {}).get("_client_tag"),
                             )
                             body["_compacted_11128"] = True
-                            with _COMPACTION_LOCK:
-                                _COMPACTION_STATS["retried_11128"] += 1
+                            _record_11128_retry()
                             # 同一账号重发一次：从 tried 移除以免单账号通道被误判为无可用账号
                             tried_ids.discard(account["id"])
                             attempt -= 1
@@ -1141,8 +1092,8 @@ async def _collect_stream(
     usage: dict | None = None
 
     try:
-        async with httpx.AsyncClient(timeout=auth_manager.request_timeout(300)) as c:
-            async with c.stream("POST", url, headers=headers, json=body) as r:
+        async with _shared_client_cm() as c:
+            async with c.stream("POST", url, headers=headers, json=body, timeout=auth_manager.request_timeout(300)) as r:
                 if r.status_code != 200:
                     raw = await r.aread()
                     detail = _safe_err(raw, r.status_code)

@@ -16,6 +16,7 @@ from typing import AsyncGenerator, Optional
 
 logger = logging.getLogger("buddy2api.responses")
 
+from upstream.sse import SSEDecoder
 from upstream import proxy
 import providers
 
@@ -209,12 +210,9 @@ def responses_to_chat(resp_payload: dict) -> dict:
                 f" name={t.get('name')!r}" if t.get('name') else "",
             )
 
-    # tool_choice
+    # tool_choice:Responses 与 Chat 的字符串形式 "auto"/"none"/"required" 同构,
+    # 对象形式 {"type":"function",...} 结构不同,由下方 chat_payload 原样透传。
     tool_choice = resp_payload.get("tool_choice")
-    if tool_choice and isinstance(tool_choice, str):
-        # Responses uses simple string "auto"/"none"/"required"
-        # Chat uses "auto"/"none"/"required" or {"type":"function","function":{"name":"x"}}
-        pass
 
     chat_payload = {
         "model": resp_payload.get("model", "auto"),
@@ -558,84 +556,28 @@ def chat_response_to_responses(chat_resp: dict, model: str) -> dict:
 async def _iter_chat_sse_data(
     chat_stream: AsyncGenerator[object, None],
 ) -> AsyncGenerator[str, None]:
-    """Yield complete SSE data events from arbitrary upstream chunks (bytes/str)."""
-    buffer = b""
-    data_lines: list[bytes] = []
-    event_bytes = 0
-    max_event_bytes = 8 * 1024 * 1024
+    """Yield complete SSE data events from arbitrary upstream chunks (bytes/str).
 
-    def take_line(*, final: bool = False) -> Optional[bytes]:
-        nonlocal buffer
-        for index, value in enumerate(buffer):
-            if value == 0x0A:
-                line = buffer[:index]
-                buffer = buffer[index + 1:]
-                return line[:-1] if line.endswith(b"\r") else line
-            if value == 0x0D:
-                if index + 1 == len(buffer) and not final:
-                    return None
-                end = index + 2 if buffer[index + 1:index + 2] == b"\n" else index + 1
-                line = buffer[:index]
-                buffer = buffer[end:]
-                return line
-        if final and buffer:
-            line = buffer
-            buffer = b""
-            return line
-        return None
-
-    def consume_line(line: bytes) -> Optional[str]:
-        nonlocal data_lines, event_bytes
-        if len(line) > max_event_bytes:
-            raise ValueError("upstream SSE line exceeds the size limit")
-        if not line:
-            if not data_lines:
-                return None
-            data = b"\n".join(data_lines)
-            data_lines = []
-            event_bytes = 0
-            return data.decode("utf-8")
-        if line.startswith(b"data:"):
-            data = line[5:]
-            if data.startswith(b" "):
-                data = data[1:]
-            event_bytes += len(data) + 1
-            if event_bytes > max_event_bytes:
-                raise ValueError("upstream SSE event exceeds the size limit")
-            data_lines.append(data)
-        return None
+    行解析统一走 upstream.sse.SSEDecoder(与 proxy 同一实现),本适配器只负责
+    把 bytes 事件解码为 str 并把 parser_error 转成 ValueError。
+    """
+    decoder = SSEDecoder()
 
     async for chunk in chat_stream:
         if not chunk:
             continue
-        # 不同 provider 的流可能吐 bytes（workbuddy 原始上游）或 str
-        # （traework 等适配层拼好的 SSE 行），统一转成 bytes 再解析。
-        if isinstance(chunk, str):
-            buffer += chunk.encode("utf-8")
-        elif isinstance(chunk, (bytes, bytearray)):
-            buffer += bytes(chunk)
-        else:
-            raise TypeError("upstream stream chunks must be bytes or str")
-        if len(buffer) > max_event_bytes and b"\n" not in buffer and b"\r" not in buffer:
-            raise ValueError("upstream SSE line exceeds the size limit")
+        events = decoder.feed(chunk)
+        if decoder.parser_error:
+            raise ValueError(decoder.parser_error)
+        for data in events:
+            yield data.decode("utf-8")
 
-        while True:
-            line = take_line()
-            if line is None:
-                break
-            data = consume_line(line)
-            if data is not None:
-                yield data
-
-    while True:
-        line = take_line(final=True)
-        if line is None:
-            break
-        data = consume_line(line)
-        if data is not None:
-            yield data
-    if data_lines:
-        yield b"\n".join(data_lines).decode("utf-8")
+    for data in decoder.finish():
+        if decoder.parser_error:
+            raise ValueError(decoder.parser_error)
+        yield data.decode("utf-8")
+    if decoder.parser_error:
+        raise ValueError(decoder.parser_error)
 
 
 async def chat_stream_to_responses_stream(
@@ -710,6 +652,17 @@ async def chat_stream_to_responses_stream(
         item = state["item"]
         output_index = state["output_index"]
         item["status"] = status
+        # 全文只在 close 时回写一次:per-delta 回写会把累积全文反复拷贝进 item,
+        # 长输出下是 O(n^2) 字符串复制;done/completed 快照在此之前生成,语义不变。
+        if state["kind"] == "text":
+            item["content"] = [{
+                "type": "output_text",
+                "text": state["text"],
+                "annotations": [],
+                "logprobs": [],
+            }]
+        else:
+            item["arguments"] = state["arguments"]
         events = []
         if state["kind"] == "text":
             events.append(event(
@@ -844,12 +797,6 @@ async def chat_stream_to_responses_stream(
                             },
                         )
                     state["text"] += text
-                    state["item"]["content"] = [{
-                        "type": "output_text",
-                        "text": state["text"],
-                        "annotations": [],
-                        "logprobs": [],
-                    }]
                     yield event(
                         "response.output_text.delta",
                         item_id=state["item"]["id"],
@@ -916,7 +863,6 @@ async def chat_stream_to_responses_stream(
                         if not isinstance(args, str):
                             args = json.dumps(args, ensure_ascii=False)
                         state["arguments"] += args
-                        state["item"]["arguments"] = state["arguments"]
                         yield event(
                             "response.function_call_arguments.delta",
                             item_id=state["item"]["id"],
