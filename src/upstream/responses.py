@@ -17,6 +17,7 @@ from typing import AsyncGenerator, Optional
 logger = logging.getLogger("buddy2api.responses")
 
 from upstream.sse import SSEDecoder
+from upstream.chat_grammar import ChatStreamObserver
 from upstream import proxy
 import providers
 
@@ -703,6 +704,11 @@ async def chat_stream_to_responses_stream(
     yield event("response.created", response=response_snapshot("in_progress"))
     yield event("response.in_progress", response=response_snapshot("in_progress"))
 
+    # 语法层校验+解析统一走 chat_grammar:此前 provider 通道的流在此裸解析,
+    # 绕过了 observer 级校验(delta/工具调用合法性)。桥不转发 n,但既有契约
+    # 容忍多 choice 流(test_core 多 choice 终态用例),index 范围校验放开到
+    # observer 上限 128,由桥自身的 seen/finished 裁决兜底。
+    observer = ChatStreamObserver(model, expected_choices=128)
     try:
         async for data_str in _iter_chat_sse_data(chat_stream):
             data_str = data_str.strip()
@@ -712,22 +718,9 @@ async def chat_stream_to_responses_stream(
                 saw_done = True
                 break
 
-            try:
-                chunk = json.loads(data_str)
-            except json.JSONDecodeError:
-                stream_error = {
-                    "code": "invalid_upstream_event",
-                    "message": "The upstream returned a malformed SSE JSON event.",
-                }
-                break
-            if not isinstance(chunk, dict):
-                stream_error = {
-                    "code": "invalid_upstream_event",
-                    "message": "The upstream returned a non-object SSE event.",
-                }
-                break
-            if chunk.get("error"):
-                upstream_error = chunk["error"]
+            parsed = observer.observe_event(data_str.encode("utf-8"))
+            if observer.upstream_error_event is not None:
+                upstream_error = observer.upstream_error_event.get("error")
                 if isinstance(upstream_error, dict):
                     message = upstream_error.get("message") or "The upstream stream failed."
                     code = upstream_error.get("code") or upstream_error.get("type") or "upstream_error"
@@ -736,6 +729,21 @@ async def chat_stream_to_responses_stream(
                     code = "upstream_error"
                 stream_error = {"code": str(code), "message": str(message)[:500]}
                 break
+            if observer.parser_error:
+                stream_error = {
+                    "code": "invalid_upstream_event",
+                    "message": observer.parser_error,
+                }
+                break
+            if parsed is None:
+                if observer.malformed_data_event:
+                    stream_error = {
+                        "code": "invalid_upstream_event",
+                        "message": "The upstream returned a malformed SSE JSON event.",
+                    }
+                    break
+                continue
+            chunk = parsed
 
             response_model = chunk.get("model") or response_model
             if chunk.get("usage"):

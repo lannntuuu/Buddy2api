@@ -24,6 +24,7 @@ from typing import Optional
 import httpx
 
 from storage import database as db
+from providers.trae_shared import pick_with_refresh_fallback
 from storage import fingerprint
 from storage.http_pool import get_client
 
@@ -79,6 +80,17 @@ def mark_account_failure(aid: int, status_code: int = 0):
     if status_code in {401, 403}:
         db.update_account(aid, {"status": "expired"})
 
+
+def cooling_accounts() -> list[dict]:
+    """账号冷却观测面(35号 §2.5):只读,供 /admin/channel-health 聚合。"""
+    now = time.monotonic()
+    with _failure_lock:
+        out = []
+        for aid, (count, deadline) in _account_failures.items():
+            if deadline > now:
+                out.append({"account_id": aid, "failures": count,
+                            "remaining_seconds": int(deadline - now)})
+        return out
 
 def account_is_cooling_down(aid: int) -> bool:
     with _failure_lock:
@@ -974,31 +986,36 @@ def pick_account(exclude_ids: set[int] = None, provider: str = "workbuddy") -> O
         return chosen
 
 
+class _WorkbuddyRefreshError(Exception):
+    """refresh_token 返回 False 的内部信号(仅作共享 fallback 的异常域)。"""
+
+
 async def pick_account_with_fallback(
     exclude_ids: set[int] = None, provider: str = "workbuddy"
 ) -> Optional[dict]:
-    """选账号，如果全部过期则尝试刷新过期账号。只刷新同一 provider。"""
-    account = pick_account(exclude_ids, provider=provider)
-    if account:
-        return account
+    """选账号,如果全部过期则尝试刷新过期账号。只刷新同一 provider。
 
-    expired_accounts = sorted(
-        (
-            account
-            for account in db.list_accounts(provider=provider)
-            if account.get("status") == "expired"
-        ),
-        key=_route_sort_key,
+    35号收敛:共享实现见 providers.trae_shared.pick_with_refresh_fallback
+    (自适应负缓存 + 按调度排序键遍历 expired + sticky 语义)。
+    相比旧正典的两处既定统一:选中的过期账号先原地刷新(对齐 qwenwork/
+    traework facade 语义);refresh 连续失败进负缓存(对齐其余四家)。
+    """
+
+    async def _refresh(account: dict) -> dict:
+        if not await refresh_token(account):
+            raise _WorkbuddyRefreshError("token refresh failed")
+        fresh = db.get_account(account["id"])
+        if not fresh:
+            raise _WorkbuddyRefreshError("account disappeared after refresh")
+        return fresh
+
+    return await pick_with_refresh_fallback(
+        provider,
+        _refresh,
+        exclude_ids=exclude_ids,
+        refresh_errors=_WorkbuddyRefreshError,
+        sticky=True,
     )
-    for a in expired_accounts:
-        if a["id"] in (exclude_ids or set()):
-            continue
-        if await refresh_token(a):
-            fresh = db.get_account(a["id"])
-            if fresh:
-                _set_sticky_account(fresh["id"], provider)
-            return fresh
-    return None
 
 
 # ============================================================
