@@ -1,4 +1,5 @@
 import {api,apiErr,fmt} from '../api.js';
+import {size} from '../format.js';
 import {I} from '../icons.js';
 const{ref,reactive,computed,onMounted,onUnmounted,watch}=Vue;
 
@@ -55,7 +56,6 @@ export default {
     }
     function scanCustom(){const path=authPath.value.trim();if(!path){notify('请先填写目录或 .info 文件路径','err');return}scan(path)}
     function clearPath(){authPath.value='';discover('')}
-    function size(v){v=Number(v||0);if(v>=1024*1024)return(v/1024/1024).toFixed(1)+' MB';if(v>=1024)return(v/1024).toFixed(1)+' KB';return v+' B'}
 
     async function startSoloLogin(){
       if(soloBusy.value)return;

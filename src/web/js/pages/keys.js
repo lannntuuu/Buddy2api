@@ -1,4 +1,5 @@
-import {api,apiErr,tok,respRow,patchRowById} from '../api.js';
+import {api,apiErr,tok,respRow,patchRowById,busyKeyOf,withBusy as withBusyR} from '../api.js';
+import {copyText} from '../format.js';
 import {I} from '../icons.js';
 const{ref,reactive,computed,onMounted}=Vue;
 
@@ -12,8 +13,7 @@ export default {props:['token','toast'],setup(p){
     {k:'cherry',name:'Cherry Studio',icon:'◉'},
     {k:'nextchat',name:'NextChat',icon:'◉'},
   ];
-  function busyKey(id,k){return busy.value[id+'-'+k]}
-  async function withBusy(k,id,fn){busy.value={...busy.value,[id+'-'+k]:true};try{return await fn()}finally{const o={...busy.value};delete o[id+'-'+k];busy.value=o}}
+  const busyKey=(id,k)=>busyKeyOf(busy,id,k),withBusy=(k,id,fn)=>withBusyR(busy,id,k,fn);
   async function load(){
     ld.value=true;
     try{
@@ -59,10 +59,10 @@ export default {props:['token','toast'],setup(p){
     try{
       let key=revealed.value[k.id];
       if(!key){key=await fetchReveal(k);revealed.value={...revealed.value,[k.id]:key}}
-      navigator.clipboard.writeText(key);copied.value=true;p.toast('已复制','info');setTimeout(()=>copied.value=false,1500);
+      copyText(key,copied,true,1500);p.toast('已复制','info');
     }catch(e){p.toast(e.detail||apiErr(e,'复制失败：明文已不可恢复'),'err')}
   }
-  function cp(v){navigator.clipboard.writeText(v);copied.value=true;p.toast('已复制','info');setTimeout(()=>copied.value=false,1500)}
+  function cp(v){copyText(v,copied,true,1500);p.toast('已复制','info')}
   function close(){sa.value=false;res.value='';f.name='';f.models='';f.limit=null;f.preset='custom';f.channel='workbuddy'}
   onMounted(load);return{l,ld,sa,f,res,saving,copied,busyKey,shown,revealed,clientTypes,channels,load,create,setChannel,toggle,del,cp,cpKey,toggleReveal,tok,close,I}
 },template:`

@@ -106,3 +106,9 @@ export function money(v){return Number(v||0).toFixed(4).replace(/\.?0+$/,'')}
 export function ms(v){v=Number(v||0);return v>=1000?(v/1000).toFixed(1)+'s':v+'ms'}
 export function fmt(t){return t?new Date(t*1000).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'-'}
 export function fmtSec(t){return t?new Date(t*1000).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}):'-'}
+
+// ── busy 锁共享(channels/keys/quota 三页同构,spec 33 §2-E ④)──
+// busy 是页面本地的 ref(键 `id+'-'+k`,页间不共享避免跨页脏读);
+// withBusy 置位执行清位,busyKeyOf 供模板读。
+export function busyKeyOf(busy,id,k){return busy.value[id+'-'+k]}
+export async function withBusy(busy,id,k,fn){busy.value={...busy.value,[id+'-'+k]:true};try{return await fn()}finally{const o={...busy.value};delete o[id+'-'+k];busy.value=o}}

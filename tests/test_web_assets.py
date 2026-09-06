@@ -185,13 +185,18 @@ def test_sortable_idempotent_guard_and_destroy() -> None:
 
 
 def test_solo_poll_cleanup_on_unmount() -> None:
-    """WS-3 §4:SOLO 登录轮询 onUnmounted 清理 + AbortController 中断在途请求。"""
-    for name in ("channels.js", "_login_import.js"):
-        src = _read(WEB_JS / "pages" / name)
-        assert "onUnmounted" in src, f"{name}: missing onUnmounted cleanup"
-        assert "AbortController" in src, f"{name}: in-flight poll must be abortable"
-        assert "stopSoloPoll" in src, f"{name}: polling timer must be cleared"
-        assert "soloGen++" in src, f"{name}: poll generation must be invalidated on unmount"
+    """WS-3 §4:SOLO 登录轮询 onUnmounted 清理 + AbortController 中断在途请求。
+
+    断言修订声明(spec 34 §WS-B-3,全 spec 唯一允许的既有断言改动):
+    channels.js 的 scan/solo 死码已删除(33 号方案 §2-E;导入 UI 早已迁至
+    _login_import.js,channels 模板零引用),SOLO 轮询清理由 _login_import.js
+    独立承担,故本断言从文件元组收窄为仅 _login_import.js。
+    """
+    src = _read(WEB_JS / "pages" / "_login_import.js")
+    assert "onUnmounted" in src, "missing onUnmounted cleanup"
+    assert "AbortController" in src, "in-flight poll must be abortable"
+    assert "stopSoloPoll" in src, "polling timer must be cleared"
+    assert "soloGen++" in src, "poll generation must be invalidated on unmount"
 
 
 def test_keys_masked_with_reveal_endpoint() -> None:
@@ -263,3 +268,54 @@ def test_keyboard_accessible_rows_and_rail() -> None:
     # focus-visible 焦点样式存在
     css = _read(_CSS)
     assert ":focus-visible" in css
+
+
+# ---------------------------------------------------------------------------
+# WS-B 安全网(33 号方案 §4-2):CSS 单向 smoke
+# 断言「模板+JS 用到的类名全集 ⊆ app.css 选择器类名全集」。单向:只保证
+# 用到的类都有样式(或已列入白名单),不反向要求 CSS 无冗余(死块另行清理)。
+# ---------------------------------------------------------------------------
+
+# JS 里动态拼进 :class 的类名(非模板字面量,无法静态提取)单独枚举保护:
+# heatClass(dashboard)/cacheStatusClass(dashboard)/statusClass(logs)/
+# checkinClass+pkgBadge(quota)/healthClass(dashboard)/toast 类型(app.js)/
+# today-metric 与 today-hour-chart 的 kind 类。
+JS_DYNAMIC_CLASSES = {
+    "ok", "err", "warn", "info", "active", "inactive",
+    "requests", "tokens", "credit",
+    "heat-0", "heat-1", "heat-2", "heat-3", "heat-4", "heat-5",
+    "cache-ok", "cache-partial", "cache-approx", "cache-empty",
+}
+
+# 模板中出现但 app.css 无选择器的类名(现状基线,一次性脚本核实):
+# 样式由内联 style 承担,或仅作为 SortableJS 钩子/纯语义标记。
+#   apikey      通道列表 tag 语义标记(.tag 提供样式)
+#   drag-handle 拖拽手柄(样式全内联;SortableJS handle 钩子)
+#   grp-h       分组表头行(样式全内联;SortableJS onMove 排除钩子)
+#   sec-h       channels 小节标题(无专用样式,默认排版)
+#   tab/tabbar  详情浮窗 tab 行(无专用样式,.on 态由 .seg button.on 等承担)
+#   ch-warn     env 锁定提示(原 .ch-panel .ch-warn 因页面无 .ch-panel 祖先从未
+#               生效,WS-B 死块删除后该类只剩语义标记作用,样式由内联 style 承担)
+NO_CSS_WHITELIST = {"apikey", "drag-handle", "grp-h", "sec-h", "tab", "tabbar", "ch-warn"}
+
+
+def test_css_covers_all_used_classes() -> None:
+    """模板静态类名 + :class 字面量 + JS 动态类名 ⊆ app.css 选择器类名。"""
+    css = _read(_CSS)
+    css_classes = set(re.findall(r"\.([a-zA-Z][a-zA-Z0-9_-]*)", css))
+    used = set(JS_DYNAMIC_CLASSES)
+    for rel in JS_FILES:
+        src = _read(REPO_ROOT / rel)
+        # 模板字符串:剔除 ${...} 插值(动态部分走 JS_DYNAMIC_CLASSES)
+        for tmpl in re.findall(r"`(?:[^`\\]|\\.)*`", src, re.S):
+            static = re.sub(r"\$\{.*?\}", " ", tmpl)
+            for m in re.finditer(r'(?<![:\w])class="([^"]*)"', static):
+                used.update(m.group(1).split())
+            for m in re.finditer(r':class="([^"]*)"', static):
+                seg = m.group(1)
+                # 值位置(三元 ?/: 分支、数组元素)的引号串;比较操作数(x==='y')不算
+                used.update(re.findall(r"""(?<=[?:,(\[])\s*['"]([a-zA-Z][a-zA-Z0-9_-]*)['"]""", seg))
+                # 对象键 {on:...} 无引号,键即类名
+                used.update(re.findall(r"[{,\s]([a-zA-Z][a-zA-Z0-9_-]*):", seg))
+    missing = sorted(c for c in used if c not in css_classes and c not in NO_CSS_WHITELIST)
+    assert not missing, f"classes used in templates/JS but missing in app.css: {missing}"

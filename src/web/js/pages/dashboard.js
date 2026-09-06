@@ -1,4 +1,5 @@
 import {api,apiErr,n,tok,pct,money,ms,fmt} from '../api.js';
+import {age,expireMeta} from '../format.js';
 import {I} from '../icons.js';
 const{ref,reactive,computed,onMounted}=Vue;
 
@@ -9,8 +10,6 @@ export default {props:['token','toast'],setup(p){
   function healthClass(){if(!s.value?.active_accounts||!s.value?.active_keys)return 'err';if((s.value?.today?.errors||0)>0||s.value?.filtered_requests>0)return 'warn';return ''}
   function healthText(){if(!s.value?.active_accounts)return '无可用账号';if(!s.value?.active_keys)return '无可用 API Key';if((s.value?.today?.errors||0)>0)return '有请求异常';if(s.value?.filtered_requests>0)return '存在内容过滤';return '运行正常'}
   function rateWidth(v){return Math.max(0,Math.min(100,Number(v||0)))+'%'}
-  function age(v){v=Number(v||0);if(v<60)return v+'s';if(v<3600)return Math.floor(v/60)+'m';return Math.floor(v/3600)+'h'}
-  function expireMeta(a){if(a.next_expire_days===null||a.next_expire_days===undefined)return '无明确到期';return a.next_expire_days+' 天 · '+(a.next_expire_time||'-')}
   const mx=computed(()=>s.value?.daily?.length?Math.max(...s.value.daily.map(d=>d.requests),1):1);
   const heatRows=computed(()=>{const d=s.value?.daily||[];return[
     {name:'调用',kind:'requests',values:d.map(x=>Number(x.requests||0)),max:Math.max(...d.map(x=>Number(x.requests||0)),1)},

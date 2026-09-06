@@ -1,4 +1,5 @@
 import {api,apiErr} from '../api.js';
+import {copyText} from '../format.js';
 import {I} from '../icons.js';
 const{ref,reactive,computed,onMounted}=Vue;
 
@@ -28,7 +29,7 @@ export default {props:['token','toast'],setup(p){
     }catch(e){p.toast(apiErr(e,'配置失败'),'err');codexResult.value={status:'error',message:String(e)}}
     codexBusy.value=false;
   }
-  function copy(v,name){navigator.clipboard.writeText(v);copied.value=name;p.toast('已复制','info');setTimeout(()=>copied.value='',1200)}
+  function copy(v,name){copyText(v,copied,name,1200);p.toast('已复制','info')}
   const currentPreset=computed(()=>presets[setupTab.value]||presets.codex)
   function envBlock(){
     if(setupTab.value==='codex'){

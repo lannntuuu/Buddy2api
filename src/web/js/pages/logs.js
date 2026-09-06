@@ -1,4 +1,5 @@
 import {api,apiErr,n,tok,money,ms,fmtSec as fmt} from '../api.js';
+import {copyText} from '../format.js';
 import {I} from '../icons.js';
 const{ref,reactive,computed,onMounted}=Vue;
 const PROMPT_TIP='上游上报的 prompt_tokens;缓存命中部分已含其中(若上游回报)';
@@ -13,7 +14,7 @@ export default {props:['token'],setup(p){
   function statusText(x){return x.finish_reason||x.status_code||'-'}
   function prev(){f.offset=Math.max(0,Number(f.offset||0)-Number(f.limit||100));load()}
   function next(){if(Number(f.offset||0)+Number(f.limit||100)>=Number(meta.value.total||0))return;f.offset=Number(f.offset||0)+Number(f.limit||100);load()}
-  function copyErr(x){navigator.clipboard.writeText(x.error_msg||'');copied.value=true;setTimeout(()=>copied.value=false,1200)}
+  function copyErr(x){copyText(x.error_msg||'',copied,true,1200)}
   const pageText=computed(()=>{const total=Number(meta.value.total||0);if(!total)return '0 / 0';return (Number(f.offset||0)+1)+'-'+Math.min(Number(f.offset||0)+Number(f.limit||100),total)+' / '+total})
   function reasoningText(v){return (!v||v==='upstream')?'上游默认':v}
   function reasoningTitle(v){return (!v||v==='upstream')?'未显式注入，跟随上游默认档位':('思考档位：'+v)}
