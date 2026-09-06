@@ -410,9 +410,8 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
             </div>
             <div class="sec-h" style="margin:14px 0 6px">凭证 · 上游密钥</div>
             <div class="notebox">
-              <div class="hint">同一通道可保存多把密钥(不同 Key 各自成行、都参与调度),按权重/优先级轮换;不需要的行在下方列表停用即可。密钥不回显,列表只显示尾号。注意:这是上游通行证,与「API Keys」页发给客户端的网关 Key 是两回事。</div>
+              <div class="hint">添加 / 轮换密钥：点上方「<strong>编辑</strong>」，在 API Key 栏粘贴即可（留空不轮换；不同 Key 各自成行、都参与调度，按权重/优先级轮换；不需要的行在下方列表停用）。密钥不回显，列表只显示尾号。注意：这是上游通行证，与「API Keys」页发给客户端的网关 Key 是两回事。</div>
               <div style="display:flex;gap:8px;margin-top:8px">
-                <button class="btn s pri" @click="openKeyModal()"><span v-html="I.plus"></span>添加/轮换密钥</button>
                 <span class="hint" style="margin:0;align-self:center">环境变量 <span class="mono">{{keyPanelMetaById[um.infoId]?keyPanelMetaById[um.infoId].env||'(未配置)':'(未配置)'}}</span> 仍可用(无可用密钥时自动导入)</span>
               </div>
             </div>
