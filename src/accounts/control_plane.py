@@ -543,7 +543,57 @@ def set_channel_models(
         else:
             validated = model_config._validate_reasoning(reasoning)
             db.set_setting(f"{channel}.reasoning", validated)
+    _sync_models_page_to_definition(
+        channel,
+        set_models=set_models, models=models,
+        set_aliases=set_aliases, aliases=aliases,
+    )
     return channel_model_view(channel)
+
+
+def _sync_models_page_to_definition(
+    channel: str,
+    *,
+    set_models: bool, models,
+    set_aliases: bool, aliases,
+) -> None:
+    """Mirror models-page edits back into the custom-channel definition.
+
+    The channel-form save already mirrors definition → override keys; this is
+    the reverse half: without it the 模型配置 page edits live only in
+    `<cid>.models/.aliases`, and reopening the channel-form edit modal still
+    shows stale definition values. Only touches key-type custom channels
+    (built-ins have no definition to mirror). A reset (models/aliases=null)
+    deletes just the override key — the definition's own value becomes the
+    default again.
+    """
+    try:
+        from providers import custom_channels
+
+        definition = custom_channels.get_definition(channel)
+        if definition is None:
+            return  # built-in or unknown channel — nothing to mirror
+        changed = False
+        if set_models:
+            if models is None:
+                # reset-to-default: drop the override key only. The definition
+                # keeps its original list, so "default" = what the admin first
+                # set in the channel form (NOT the global DEFAULT_MODELS).
+                pass
+            else:
+                definition["models"] = _validate_models(models)
+                changed = True
+        if set_aliases:
+            if aliases is None:
+                pass  # same: keep the definition's own alias map as the default
+            else:
+                definition["aliases"] = _validate_aliases(aliases)
+                changed = True
+        if changed:
+            custom_channels.upsert_definition(definition)
+    except Exception:
+        # mirroring is best-effort; the override keys remain authoritative
+        pass
 
 
 # ------------------------------------------------------------
