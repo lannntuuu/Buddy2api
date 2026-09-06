@@ -276,8 +276,12 @@ def test_seed_merges_channel_hosts_base_url(isolated_db):
 
 
 def test_id_models_settings_overrides_definition_default(isolated_db):
-    """user 写了 <id>.models → effective model 列表取 user 设置（≠ definition.models）。
-    definition.models 仍存于 control_plane view 的 defaults 字段作为兜底。"""
+    """user 写了 <id>.models → effective model 列表取 user 设置。
+
+    双向同步语义（spec 通道双入口）：模型配置页保存会镜像写回
+    definition.models，所以 defaults 与生效列表一致（不再是旧兜底值）；
+    reset（传 null）只删覆盖键，definition 自身值重新成为默认。
+    """
     from accounts import control_plane
 
     cc.save_definitions(
@@ -297,8 +301,15 @@ def test_id_models_settings_overrides_definition_default(isolated_db):
 
     view = control_plane.channel_model_view("zchan")
     assert view["models"] == ["custom-model-1", "custom-model-2"]
-    # definition defaults 仍是兜底原值
-    assert view["defaults"]["models"] == ["seed-model-1"]
+    # 镜像后 definition.models 同步为保存值 → defaults 展示同一份
+    assert view["defaults"]["models"] == ["custom-model-1", "custom-model-2"]
+
+    # reset（传 null）只删覆盖键：definition 原值重新成为生效默认
+    control_plane.set_channel_models("zchan", models=None, set_models=True)
+    view = control_plane.channel_model_view("zchan")
+    assert view["models"] == ["custom-model-1", "custom-model-2"]  # 镜像后的定义值兜底
+    from storage import database as db
+    assert db.get_setting("zchan.models") is None
 
 
 def test_definition_default_used_when_id_models_unset(isolated_db):
