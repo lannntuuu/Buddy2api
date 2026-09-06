@@ -24,6 +24,7 @@ import httpx
 
 from accounts import auth_manager
 from storage import database as db
+from providers import trae_shared
 from providers.model_config import channel_aliases, channel_model_ids, channel_credit_rate
 from providers.traesolo.constants import (
     AGENT_HOST,
@@ -639,25 +640,16 @@ def _handle_kind(aid: int, kind: str, reason: str = "") -> None:
 
 # expired 账号 refresh 失败的负缓存（自适应间隔，语义同 trae_shared）：
 # 结构 (连续失败次数, 下次可试时刻)，第 n 次连续失败后冷却 60×2^(n-1) 秒
-# （封顶 600s），刷新成功清零。期间不重试同一账号，避免上游不可达时
-# 每个请求都原样重放 refresh 请求。
+# （封顶 600s；冷却间隔公式收敛在 trae_shared._fail_interval，防两份漂移），
+# 刷新成功清零。期间不重试同一账号，避免上游不可达时每个请求都原样
+# 重放 refresh 请求。状态与打点保留本模块实现（既有测试直接锚定该 dict）。
 _refresh_fail_at: dict[int, tuple[int, float]] = {}
 _refresh_fail_lock = threading.Lock()
-_REFRESH_FAIL_BASE_S = 60.0
-_REFRESH_FAIL_MAX_S = 600.0
 
 
 def _monotonic_now() -> float:
     """时钟注入点：测试用 fake clock 覆盖（monkeypatch 本函数）。"""
     return time.monotonic()
-
-
-def _refresh_fail_interval(fail_count: int) -> float:
-    """第 n 次连续失败后的冷却间隔：60×2^(n-1) 秒，封顶 600 秒。"""
-    return min(
-        _REFRESH_FAIL_MAX_S,
-        _REFRESH_FAIL_BASE_S * (2 ** (max(1, int(fail_count)) - 1)),
-    )
 
 
 def _refresh_recently_failed(aid: int, now: float) -> bool:
@@ -674,7 +666,7 @@ def _note_refresh_failure(aid: int) -> None:
             _refresh_fail_at.pop(key, None)
         count, _ = _refresh_fail_at.get(aid, (0, 0.0))
         count += 1
-        _refresh_fail_at[aid] = (count, now + _refresh_fail_interval(count))
+        _refresh_fail_at[aid] = (count, now + trae_shared._fail_interval(count))
 
 
 def _note_refresh_success(aid: int) -> None:
@@ -1060,6 +1052,59 @@ async def _log(
 
 
 # ---------------------------------------------------------------------------
+# 轮换头部（_run_once / _run_stream 的同构前置段）
+# ---------------------------------------------------------------------------
+
+async def _rotate_open(
+    payload: dict,
+    *,
+    client_model: str,
+    api_key_info: dict | None,
+    tried: set[int],
+    stream: bool,
+):
+    """_pick → _pre_refresh → _open → ≥400 分类记账的同构头部。
+
+    成功（上游 2xx）返回 (account, t0, client, response)，由调用方继续各自的
+    聚合/流式产出体与成功打点时机；失败返回 (None, error_ctx)，error_ctx 为
+    已记账落库后的 last_error 文案，None 表示无可用账号（调用方应 break 而
+    非 continue）。stream 只决定 _log 的 stream 位；失败记账方式
+    （_handle_kind / pool.note_error）与拆分前逐行一致。
+    """
+    account = await _pick(tried)
+    if account is None:
+        return None, None
+    aid = int(account["id"])
+    tried.add(aid)
+    t0 = time.time()
+
+    _, rkind, rerr = await _pre_refresh(account)
+    if rerr is not None:
+        _handle_kind(aid, rkind, f"refresh: {rerr}")
+        await _log(api_key_info, account, client_model, stream, "error", 503, str(rerr)[:240], t0)
+        return None, str(rerr)
+
+    body = prepare_body(payload)
+    try:
+        client, response = await _open(account, body)
+    except httpx.HTTPError as exc:
+        pool.note_error(aid)
+        await _log(api_key_info, account, client_model, stream, "error", 502, str(exc)[:240], t0)
+        return None, str(exc)
+
+    if response.status_code >= 400:
+        raw = await response.aread()
+        await _close(client, response)
+        text = raw.decode("utf-8", "replace")
+        kind = classify(response.status_code, text)
+        _handle_kind(aid, kind)
+        await _log(api_key_info, account, client_model, stream, "error", response.status_code, text[:240], t0)
+        return None, f"upstream {response.status_code} ({kind})"
+
+    return account, t0, client, response
+
+
+# ---------------------------------------------------------------------------
 # 非流式
 # ---------------------------------------------------------------------------
 
@@ -1070,38 +1115,20 @@ async def _run_once(
     tried: set[int] = set()
     last_error = "No available accounts"
     for _ in range(MAX_ROTATE):
-        account = await _pick(tried)
-        if account is None:
-            break
+        rotated = await _rotate_open(
+            payload,
+            client_model=client_model,
+            api_key_info=api_key_info,
+            tried=tried,
+            stream=False,
+        )
+        if rotated[0] is None:
+            if rotated[1] is None:
+                break  # 无可用账号：保留 last_error 语义
+            last_error = rotated[1]
+            continue
+        account, t0, client, response = rotated
         aid = int(account["id"])
-        tried.add(aid)
-        t0 = time.time()
-
-        _, rkind, rerr = await _pre_refresh(account)
-        if rerr is not None:
-            _handle_kind(aid, rkind, f"refresh: {rerr}")
-            last_error = str(rerr)
-            await _log(api_key_info, account, client_model, False, "error", 503, str(rerr)[:240], t0)
-            continue
-
-        body = prepare_body(payload)
-        try:
-            client, response = await _open(account, body)
-        except httpx.HTTPError as exc:
-            pool.note_error(aid)
-            last_error = str(exc)
-            await _log(api_key_info, account, client_model, False, "error", 502, str(exc)[:240], t0)
-            continue
-
-        if response.status_code >= 400:
-            raw = await response.aread()
-            await _close(client, response)
-            text = raw.decode("utf-8", "replace")
-            kind = classify(response.status_code, text)
-            _handle_kind(aid, kind)
-            last_error = f"upstream {response.status_code} ({kind})"
-            await _log(api_key_info, account, client_model, False, "error", response.status_code, text[:240], t0)
-            continue
 
         try:
             data, stream_err = await aggregate_lines(response.aiter_lines())
@@ -1156,38 +1183,20 @@ async def _run_stream(
     request_t0 = time.monotonic()
     first_token_ms: int | None = None
     for _ in range(MAX_ROTATE):
-        account = await _pick(tried)
-        if account is None:
-            break
+        rotated = await _rotate_open(
+            payload,
+            client_model=client_model,
+            api_key_info=api_key_info,
+            tried=tried,
+            stream=True,
+        )
+        if rotated[0] is None:
+            if rotated[1] is None:
+                break  # 无可用账号：保留 last_error 语义
+            last_error = rotated[1]
+            continue
+        account, t0, client, response = rotated
         aid = int(account["id"])
-        tried.add(aid)
-        t0 = time.time()
-
-        _, rkind, rerr = await _pre_refresh(account)
-        if rerr is not None:
-            _handle_kind(aid, rkind, f"refresh: {rerr}")
-            last_error = str(rerr)
-            await _log(api_key_info, account, client_model, True, "error", 503, str(rerr)[:240], t0)
-            continue
-
-        body = prepare_body(payload)
-        try:
-            client, response = await _open(account, body)
-        except httpx.HTTPError as exc:
-            pool.note_error(aid)
-            last_error = str(exc)
-            await _log(api_key_info, account, client_model, True, "error", 502, str(exc)[:240], t0)
-            continue
-
-        if response.status_code >= 400:
-            raw = await response.aread()
-            await _close(client, response)
-            text = raw.decode("utf-8", "replace")
-            kind = classify(response.status_code, text)
-            _handle_kind(aid, kind)
-            last_error = f"upstream {response.status_code} ({kind})"
-            await _log(api_key_info, account, client_model, True, "error", response.status_code, text[:240], t0)
-            continue
 
         # 2xx → 锁定该账号，开始转换流
         auth_manager.mark_account_success(aid)

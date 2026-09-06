@@ -65,7 +65,11 @@ from upstream.compaction import (  # noqa: E402,F401
 
 from storage import database as db
 from accounts import auth_manager
-from providers.store_common import extract_cache_tokens
+from providers.store_common import (
+    credit_source_of,
+    enqueue_record_request,
+    extract_cache_tokens,
+)
 
 BACKEND = "https://copilot.tencent.com"
 # 共享 retry.py 的瞬时错误集合;401/403 仅参与账号 failover 判定(_is_retryable_status),
@@ -597,23 +601,10 @@ def _log_request(api_key_info, account, model_name, stream,
         usage_json = serialized
     log_data["usage_json"] = usage_json
     # credit_source='live' 门槛：usage 含任意已知 cache 键即标 live（实测语义，与 dashboard accurate 对齐）。
-    _known_cache_keys = (
-        "cache_read_input_tokens", "cache_creation_input_tokens",
-        "prompt_cache_hit_tokens", "prompt_cache_miss_tokens",
-        "prompt_tokens_details",
-    )
-    log_data["credit_source"] = (
-        "live" if usage is not None and any(k in usage for k in _known_cache_keys) else None
-    )
-    try:
-        # 写日志（含 BEGIN IMMEDIATE 事务 + fsync）不占事件循环：
-        # 放进默认线程池 fire-and-forget，日志失败只静默丢弃。
-        loop = asyncio.get_running_loop()
-        fut = loop.run_in_executor(None, db.record_request, log_data)
-        # fire-and-forget：吞掉 executor 内抛出的异常，避免“异常从未被读取”告警
-        fut.add_done_callback(lambda f: f.exception() if f.cancelled() is False else None)
-    except Exception:
-        logger.debug("log enqueue failed", exc_info=True)
+    log_data["credit_source"] = credit_source_of(usage)
+    # 写日志（含 BEGIN IMMEDIATE 事务 + fsync）不占事件循环：
+    # 放进默认线程池 fire-and-forget，日志失败只静默丢弃。
+    enqueue_record_request(log_data)
 
 
 async def proxy_chat_completions(
@@ -789,6 +780,33 @@ async def test_account_chat(account: dict, model: str = "auto", prompt: str = "p
     }
 
 
+class _RetryLog:
+    """流式重试的延迟落库载体（_stream_upstream 私有）。
+
+    收敛 4 处 pending_retry_log 字面量构造，字段与原字面量逐键一致：
+    在下一次账号轮换前（或循环收尾）才写 "retry"/"error" 日志行。
+    """
+
+    __slots__ = (
+        "account", "prompt_tokens", "completion_tokens", "total_tokens",
+        "credit", "status", "message", "started", "attempt", "retry_after",
+    )
+
+    def __init__(self, account, status, message, started,
+                 attempt=None, retry_after=None,
+                 prompt_tokens=0, completion_tokens=0, total_tokens=0, credit=0):
+        self.account = account
+        self.status = status
+        self.message = message
+        self.started = started
+        self.attempt = attempt
+        self.retry_after = retry_after
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+        self.total_tokens = total_tokens
+        self.credit = credit
+
+
 async def _stream_upstream(
     body: dict,
     api_key_info: Optional[dict],
@@ -817,25 +835,26 @@ async def _stream_upstream(
         if pending_retry_log is not None:
             _log_request(
                 api_key_info,
-                pending_retry_log["account"],
+                pending_retry_log.account,
                 model_name,
                 True,
-                pending_retry_log["prompt_tokens"],
-                pending_retry_log["completion_tokens"],
-                pending_retry_log["total_tokens"],
-                pending_retry_log["credit"],
+                pending_retry_log.prompt_tokens,
+                pending_retry_log.completion_tokens,
+                pending_retry_log.total_tokens,
+                pending_retry_log.credit,
                 "retry",
-                pending_retry_log["status"],
-                pending_retry_log["message"],
-                pending_retry_log["started"],
+                pending_retry_log.status,
+                pending_retry_log.message,
+                pending_retry_log.started,
                 increment_usage=False,
                 reasoning_effort=effective_reasoning,
             )
-            retry_after = pending_retry_log.get("retry_after")
-            if retry_after is not None:
-                await _retry_delay(pending_retry_log["attempt"], retry_after=retry_after)
+            if pending_retry_log.retry_after is not None:
+                await _retry_delay(
+                    pending_retry_log.attempt, retry_after=pending_retry_log.retry_after
+                )
             else:
-                await _retry_delay(pending_retry_log["attempt"])
+                await _retry_delay(pending_retry_log.attempt)
             pending_retry_log = None
         last_account = account
         tried_ids.add(account["id"])
@@ -856,6 +875,28 @@ async def _stream_upstream(
         pending_terminal_events: list[bytes] = []
         pending_terminal_bytes = 0
         stop_reading = False
+
+        # feed / finish 共用的同构事件泵：处理 SSE 事件、缓存 terminal 帧
+        # 延后下发、产出非 terminal 帧。output_started / first_token_ms 打点
+        # 位置与拆分前逐行一致（出流前才翻转，首个内容帧记一次基线差）。
+        async def _pump(events):
+            nonlocal output_started, pending_terminal_bytes, first_token_ms
+            for data in events:
+                obj = observer.observe_event(data)
+                if obj is not None and not obj.get("error"):
+                    encoded = _json_sse_event(obj)
+                    if pending_terminal_events or _has_terminal_choice(obj):
+                        pending_terminal_events.append(encoded)
+                        pending_terminal_bytes += len(encoded)
+                        if pending_terminal_bytes > _MAX_SSE_EVENT_BYTES:
+                            observer.parser_error = (
+                                "The upstream terminal SSE events exceeded the 8 MiB limit."
+                            )
+                    else:
+                        output_started = True
+                        if first_token_ms is None:
+                            first_token_ms = int((time.monotonic() - request_t0) * 1000)
+                        yield encoded
 
         try:
             timeout = httpx.Timeout(
@@ -897,22 +938,18 @@ async def _stream_upstream(
                             )
                         auth_manager.mark_account_failure(account["id"], response.status_code)
                         if _is_retryable_status(response.status_code) and attempt < 2:
-                            pending_retry_log = {
-                                "account": account,
-                                "prompt_tokens": 0,
-                                "completion_tokens": 0,
-                                "total_tokens": 0,
-                                "credit": 0,
-                                "status": response.status_code,
-                                "message": raw_error.decode("utf-8", "replace")[:500],
-                                "started": t0,
-                                "attempt": attempt,
+                            pending_retry_log = _RetryLog(
+                                account=account,
+                                status=response.status_code,
+                                message=raw_error.decode("utf-8", "replace")[:500],
+                                started=t0,
+                                attempt=attempt,
                                 # 429 等响应可能带 Retry-After(纯数字秒):
                                 # 存入 pending_retry_log,在重试前透传给 retry_delay
-                                "retry_after": _parse_retry_after(
+                                retry_after=_parse_retry_after(
                                     response.headers.get("retry-after")
                                 ),
-                            }
+                            )
                             continue
                         _log_request(
                             api_key_info, account, model_name, True,
@@ -926,30 +963,16 @@ async def _stream_upstream(
                     async for chunk in response.aiter_bytes():
                         if not chunk:
                             continue
-                        for data in decoder.feed(chunk):
-                            obj = observer.observe_event(data)
-                            if obj is not None and not obj.get("error"):
-                                encoded = _json_sse_event(obj)
-                                if pending_terminal_events or _has_terminal_choice(obj):
-                                    pending_terminal_events.append(encoded)
-                                    pending_terminal_bytes += len(encoded)
-                                    if pending_terminal_bytes > _MAX_SSE_EVENT_BYTES:
-                                        observer.parser_error = (
-                                            "The upstream terminal SSE events exceeded the 8 MiB limit."
-                                        )
-                                else:
-                                    output_started = True
-                                    if first_token_ms is None:
-                                        first_token_ms = int((time.monotonic() - request_t0) * 1000)
-                                    yield encoded
-                            if (
-                                observer.seen_done
-                                or observer.parser_error
-                                or observer.malformed_data_event
-                                or observer.upstream_error
-                            ):
-                                stop_reading = True
-                                break
+                        async for encoded in _pump(decoder.feed(chunk)):
+                            yield encoded
+                        if (
+                            observer.seen_done
+                            or observer.parser_error
+                            or observer.malformed_data_event
+                            or observer.upstream_error
+                        ):
+                            stop_reading = True
+                            break
                         if decoder.parser_error and not observer.seen_done:
                             observer.parser_error = decoder.parser_error
                             stop_reading = True
@@ -961,17 +984,13 @@ async def _stream_upstream(
             last_status = 502
             auth_manager.mark_account_failure(account["id"], 502)
             if not output_started and attempt < 2:
-                pending_retry_log = {
-                    "account": account,
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                    "credit": 0,
-                    "status": 502,
-                    "message": str(exc)[:500],
-                    "started": t0,
-                    "attempt": attempt,
-                }
+                pending_retry_log = _RetryLog(
+                    account=account,
+                    status=502,
+                    message=str(exc)[:500],
+                    started=t0,
+                    attempt=attempt,
+                )
                 continue
             _log_request(
                 api_key_info, account, model_name, True,
@@ -982,22 +1001,8 @@ async def _stream_upstream(
             return
 
         if not stop_reading:
-            for data in decoder.finish():
-                obj = observer.observe_event(data)
-                if obj is not None and not obj.get("error"):
-                    encoded = _json_sse_event(obj)
-                    if pending_terminal_events or _has_terminal_choice(obj):
-                        pending_terminal_events.append(encoded)
-                        pending_terminal_bytes += len(encoded)
-                        if pending_terminal_bytes > _MAX_SSE_EVENT_BYTES:
-                            observer.parser_error = (
-                                "The upstream terminal SSE events exceeded the 8 MiB limit."
-                            )
-                    else:
-                        output_started = True
-                        if first_token_ms is None:
-                            first_token_ms = int((time.monotonic() - request_t0) * 1000)
-                        yield encoded
+            async for encoded in _pump(decoder.finish()):
+                yield encoded
         if decoder.parser_error and not observer.seen_done:
             observer.parser_error = decoder.parser_error
 
@@ -1016,17 +1021,17 @@ async def _stream_upstream(
             if not output_started:
                 auth_manager.mark_account_failure(account["id"], 502)
                 if attempt < 2:
-                    pending_retry_log = {
-                        "account": account,
-                        "prompt_tokens": observer.usage.get("prompt_tokens", 0),
-                        "completion_tokens": observer.usage.get("completion_tokens", 0),
-                        "total_tokens": observer.usage.get("total_tokens", 0),
-                        "credit": observer.usage.get("credit", 0),
-                        "status": 502,
-                        "message": eof_error,
-                        "started": t0,
-                        "attempt": attempt,
-                    }
+                    pending_retry_log = _RetryLog(
+                        account=account,
+                        status=502,
+                        message=eof_error,
+                        started=t0,
+                        attempt=attempt,
+                        prompt_tokens=observer.usage.get("prompt_tokens", 0),
+                        completion_tokens=observer.usage.get("completion_tokens", 0),
+                        total_tokens=observer.usage.get("total_tokens", 0),
+                        credit=observer.usage.get("credit", 0),
+                    )
                     continue
             _log_request(
                 api_key_info, account, model_name, True,
@@ -1095,24 +1100,20 @@ async def _stream_upstream(
         yield b"data: [DONE]\n\n"
         return
 
-    final_failure = pending_retry_log or {
-        "account": last_account,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_tokens": 0,
-        "credit": 0,
-        "status": last_status,
-        "message": last_error.decode("utf-8", "replace")[:500],
-        "started": last_started,
-    }
+    final_failure = pending_retry_log or _RetryLog(
+        account=last_account,
+        status=last_status,
+        message=last_error.decode("utf-8", "replace")[:500],
+        started=last_started,
+    )
     _log_request(
-        api_key_info, final_failure["account"], model_name, True,
-        final_failure["prompt_tokens"],
-        final_failure["completion_tokens"],
-        final_failure["total_tokens"],
-        final_failure["credit"],
-        "error", final_failure["status"],
-        final_failure["message"], final_failure["started"],
+        api_key_info, final_failure.account, model_name, True,
+        final_failure.prompt_tokens,
+        final_failure.completion_tokens,
+        final_failure.total_tokens,
+        final_failure.credit,
+        "error", final_failure.status,
+        final_failure.message, final_failure.started,
         reasoning_effort=effective_reasoning,
     )
     if last_error_event is not None:

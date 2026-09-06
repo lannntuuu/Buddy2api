@@ -587,26 +587,11 @@ async def _stream_chat(
 
 
 async def test_chat(account: dict, model: str = "qwen-3.7-plus", prompt: str = "请回复：pong") -> dict:
-    t0 = time.time()
-    try:
-        text = await _turn(account, prompt or "请回复：pong", translate_model(model or "auto"), timeout=90.0)
-    except TraeWorkAuthError as exc:
-        return {
-            "ok": False,
-            "status_code": 503,
-            "duration_ms": int((time.time() - t0) * 1000),
-            "message": str(exc)[:400],
-        }
-    except httpx.HTTPError as exc:
-        return {
-            "ok": False,
-            "status_code": 0,
-            "duration_ms": int((time.time() - t0) * 1000),
-            "message": str(exc)[:400],
-        }
-    return {
-        "ok": True,
-        "status_code": 200,
-        "duration_ms": int((time.time() - t0) * 1000),
-        "message": text[:400],
-    }
+    async def send(_payload: dict) -> tuple:
+        try:
+            text = await _turn(account, prompt or "请回复：pong", translate_model(model or "auto"), timeout=90.0)
+        except TraeWorkAuthError as exc:
+            return 503, str(exc)[:400], None
+        return 200, None, text
+
+    return await store_common.run_test_chat(model or "auto", prompt or "请回复：pong", send, limit=400)

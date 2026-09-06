@@ -10,11 +10,10 @@ from pathlib import Path
 from providers.qclaw.constants import CHANNEL_ID, CLIENT_VERSION
 from providers.store_common import (
     dedupe_dirs,
+    discover_dirs,
     file_meta,
     chromium_os_crypt_key,
     decrypt_chromium_v10,
-    discover_summary,
-    existing_uids,
     imported_file_meta,
     is_relative_to,
     upsert_account as upsert_account_by_uid,
@@ -167,32 +166,26 @@ def parse_credentials(body: dict) -> dict:
     return parsed
 
 
-def discover() -> dict:
-    dirs_info = []
-    files: list[dict] = []
-    existing = existing_uids(CHANNEL_ID)
-    for folder in qclaw_auth_dirs():
-        exists = folder.is_dir()
-        dirs_info.append({"path": str(folder), "exists": exists, "file_count": 0})
-        if not exists:
+def _collect_files(folder: Path) -> list[Path]:
+    store = folder / "app-store.json"
+    json_files = []
+    if store.is_file():
+        json_files.append(store)
+    json_files.extend(sorted(folder.glob("*.json")))
+    # app-store.json 也会命中 *.json glob，按解析路径去重并保持顺序
+    seen: set[str] = set()
+    out: list[Path] = []
+    for path in json_files:
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key in seen:
             continue
-        store = folder / "app-store.json"
-        json_files = []
-        if store.is_file():
-            json_files.append(store)
-        json_files.extend(sorted(folder.glob("*.json")))
-        seen_paths: set[str] = set()
-        count = 0
-        for path in json_files:
-            key = str(path.resolve()) if path.exists() else str(path)
-            if key in seen_paths:
-                continue
-            seen_paths.add(key)
-            count += 1
-            meta = _file_meta(path, existing)
-            files.append(meta)
-        dirs_info[-1]["file_count"] = count
-    return discover_summary(CHANNEL_ID, dirs_info, files)
+        seen.add(key)
+        out.append(path)
+    return out
+
+
+def discover() -> dict:
+    return discover_dirs(CHANNEL_ID, qclaw_auth_dirs(), _collect_files, _file_meta)
 
 
 def _file_meta(path: Path, existing: set[str]) -> dict:

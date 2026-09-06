@@ -17,8 +17,7 @@ import os
 from pathlib import Path
 
 from providers.store_common import (
-    discover_summary,
-    existing_uids,
+    discover_dirs,
     imported_file_meta,
     is_relative_to,
     upsert_account as upsert_account_by_uid,
@@ -141,26 +140,16 @@ def import_discovered(path: str) -> dict:
     return parsed
 
 
+def _collect_files(folder: Path) -> list[Path]:
+    try:
+        return sorted(folder.glob("*.json"))
+    except OSError:
+        return []
+
+
 def discover() -> dict:
     """扫描 CB_TRAESOLO_AUTH_DIR 下的 *.json 凭证文件（不扫描 IDE 目录）。"""
-    dirs_info = []
-    files: list[dict] = []
-    existing = existing_uids(CHANNEL_ID)
-    for folder in trae_solo_auth_dirs():
-        exists = folder.is_dir()
-        dirs_info.append({"path": str(folder), "exists": exists, "file_count": 0})
-        if not exists:
-            continue
-        try:
-            candidates = sorted(folder.glob("*.json"))
-        except OSError:
-            continue
-        count = 0
-        for path in candidates:
-            count += 1
-            files.append(_file_meta(path, existing))
-        dirs_info[-1]["file_count"] = count
-    return discover_summary(CHANNEL_ID, dirs_info, files)
+    return discover_dirs(CHANNEL_ID, trae_solo_auth_dirs(), _collect_files, _file_meta)
 
 
 def _file_meta(path: Path, existing: set[str]) -> dict:

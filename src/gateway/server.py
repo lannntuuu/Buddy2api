@@ -309,11 +309,15 @@ def _load_config(path: Path, profile: str) -> dict:
     return merged
 
 
-def main():
-    global ADMIN_TOKEN, ALLOW_NO_ADMIN_AUTH
+def _resolve_config() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
+    """两段式 CLI/TOML 配置解析。
 
-    # First pass: only --config, so we can load TOML defaults before the
-    # full argparse parse.
+    第一遍只认 --config/--config-name，据此加载 TOML 段落作为第二遍
+    argparse 的默认值；--config 不含路径分隔符时视为 profile 名
+    （--config prod → ./config.toml + profile=prod）。config.toml 设置的
+    database.path 在此导出为 CB_GATEWAY_DB_PATH（存量环境变量优先）。
+    返回 (parser, args)：parser 供 _resolve_admin_token 的 ap.error 使用。
+    """
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--config", default=os.environ.get("CB_GATEWAY_CONFIG", ""),
                      help="Path to config.toml (default: ./config.toml) or profile name "
@@ -322,9 +326,6 @@ def main():
                      help="Profile inside config.toml: 'dev', 'prod', or 'default'.")
     pre_args, _ = pre.parse_known_args()
 
-    # Resolve the config file path. If --config was given with no
-    # directory separator, treat it as a profile name shortcut:
-    #   --config prod  ->  ./config.toml with profile=prod
     config_path = None
     profile = pre_args.config_name or "default"
     if pre_args.config:
@@ -369,35 +370,33 @@ def main():
     db_path = db_cfg.get("path")
     if db_path and not os.environ.get("CB_GATEWAY_DB_PATH"):
         os.environ["CB_GATEWAY_DB_PATH"] = str(db_path)
+    return ap, args
 
+
+def _resolve_admin_token(args, ap) -> tuple[str, bool]:
+    """校验 --no-admin-auth 与 host 组合并落 ADMIN_TOKEN / ALLOW_NO_ADMIN_AUTH。
+
+    赋值走本模块属性（经 _ServerModule.__setattr__ 镜像进 gateway.deps），
+    否则路由读 deps 里的空串默认值，每个 /admin/login 都会 401。
+    返回 (admin_token, admin_token_generated)。
+    """
     if args.no_admin_auth and args.host not in {"127.0.0.1", "localhost", "::1"}:
         ap.error("--no-admin-auth can only be used with a loopback host")
 
-    ALLOW_NO_ADMIN_AUTH = args.no_admin_auth
+    allow_no_admin_auth = args.no_admin_auth
     admin_token_source = args.admin_token or os.environ.get("CB_GATEWAY_ADMIN_TOKEN", "")
-    admin_token_generated = bool(not ALLOW_NO_ADMIN_AUTH and not admin_token_source)
-    # Assigning on the module (not as locals) lets _ServerModule.__setattr__
-    # mirror the value into gateway.deps. Otherwise the routers read the
-    # empty-string default from deps and every /admin/login 401s.
-    sys.modules[__name__].ALLOW_NO_ADMIN_AUTH = ALLOW_NO_ADMIN_AUTH
-    sys.modules[__name__].ADMIN_TOKEN = "" if ALLOW_NO_ADMIN_AUTH else (admin_token_source or f"cb-admin-{secrets.token_urlsafe(24)}")
+    admin_token_generated = bool(not allow_no_admin_auth and not admin_token_source)
+    sys.modules[__name__].ALLOW_NO_ADMIN_AUTH = allow_no_admin_auth
+    sys.modules[__name__].ADMIN_TOKEN = "" if allow_no_admin_auth else (admin_token_source or f"cb-admin-{secrets.token_urlsafe(24)}")
+    return sys.modules[__name__].ADMIN_TOKEN, admin_token_generated
 
-    db.init_db()
 
-    # Let `buddy2api.*` loggers respect --log-level (default warning)
-    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.WARNING))
-
-    startup = control_plane.startup_scan()
-    sys.stderr.write(f"[startup] discover: {startup}\n")
-
-    # TraeWork hourly sync (60s grace before first run)
-    _schedule_traework_sync()
-
+def _print_banner(host: str, port: int, admin_token: str, admin_token_generated: bool) -> None:
     accounts = db.list_accounts()
     sys.stderr.write(f"\n")
     sys.stderr.write(f"  Buddy 2 API v{VERSION}\n")
     sys.stderr.write(f"  ========================\n")
-    sys.stderr.write(f"  监听: http://{args.host}:{args.port}\n")
+    sys.stderr.write(f"  监听: http://{host}:{port}\n")
     sys.stderr.write(f"  账号: {len(accounts)} 个 ({sum(1 for a in accounts if a['status']=='active')} active)\n")
     sys.stderr.write(f"  通道: {', '.join(providers.enabled_provider_ids())}\n")
     for channel in providers.enabled_provider_ids():
@@ -414,15 +413,33 @@ def main():
         f"  启动导入: {'on' if control_plane.auto_import_enabled() else 'off (CB_GATEWAY_AUTO_IMPORT=1 可打开)'}\n"
     )
     sys.stderr.write(f"  Admin: {'no auth' if ALLOW_NO_ADMIN_AUTH else 'enabled'}\n")
-    if ADMIN_TOKEN:
+    if admin_token:
         if admin_token_generated:
             sys.stderr.write(
-                f"  Admin Token: {ADMIN_TOKEN}\n"
+                f"  Admin Token: {admin_token}\n"
                 f"  （自动生成的管理 Token，浏览器打开管理页后在「设置」里粘贴一次即可登录）\n"
             )
         else:
             sys.stderr.write("  Admin Token: configured (hidden)\n")
     sys.stderr.write(f"  ========================\n\n")
+
+
+def main():
+    ap, args = _resolve_config()
+    admin_token, admin_token_generated = _resolve_admin_token(args, ap)
+
+    db.init_db()
+
+    # Let `buddy2api.*` loggers respect --log-level (default warning)
+    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.WARNING))
+
+    startup = control_plane.startup_scan()
+    sys.stderr.write(f"[startup] discover: {startup}\n")
+
+    # TraeWork hourly sync (60s grace before first run)
+    _schedule_traework_sync()
+
+    _print_banner(args.host, args.port, admin_token, admin_token_generated)
 
     uvicorn.run(
         app,

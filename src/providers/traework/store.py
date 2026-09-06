@@ -9,8 +9,7 @@ from pathlib import Path
 from storage.credential_crypto import CredentialCryptoError
 from providers.store_common import (
     dedupe_dirs,
-    discover_summary,
-    existing_uids,
+    discover_dirs,
     imported_file_meta,
     is_relative_to,
     iso_to_ms,
@@ -166,22 +165,13 @@ def import_discovered(path: str) -> dict:
     return parsed
 
 
+def _collect_files(folder: Path) -> list[Path]:
+    path = folder / STORAGE_FILENAME
+    return [path] if path.is_file() else []
+
+
 def discover() -> dict:
-    dirs_info = []
-    files: list[dict] = []
-    existing = existing_uids(CHANNEL_ID)
-    for folder in traework_auth_dirs():
-        exists = folder.is_dir()
-        dirs_info.append({"path": str(folder), "exists": exists, "file_count": 0})
-        if not exists:
-            continue
-        count = 0
-        path = folder / STORAGE_FILENAME
-        if path.is_file():
-            count += 1
-            files.append(_file_meta(path, existing))
-        dirs_info[-1]["file_count"] = count
-    return discover_summary(CHANNEL_ID, dirs_info, files)
+    return discover_dirs(CHANNEL_ID, traework_auth_dirs(), _collect_files, _file_meta)
 
 
 def _file_meta(path: Path, existing: set[str]) -> dict:

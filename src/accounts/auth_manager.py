@@ -301,22 +301,6 @@ def parse_auth_file(path: Path) -> Optional[dict]:
     }
 
 
-def import_auth_file(path: Path) -> Optional[int]:
-    """扫描并导入 auth 文件到数据库。如果 uid 已存在则更新。"""
-    parsed = parse_auth_file(path)
-    if not parsed:
-        return None
-
-    # 检查是否已存在（按 uid 去重）
-    existing = db.list_accounts()
-    for acc in existing:
-        if acc.get("uid") == parsed["uid"]:
-            db.update_account(acc["id"], parsed)
-            return acc["id"]
-
-    return db.add_account(parsed)
-
-
 def auto_scan_and_import(auth_dir: Optional[str] = None) -> dict:
     """自动扫描本机 auth 文件并导入。返回 {imported, updated, skipped}。"""
     result = {"imported": 0, "updated": 0, "skipped": 0, "errors": []}
@@ -1060,9 +1044,3 @@ def get_account_status(account: dict) -> dict:
         "credit_source": "local_snapshot" if credit_snapshot > 0 else "usage_only",
         "last_used_at": account.get("last_used_at"),
     }
-
-
-def check_all_accounts() -> list[dict]:
-    """检查所有账号状态。"""
-    accounts = db.list_accounts()
-    return [get_account_status(a) for a in accounts]

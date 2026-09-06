@@ -35,6 +35,7 @@ import httpx
 
 from providers.host_override import channel_host
 from providers.model_config import channel_aliases, channel_model_ids
+from providers.store_common import credit_source_of, enqueue_record_request, extract_cache_tokens
 from storage import database as db
 
 logger = logging.getLogger("openai_compat")
@@ -237,10 +238,6 @@ class OpenAICompatProvider:
         self._models_cache.update({"fetched_at": now, "ids": list(self._static_models)})
         return list(self._static_models)
 
-    def cached_model_ids(self) -> list[str]:
-        """Sync accessor used by list_models(): 当前生效白名单（自定义 > 动态 > 静态）。"""
-        return self.effective_model_ids()
-
     # ────────────────────────── account pick ──────────────────────────
 
     async def _pick_account(self, exclude_ids: set[int] | None = None):
@@ -274,21 +271,10 @@ class OpenAICompatProvider:
         elapsed_ms = int((time.time() - t0) * 1000) if t0 else 0
         cache_read, cache_creation = 0, 0
         try:
-            from providers.store_common import extract_cache_tokens
-
             cache_read, cache_creation = extract_cache_tokens(usage_payload)
         except Exception:
             pass
-        _known_cache_keys = (
-            "cache_read_input_tokens",
-            "cache_creation_input_tokens",
-            "prompt_cache_hit_tokens",
-            "prompt_cache_miss_tokens",
-            "prompt_tokens_details",
-        )
-        credit_source = (
-            "live" if usage_payload and any(k in usage_payload for k in _known_cache_keys) else None
-        )
+        credit_source = credit_source_of(usage_payload)
         payload = {
             "api_key_id": (api_key_info or {}).get("id"),
             "api_key_name": (api_key_info or {}).get("name"),
@@ -315,16 +301,7 @@ class OpenAICompatProvider:
             # 流式首帧毫秒（非流式/错误行保持 None）
             "first_token_ms": first_token_ms,
         }
-        try:
-            loop = asyncio.get_running_loop()
-            fut = loop.run_in_executor(None, db.record_request, payload)
-            fut.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
-        except RuntimeError:
-            # No running loop (test harness). Fall back to sync.
-            try:
-                db.record_request(payload)
-            except Exception:
-                pass
+        enqueue_record_request(payload)
 
     # ────────────────────────── non-streaming ─────────────────────────
 

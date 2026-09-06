@@ -269,15 +269,8 @@ async def _stream(body: dict, raw: str, api_key_info, model_name: str) -> AsyncG
 
 
 async def test_chat(account: dict, model: str = "default", prompt: str = "ping") -> dict:
-    payload = {
-        "model": model or "default",
-        "messages": [{"role": "user", "content": prompt or "ping"}],
-        "stream": False,
-        "max_tokens": 64,
-    }
-    t0 = time.time()
-    body, raw = _build_body(payload)
-    try:
+    async def send(payload: dict) -> tuple:
+        body, raw = _build_body(payload)
         headers = _headers_for(account)
         async with httpx.AsyncClient(timeout=45.0) as client:
             response = await client.post(
@@ -285,27 +278,12 @@ async def test_chat(account: dict, model: str = "default", prompt: str = "ping")
                 headers=headers,
                 content=raw,
             )
-    except httpx.HTTPError as exc:
-        return {"ok": False, "status_code": 0, "duration_ms": int((time.time() - t0) * 1000), "message": str(exc)[:240]}
-    duration_ms = int((time.time() - t0) * 1000)
-    if response.status_code >= 400:
-        return {
-            "ok": False,
-            "status_code": response.status_code,
-            "duration_ms": duration_ms,
-            "message": response.text[:400],
-        }
-    try:
-        data = _normalize_completion(response.json())
-    except ValueError:
-        data = {}
-    message_obj = ((data.get("choices") or [{}])[0].get("message") or {})
-    message = message_obj.get("content") or message_obj.get("reasoning_content") or ""
-    return {
-        "ok": True,
-        "status_code": 200,
-        "duration_ms": duration_ms,
-        "model": data.get("model"),
-        "message": str(message)[:240],
-        "usage": data.get("usage") or {},
-    }
+        if response.status_code >= 400:
+            return response.status_code, response.text[:400], None
+        try:
+            data = _normalize_completion(response.json())
+        except ValueError:
+            data = {}
+        return response.status_code, None, data
+
+    return await store_common.run_test_chat(model or "default", prompt or "ping", send)

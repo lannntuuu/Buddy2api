@@ -10,15 +10,12 @@ from storage.http_pool import get_client
 from providers.qclaw.constants import (
     CHANNEL_ID,
     CMD_CREATE_API_KEY,
-    CMD_MODEL_LIST,
     CMD_REFRESH_CHANNEL,
     CMD_TIME_SYNC,
-    CMD_TODAY_TOKENS,
     CMD_USER_INFO,
     CMD_WX_LOGIN,
     CMD_WX_LOGIN_STATE,
     JPRX_GATEWAY,
-    STATIC_MODELS,
     WEB_VERSION,
 )
 from providers.host_override import channel_host
@@ -122,40 +119,6 @@ def apply_new_token(account: dict, new_token: str | None) -> dict:
     updated = dict(account)
     updated["refresh_token"] = new_token
     return updated
-
-
-async def time_sync(account: dict) -> str:
-    data, token = await post_cmd(CMD_TIME_SYNC, account)
-    apply_new_token(account, token)
-    server_time = data.get("server_time")
-    return str(server_time or "")
-
-
-async def list_remote_models(account: dict) -> list[dict]:
-    data, token = await post_cmd(CMD_MODEL_LIST, account)
-    apply_new_token(account, token)
-    rows = data.get("model_status_list") or data.get("models") or []
-    models = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        mid = str(row.get("id") or "").strip()
-        if not mid:
-            continue
-        models.append(
-            {
-                "id": mid,
-                "name": row.get("name") or row.get("display_id") or mid,
-                "description": row.get("description") or "",
-            }
-        )
-    return models or [{"id": item, "name": item} for item in STATIC_MODELS]
-
-
-async def today_tokens(account: dict) -> dict:
-    data, token = await post_cmd(CMD_TODAY_TOKENS, account)
-    apply_new_token(account, token)
-    return data
 
 
 async def refresh_channel(account: dict) -> dict:

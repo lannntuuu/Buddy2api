@@ -15,8 +15,7 @@ from providers.store_common import (
     chromium_os_crypt_key,
     decrypt_chromium_v10,
     dedupe_dirs,
-    discover_summary,
-    existing_uids,
+    discover_dirs,
     imported_file_meta,
     is_relative_to,
     iso_to_ms,
@@ -203,28 +202,16 @@ def write_refreshed_auth(path: Path, patch: dict) -> None:
     os.replace(tmp, path)
 
 
+def _collect_files(folder: Path) -> list[Path]:
+    out = [folder / name for name in ("auth-v2.dat", "auth.dat") if (folder / name).is_file()]
+    json_fallback = folder / "auth-v2.dat.json"
+    if json_fallback.is_file():
+        out.append(json_fallback)
+    return out
+
+
 def discover() -> dict:
-    dirs_info = []
-    files: list[dict] = []
-    existing = existing_uids(CHANNEL_ID)
-    for folder in qwenwork_auth_dirs():
-        exists = folder.is_dir()
-        dirs_info.append({"path": str(folder), "exists": exists, "file_count": 0})
-        if not exists:
-            continue
-        count = 0
-        for name in ("auth-v2.dat", "auth.dat"):
-            path = folder / name
-            if not path.is_file():
-                continue
-            count += 1
-            files.append(_file_meta(path, existing))
-        json_fallback = folder / "auth-v2.dat.json"
-        if json_fallback.is_file():
-            count += 1
-            files.append(_file_meta(json_fallback, existing))
-        dirs_info[-1]["file_count"] = count
-    return discover_summary(CHANNEL_ID, dirs_info, files)
+    return discover_dirs(CHANNEL_ID, qwenwork_auth_dirs(), _collect_files, _file_meta)
 
 
 def _file_meta(path: Path, existing: set[str]) -> dict:

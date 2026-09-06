@@ -500,16 +500,9 @@ async def _stream(raw: str, url: str, request_id: str, upstream_model: str, api_
 
 
 async def test_chat(account: dict, model: str = "qwork-advanced", prompt: str = "ping") -> dict:
-    payload = {
-        "model": model or "qwork-advanced",
-        "messages": [{"role": "user", "content": prompt or "ping"}],
-        "stream": False,
-        "max_tokens": 64,
-    }
-    t0 = time.time()
-    body, raw, upstream_model = build_body(payload)
-    url = chat_url()
-    try:
+    async def send(payload: dict) -> tuple:
+        body, raw, upstream_model = build_body(payload)
+        url = chat_url()
         headers = _headers_for(account, url, raw, upstream_model, str(body["request_id"]))
         chunks: list[dict] = []
         async with httpx.AsyncClient(timeout=45.0) as client:
@@ -517,39 +510,19 @@ async def test_chat(account: dict, model: str = "qwork-advanced", prompt: str = 
                 status = response.status_code
                 if status >= 400:
                     text = (await response.aread()).decode("utf-8", errors="replace")[:400]
-                    return {
-                        "ok": False,
-                        "status_code": status,
-                        "duration_ms": int((time.time() - t0) * 1000),
-                        "message": text,
-                    }
+                    return status, text, None
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"):
                         continue
                     data = line[5:].strip()
                     env_err = envelope_error(data)
                     if env_err:
-                        return {
-                            "ok": False,
-                            "status_code": 400,
-                            "duration_ms": int((time.time() - t0) * 1000),
-                            "message": env_err,
-                        }
+                        return 400, env_err, None
                     for inner in unwrap_sse_payload(data):
                         try:
                             chunks.append(json.loads(inner))
                         except json.JSONDecodeError:
                             continue
-    except httpx.HTTPError as exc:
-        return {"ok": False, "status_code": 0, "duration_ms": int((time.time() - t0) * 1000), "message": str(exc)[:240]}
-    aggregated = _aggregate(chunks, upstream_model)
-    message_obj = ((aggregated.get("choices") or [{}])[0].get("message") or {})
-    message = message_obj.get("content") or message_obj.get("reasoning_content") or ""
-    return {
-        "ok": True,
-        "status_code": 200,
-        "duration_ms": int((time.time() - t0) * 1000),
-        "model": aggregated.get("model"),
-        "message": str(message)[:240],
-        "usage": aggregated.get("usage") or {},
-    }
+        return 200, None, _aggregate(chunks, upstream_model)
+
+    return await store_common.run_test_chat(model or "qwork-advanced", prompt or "ping", send)

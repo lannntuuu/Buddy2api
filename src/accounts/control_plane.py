@@ -711,6 +711,76 @@ async def credit_summary(force: bool = False) -> dict:
     return snap
 
 
+def _workbuddy_rollup(channel: str, provider, accounts: list, resources: list) -> dict:
+    """workbuddy 通道的积分聚合行：资源探明结果按 total_dosage/expiring 求和。"""
+    ok = [row for row in resources if row.get("ok")]
+    remaining = round(sum(float(row.get("total_dosage") or row.get("available_total") or 0) for row in ok), 4)
+    return {
+        "id": channel,
+        "display_name": getattr(provider, "display_name", channel),
+        "unit": "credit",
+        "remaining": remaining,
+        "ok": True,
+        "accounts": len(accounts),
+        "ok_accounts": len(ok),
+        "unsupported": False,
+        "expiring_7d_total": round(sum(float(row.get("expiring_7d_total") or 0) for row in ok), 4),
+        "expiring_30d_total": round(sum(float(row.get("expiring_30d_total") or 0) for row in ok), 4),
+        "package_count": sum(int(row.get("package_count") or 0) for row in ok),
+    }
+
+
+async def _credit_channel_entry(channel: str, provider, accounts: list) -> dict:
+    """非 workbuddy 通道的积分聚合行：逐账号 fetch_quota 后求和。"""
+    fetch_quota = getattr(provider, "fetch_quota", None) if provider else None
+    if fetch_quota is None:
+        return {
+            "id": channel,
+            "display_name": getattr(provider, "display_name", channel) if provider else channel,
+            "unit": "unknown",
+            "remaining": None,
+            "ok": True,
+            "accounts": len(accounts),
+            "unsupported": True,
+            "message": "quota API not available",
+        }
+    remaining_values = []
+    ok_count = 0
+    unsupported = False
+    message = ""
+    snapshots = await _gather_limited(
+        accounts, lambda account: fetch_quota(account), limit=4
+    )
+    for snapshot in snapshots:
+        unit = getattr(snapshot, "unit", None) if not isinstance(snapshot, dict) else snapshot.get("unit")
+        ok = bool(getattr(snapshot, "ok", None) if not isinstance(snapshot, dict) else snapshot.get("ok"))
+        snap_unsupported = bool(
+            getattr(snapshot, "unsupported", False) if not isinstance(snapshot, dict) else snapshot.get("unsupported")
+        )
+        if snap_unsupported:
+            unsupported = True
+            message = (
+                getattr(snapshot, "message", "") if not isinstance(snapshot, dict) else snapshot.get("message") or ""
+            )
+        if ok:
+            ok_count += 1
+        value = getattr(snapshot, "remaining", None) if not isinstance(snapshot, dict) else snapshot.get("remaining")
+        if unit == "credit" and value is not None and not snap_unsupported:
+            remaining_values.append(float(value))
+    remaining = round(sum(remaining_values), 4) if remaining_values else None
+    return {
+        "id": channel,
+        "display_name": getattr(provider, "display_name", channel),
+        "unit": "credit",
+        "remaining": remaining,
+        "ok": True,
+        "accounts": len(accounts),
+        "ok_accounts": ok_count,
+        "unsupported": remaining is None,
+        "message": message or ("no credit balance" if remaining is None else ""),
+    }
+
+
 async def _build_credit_summary(force: bool = False) -> dict:
     channels = []
     workbuddy_resources = []
@@ -726,76 +796,9 @@ async def _build_credit_summary(force: bool = False) -> dict:
                     limit=4,
                 )
             workbuddy_resources = resources
-            ok = [row for row in resources if row.get("ok")]
-            remaining = round(sum(float(row.get("total_dosage") or row.get("available_total") or 0) for row in ok), 4)
-            channels.append(
-                {
-                    "id": channel,
-                    "display_name": getattr(provider, "display_name", channel),
-                    "unit": "credit",
-                    "remaining": remaining,
-                    "ok": True,
-                    "accounts": len(accounts),
-                    "ok_accounts": len(ok),
-                    "unsupported": False,
-                    "expiring_7d_total": round(sum(float(row.get("expiring_7d_total") or 0) for row in ok), 4),
-                    "expiring_30d_total": round(sum(float(row.get("expiring_30d_total") or 0) for row in ok), 4),
-                    "package_count": sum(int(row.get("package_count") or 0) for row in ok),
-                }
-            )
+            channels.append(_workbuddy_rollup(channel, provider, accounts, resources))
             continue
-        fetch_quota = getattr(provider, "fetch_quota", None) if provider else None
-        if fetch_quota is None:
-            channels.append(
-                {
-                    "id": channel,
-                    "display_name": getattr(provider, "display_name", channel) if provider else channel,
-                    "unit": "unknown",
-                    "remaining": None,
-                    "ok": True,
-                    "accounts": len(accounts),
-                    "unsupported": True,
-                    "message": "quota API not available",
-                }
-            )
-            continue
-        remaining_values = []
-        ok_count = 0
-        unsupported = False
-        message = ""
-        snapshots = await _gather_limited(
-            accounts, lambda account: fetch_quota(account), limit=4
-        )
-        for snapshot in snapshots:
-            unit = getattr(snapshot, "unit", None) if not isinstance(snapshot, dict) else snapshot.get("unit")
-            ok = bool(getattr(snapshot, "ok", None) if not isinstance(snapshot, dict) else snapshot.get("ok"))
-            snap_unsupported = bool(
-                getattr(snapshot, "unsupported", False) if not isinstance(snapshot, dict) else snapshot.get("unsupported")
-            )
-            if snap_unsupported:
-                unsupported = True
-                message = (
-                    getattr(snapshot, "message", "") if not isinstance(snapshot, dict) else snapshot.get("message") or ""
-                )
-            if ok:
-                ok_count += 1
-            value = getattr(snapshot, "remaining", None) if not isinstance(snapshot, dict) else snapshot.get("remaining")
-            if unit == "credit" and value is not None and not snap_unsupported:
-                remaining_values.append(float(value))
-        remaining = round(sum(remaining_values), 4) if remaining_values else None
-        channels.append(
-            {
-                "id": channel,
-                "display_name": getattr(provider, "display_name", channel),
-                "unit": "credit",
-                "remaining": remaining,
-                "ok": True,
-                "accounts": len(accounts),
-                "ok_accounts": ok_count,
-                "unsupported": remaining is None,
-                "message": message or ("no credit balance" if remaining is None else ""),
-            }
-        )
+        channels.append(await _credit_channel_entry(channel, provider, accounts))
     now_ts = int(time.time())
     ok_resources = [row for row in workbuddy_resources if row.get("ok")]
     stale_count = sum(1 for row in workbuddy_resources if row.get("stale"))

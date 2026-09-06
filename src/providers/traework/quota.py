@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 
 from providers.protocol import QuotaSnapshot
-from providers.store_common import checkin_row
+from providers.store_common import run_checkin
 from providers.traework.constants import (
     CHANNEL_ID,
     CHECKIN_CLAIM_PATH,
@@ -24,76 +24,29 @@ def _host(account: dict) -> str:
     return str(extra.get("host") or channel_host(CHANNEL_ID, "ug_host", UG_API)).rstrip("/") or UG_API
 
 
-def _checkin_row(account: dict, **kwargs) -> dict:
-    return checkin_row(account, CHANNEL_ID, **kwargs)
+def _checkin_kwargs() -> dict:
+    """run_checkin 的通道差异参数（code_error：data.code != 0 也算业务失败）。
+
+    保持函数形式：client_of 等在调用期从模块命名空间解析，
+    测试对 get_client 的 monkeypatch 接缝不失效。
+    """
+    return {
+        "channel": CHANNEL_ID,
+        "host_of": _host,
+        "headers_of": auth_headers,
+        "client_of": get_client,
+        "status_path": CHECKIN_STATUS_PATH,
+        "claim_path": CHECKIN_CLAIM_PATH,
+        "code_error": True,
+    }
 
 
 async def fetch_checkin(account: dict, force: bool = False) -> dict:
-    url = f"{_host(account)}{CHECKIN_STATUS_PATH}"
-    try:
-        client = get_client()
-        response = await client.post(url, headers=auth_headers(account), json={}, timeout=20.0)
-    except httpx.HTTPError as exc:
-        return _checkin_row(account, ok=False, message=str(exc)[:240])
-    try:
-        data = response.json()
-    except ValueError:
-        data = {}
-    if response.status_code >= 400 or (isinstance(data, dict) and data.get("code") not in (None, 0)):
-        return _checkin_row(
-            account,
-            ok=False,
-            status_code=response.status_code,
-            message=str((data or {}).get("message") or f"HTTP {response.status_code}")[:240],
-        )
-    checked = bool(data.get("checked_in") or data.get("checkedIn"))
-    credit = float(data.get("credits") or data.get("credit") or 0)
-    return _checkin_row(
-        account,
-        ok=True,
-        status_code=response.status_code,
-        already_claimed=checked,
-        today_checked_in=checked,
-        credit=credit,
-        message=str(data.get("message") or "success"),
-        extra={"enable": bool(data.get("enable", True))},
-    )
+    return await run_checkin(account, **_checkin_kwargs())
 
 
 async def claim_checkin(account: dict) -> dict:
-    status = await fetch_checkin(account, force=True)
-    if not status.get("ok"):
-        return status
-    if status.get("already_claimed") or status.get("today_checked_in"):
-        status["already_claimed"] = True
-        status["message"] = "今日已领取"
-        return status
-    url = f"{_host(account)}{CHECKIN_CLAIM_PATH}"
-    try:
-        client = get_client()
-        response = await client.post(url, headers=auth_headers(account), json={}, timeout=30.0)
-    except httpx.HTTPError as exc:
-        return _checkin_row(account, ok=False, message=str(exc)[:240])
-    try:
-        data = response.json()
-    except ValueError:
-        data = {}
-    if response.status_code >= 400 or (isinstance(data, dict) and data.get("code") not in (None, 0)):
-        return _checkin_row(
-            account,
-            ok=False,
-            status_code=response.status_code,
-            message=str((data or {}).get("message") or f"HTTP {response.status_code}")[:240],
-        )
-    credit = float(data.get("credits") or data.get("credit") or status.get("credit") or 0)
-    return _checkin_row(
-        account,
-        ok=True,
-        status_code=response.status_code,
-        claimed=True,
-        credit=credit,
-        message=str(data.get("message") or "success"),
-    )
+    return await run_checkin(account, claim=True, **_checkin_kwargs())
 
 
 async def fetch_quota(account: dict) -> QuotaSnapshot:
