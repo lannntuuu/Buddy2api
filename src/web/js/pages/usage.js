@@ -12,7 +12,7 @@ export default {props:['token','toast'],setup(p){
   const channelModels=ref({});
   function rangePreset(k){f.range=k;if(k!=='custom'){f.days=Number(k);f.start='';f.end=''}else{f.days=null}load()}
   function onProviderChange(){f.model='';load()}
-  async function loadChannels(){try{const ch=await api.get('/admin/channels',p.token);channels.value=ch.channels||[]}catch(e){channels.value=[]}}
+  async function loadChannels(){await p.ensureChannels(p.token);channels.value=p.sharedChannels.value||[]}
   async function loadProviderModels(channel){if(!channel)return;try{const r=await api.get('/admin/channels/'+channel+'/models',p.token);channelModels.value={...channelModels.value,[channel]:r.models||[]}}catch(e){channelModels.value={...channelModels.value,[channel]:[]}}}
   function qs(){const u=new URLSearchParams();if(f.provider)u.set('provider',f.provider);if(f.model)u.set('model',f.model);if(f.range==='custom'){if(f.start)u.set('start_date',f.start);if(f.end)u.set('end_date',f.end)}else u.set('days',f.days!=null?f.days:Number(f.range)||7);return u.toString()}
   async function load(){ld.value=true;err.value='';try{if(f.provider&&!channelModels.value[f.provider])await loadProviderModels(f.provider);data.value=await api.get('/admin/provider-model-usage?'+qs(),p.token)}catch(e){let msg=apiErr(e,'用量加载失败');try{const r=await fetch('/admin/provider-model-usage?'+qs(),{headers:p.token?{Authorization:'Bearer '+p.token}:{},credentials:'same-origin'});if(r.status===400){const j=await r.json();msg=j.detail||msg}}catch(_){}err.value=msg;data.value=null}ld.value=false}

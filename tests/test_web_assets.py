@@ -319,3 +319,16 @@ def test_css_covers_all_used_classes() -> None:
                 used.update(re.findall(r"[{,\s]([a-zA-Z][a-zA-Z0-9_-]*):", seg))
     missing = sorted(c for c in used if c not in css_classes and c not in NO_CSS_WHITELIST)
     assert not missing, f"classes used in templates/JS but missing in app.css: {missing}"
+
+def test_shared_channels_store():
+    """WS-E:跨页通道下拉单飞缓存 + 通道健康徽标消费。"""
+    app_js = _read(Path("src/web/js") / "app.js")
+    assert "ensureChannels" in app_js and "sharedChannels" in app_js
+    assert "invalidateChannels" in app_js
+    usage_js = _read(Path("src/web/js/pages") / "usage.js")
+    assert "ensureChannels" in usage_js
+    keys_js = _read(Path("src/web/js/pages") / "keys.js")
+    assert "ensureChannels" in keys_js
+    channels_js = _read(Path("src/web/js/pages") / "channels.js")
+    assert "/admin/channel-health" in channels_js
+    assert "healthClass" in channels_js and "health-dot" in channels_js

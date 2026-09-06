@@ -19,7 +19,7 @@ export default {props:['token','toast'],setup(p){
     try{
       l.value=await api.get('/admin/api-keys',p.token);
       // 通道下拉数据只在首次拉取,避免每次刷新列表都连带请求(spec WS-3 §3)
-      if(!channels.value.length){try{const ch=await api.get('/admin/channels',p.token);if(ch.channels?.length)channels.value=ch.channels.filter(c=>c.enabled)}catch(e){}}
+      if(!channels.value.length){await p.ensureChannels(p.token);channels.value=(p.sharedChannels.value||[]).filter(c=>c.enabled)}
     }catch(e){p.toast(apiErr(e,'加载失败'),'err')}
     ld.value=false
   }

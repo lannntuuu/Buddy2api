@@ -45,6 +45,17 @@ createApp({
       setTimeout(()=>dismiss(id),err?TOAST_ERR_MS:TOAST_OK_MS);
     }
     function toastGo(x){if(!x||!x.action)return;dismiss(x.id);go(x.action.page)}
+    // 跨页共享的通道下拉数据:各页形状不同,拉取与缓存统一在这里(INFLIGHT 去重)
+    const sharedChannels=ref(null);
+    let sharedChannelsInflight=null;
+    async function ensureChannels(token){
+      if(sharedChannels.value)return sharedChannels.value;
+      if(!sharedChannelsInflight){
+        sharedChannelsInflight=(async()=>{try{const ch=await api.get('/admin/channels',token);sharedChannels.value=ch.channels||[]}catch(_){sharedChannels.value=[]}finally{sharedChannelsInflight=null}return sharedChannels.value})();
+      }
+      return sharedChannelsInflight;
+    }
+    function invalidateChannels(){sharedChannels.value=null}
     function syncHash(k){const nh='#/'+k;if((location.hash||'')!==nh){try{location.hash=nh}catch(_){}}}
     function go(k){page.value=k;try{localStorage.setItem('cb_gw_page_v2',k)}catch(_){}syncHash(k)}
     window.addEventListener('hashchange',()=>{
@@ -60,7 +71,7 @@ createApp({
     const nav=[{k:'dashboard',l:'运行总览',i:I.dash},{k:'channels',l:'通道管理',i:I.cpu},{k:'models',l:'模型配置',i:I.tokens},{k:'keys',l:'API Keys',i:I.key},{k:'usage',l:'用量统计',i:I.tokens},{k:'logs',l:'请求日志',i:I.log},{k:'quota',l:'额度与积分',i:I.wallet},{k:'setup',l:'接入指南',i:I.scan},{k:'settings',l:'设置',i:I.gear}];
     const railOpen=ref(localStorage.getItem('cb_gw_rail')==='expanded');
     function toggleRail(){railOpen.value=!railOpen.value;try{localStorage.setItem('cb_gw_rail',railOpen.value?'expanded':'collapsed')}catch(_){}}
-    return{page,token,toasts,meta,metaTag,theme,toggleTheme,tf,dismiss,toastGo,go,saveToken,hardRefresh,nav,railOpen,toggleRail,I}
+    return{page,token,toasts,meta,metaTag,theme,toggleTheme,tf,dismiss,toastGo,go,saveToken,hardRefresh,nav,railOpen,toggleRail,I,sharedChannels,ensureChannels,invalidateChannels}
   },
   template:`
   <div class="shell">
