@@ -119,22 +119,23 @@ def test_startup_does_not_import_by_default(isolated_db, monkeypatch):
 
 def test_credit_rate_default_and_override(isolated_db, monkeypatch):
     monkeypatch.setenv("CB_GATEWAY_PROVIDERS", "workbuddy,traesolo")
-    # 默认换算率
-    view = control_plane.channel_model_view("traesolo")
-    assert view["credit_rate"] == 1000.0
-    assert view["credit_rate_default"] == 1000.0
-    assert view["credit_rate_customized"] is False
-
-    # 自定义换算率
-    control_plane.set_channel_models("traesolo", credit_rate=250.0, set_rate=True)
+    # 默认换算率:traesolo 有专属默认 250.0(model_config.TRAESOLO_DEFAULT_CREDIT_RATE,
+    # 与 traesolo/chat.py 的 or 250.0 回退一致;此前断言 1000.0 为过时口径)
     view = control_plane.channel_model_view("traesolo")
     assert view["credit_rate"] == 250.0
+    assert view["credit_rate_default"] == 250.0
+    assert view["credit_rate_customized"] is False
+
+    # 自定义换算率(与默认不同的值,保证覆盖断言有意义)
+    control_plane.set_channel_models("traesolo", credit_rate=1000.0, set_rate=True)
+    view = control_plane.channel_model_view("traesolo")
+    assert view["credit_rate"] == 1000.0
     assert view["credit_rate_customized"] is True
 
     # 重置回默认
     control_plane.set_channel_models("traesolo", credit_rate=None, set_rate=True)
     view = control_plane.channel_model_view("traesolo")
-    assert view["credit_rate"] == 1000.0
+    assert view["credit_rate"] == 250.0
     assert view["credit_rate_customized"] is False
 
 
