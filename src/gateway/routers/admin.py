@@ -228,6 +228,34 @@ def _apply_definition_with_key(
     return result
 
 
+def _sync_channel_overrides(definition: dict) -> None:
+    """Mirror a custom-channel definition's models/aliases into the
+    `<cid>.models` / `<cid>.aliases` override keys the 模型配置 page reads.
+
+    Two entry points used to write the same two fields (channel form →
+    definition, models page → override key) with the override key winning at
+    runtime — editing one silently diverged from the other. Writing BOTH on
+    every channel-form save keeps them the single same source of truth; the
+    models page keeps working unchanged (it overwrites the same keys).
+    """
+    cid = str(definition.get("id") or "").strip()
+    if not cid:
+        return
+    try:
+        models = definition.get("models")
+        if isinstance(models, list):
+            db.set_setting(f"{cid}.models", [str(m) for m in models if str(m).strip()])
+        aliases = definition.get("aliases")
+        if isinstance(aliases, dict):
+            db.set_setting(
+                f"{cid}.aliases",
+                {str(k).strip(): str(v).strip() for k, v in aliases.items()
+                 if str(k).strip() and str(v).strip()},
+            )
+    except Exception:
+        pass  # sync is best-effort; the definition itself remains authoritative
+
+
 @router_obj.get("/admin/channels/custom")
 async def admin_list_custom_channels(authorization: str | None = Header(default=None)):
     _check_admin(authorization)
@@ -310,6 +338,7 @@ async def admin_create_custom_channel(
         pass
 
     stored = custom_channels.upsert_definition(definition_to_save)
+    _sync_channel_overrides(stored)
     out = _public_definition(stored)
     out["status"] = "ok"
     out["account"] = {
@@ -394,6 +423,7 @@ async def admin_update_custom_channel(
         upsert_result = await run_in_threadpool(_apply_definition_with_key, merged, api_key)
 
     stored = custom_channels.upsert_definition(merged)
+    _sync_channel_overrides(stored)
     out = _public_definition(stored)
     out["status"] = "ok"
     if api_key_present and api_key:
@@ -418,18 +448,15 @@ async def admin_delete_custom_channel(
 ):
     """Remove a custom-channel definition. Set every account row for this
     provider to status='inactive' so the dispatcher stops using it (D6 —
-    keep logs). Refuse to delete seed channels; the admin should disable
-    them via the standard toggle."""
+    keep logs). Seed channels (gmi / bailian) are deletable too: deleting
+    leaves the settings key as an empty list, which is distinct from
+    "absent", so seed_initial_definitions() will NOT resurrect them on the
+    next boot."""
     _check_admin(authorization)
     cid = str(cid or "").strip()
     existing = custom_channels.get_definition(cid)
     if existing is None:
         raise HTTPException(status_code=404, detail=f"channel '{cid}' not found")
-    if existing.get("source") == "seed":
-        raise HTTPException(
-            status_code=409,
-            detail=f"channel '{cid}' is seeded and cannot be deleted; disable via the channel toggle",
-        )
 
     # Inactive every account row (preserve rows for log forensics, D6).
     inactive_count = 0
