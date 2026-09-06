@@ -307,6 +307,28 @@ def list_accounts(*, provider: Optional[str] = None) -> list[dict]:
     return [_account_dict(r) for r in rows]
 
 
+def list_accounts_summary() -> list[dict]:
+    """管理台账号列表专用:不做凭据解密。
+
+    状态摘要(get_account_status)只消费明文列(expires_at/credit 系/计数),
+    此前每次列表都全量解密三段凭据纯属浪费。与 list_accounts 的差异:
+    CREDENTIAL_FIELDS 不回传、extra 不解析,因此无法产出 credential_error。
+    """
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM accounts ORDER BY id").fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        account = dict(r)
+        for field in CREDENTIAL_FIELDS:
+            account.pop(field, None)
+        account["extra"] = {}
+        if not account.get("provider"):
+            account["provider"] = "workbuddy"
+        out.append(account)
+    return out
+
+
 def get_active_accounts(provider: str = "workbuddy") -> list[dict]:
     if not provider:
         raise ValueError("get_active_accounts requires provider")

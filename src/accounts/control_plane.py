@@ -661,6 +661,37 @@ async def _channel_accounts(channel: str, status: str = "active") -> list[dict]:
     return rows
 
 
+async def fetch_resources_batch(
+    account_ids: Optional[list[int]] = None,
+    force: bool = False,
+    max_age_seconds: int = 60,
+) -> dict:
+    """批量刷新账号额度(POST /admin/accounts/resources/batch)。
+
+    缺省覆盖全部账号(前端额度页一次请求替代 N 个);并发限 4;
+    单账号失败逐条 ok=False 带错误信息,不整体 500。
+    """
+    from gateway.deps import _gather_limited
+
+    wanted = {int(a) for a in (account_ids or [])}
+    accounts = await asyncio.to_thread(db.list_accounts)
+    if wanted:
+        accounts = [a for a in accounts if a.get("id") in wanted]
+    if not accounts:
+        return {"ok": True, "results": []}
+
+    async def _safe(account: dict) -> dict:
+        try:
+            return await auth_manager.fetch_account_resources(
+                account, force=force, max_age_seconds=max_age_seconds
+            )
+        except Exception as exc:  # 单账号失败逐条返回,不整体 500
+            return {"ok": False, "account_id": account.get("id"), "error": str(exc)[:240]}
+
+    results = await _gather_limited(accounts, _safe, limit=4)
+    return {"ok": True, "results": results}
+
+
 async def credit_summary(force: bool = False) -> dict:
     """结果级缓存 + SWR 的入口；真实构建逻辑在 _build_credit_summary。"""
     if not _CREDIT_SUMMARY_TTL:

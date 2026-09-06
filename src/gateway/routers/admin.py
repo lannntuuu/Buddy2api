@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import secrets
 from pathlib import Path
@@ -11,7 +12,14 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+logger = logging.getLogger("buddy2api.admin")
+
 from storage import database as db
+from storage.repos.accounts import list_accounts_summary as _list_accounts_summary
+from storage.repos.api_keys import (
+    get_api_key_by_id as _get_api_key_by_id,
+    get_api_key_secret as _get_api_key_secret,
+)
 import providers
 from providers import custom_channels
 from accounts import auth_manager
@@ -499,7 +507,7 @@ async def admin_set_channel_models(
     set_rate = "credit_rate" in data
     set_reasoning = "reasoning" in data
     try:
-        return await run_in_threadpool(
+        result = await run_in_threadpool(
             control_plane.set_channel_models,
             channel,
             models=data.get("models") if set_models else None,
@@ -513,6 +521,14 @@ async def admin_set_channel_models(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # 契约:保存后回传生效模型 id 列表,前端据此本地回写,免去整表刷新
+    try:
+        view = await run_in_threadpool(control_plane.channel_model_view, channel)
+        result = dict(result or {})
+        result["models"] = view.get("models") or []
+    except Exception:
+        logger.debug("channel_model_view failed after set", exc_info=True)
+    return result
 
 
 @router_obj.post("/admin/channels/{channel}/models/refresh")
@@ -666,25 +682,31 @@ async def admin_credit_summary(
 # Accounts
 # ============================================================
 
+def _account_row(account: dict | None):
+    """GET /admin/accounts 行组装(状态摘要 + 管理字段);列表与写操作返回行对象共用。"""
+    if account is None:
+        return None
+    s = auth_manager.get_account_status(account)
+    s["phone"] = account.get("phone", "")
+    s["account_type"] = account.get("account_type", "")
+    s["enterprise_id"] = account.get("enterprise_id", "")
+    s["domain"] = account.get("domain", "")
+    s["weight"] = int(account.get("weight") or 1)
+    s["priority"] = int(account.get("priority") or 0)
+    s["credit_limit"] = float(account.get("credit_limit") or 0)
+    s["provider"] = account.get("provider") or "workbuddy"
+    if account.get("credential_error"):
+        s["credential_error"] = account["credential_error"]
+    return s
+
+
 @router_obj.get("/admin/accounts")
 async def admin_list_accounts(authorization: str | None = Header(default=None)):
     _check_admin(authorization)
-    accounts = await run_in_threadpool(db.list_accounts)
-    result = []
-    for a in accounts:
-        s = auth_manager.get_account_status(a)
-        s["phone"] = a.get("phone", "")
-        s["account_type"] = a.get("account_type", "")
-        s["enterprise_id"] = a.get("enterprise_id", "")
-        s["domain"] = a.get("domain", "")
-        s["weight"] = int(a.get("weight") or 1)
-        s["priority"] = int(a.get("priority") or 0)
-        s["credit_limit"] = float(a.get("credit_limit") or 0)
-        s["provider"] = a.get("provider") or "workbuddy"
-        if a.get("credential_error"):
-            s["credential_error"] = a["credential_error"]
-        result.append(s)
-    return result
+    # summary 免凭据解密:状态摘要只消费明文列(repos.accounts.list_accounts_summary);
+    # 代价是列表不再产出 credential_error 标记。
+    accounts = await run_in_threadpool(_list_accounts_summary)
+    return [_account_row(a) for a in accounts]
 
 
 @router_obj.get("/admin/accounts/discover")
@@ -768,7 +790,13 @@ async def admin_add_account(
             result = {"id": aid, "updated": False}
         else:
             result = upsert(parsed)
-        return {"id": result["id"], "status": "ok", "updated": result["updated"], "provider": provider_id}
+        row = await run_in_threadpool(
+            lambda: _account_row(db.get_account(result["id"]))
+        )
+        return {
+            "id": result["id"], "status": "ok", "ok": True,
+            "updated": result["updated"], "provider": provider_id, "account": row,
+        }
     # Paste raw auth JSON directly
     auth_data = data.get("auth", {})
     account_data = data.get("account", {})
@@ -791,7 +819,8 @@ async def admin_add_account(
     if not parsed["access_token"]:
         raise HTTPException(status_code=400, detail="No accessToken found in auth data")
     aid = db.add_account(parsed)
-    return {"id": aid, "status": "ok"}
+    row = await run_in_threadpool(lambda: _account_row(db.get_account(aid)))
+    return {"id": aid, "status": "ok", "ok": True, "account": row}
 
 
 @router_obj.post("/admin/qclaw/import-path")
@@ -877,7 +906,8 @@ async def admin_update_account(
     if "weight" in update_data and update_data["weight"] < 1:
         raise HTTPException(status_code=400, detail="weight must be at least 1")
     db.update_account(aid, update_data)
-    return {"status": "ok"}
+    row = await run_in_threadpool(lambda: _account_row(db.get_account(aid)))
+    return {"status": "ok", "ok": True, "account": row}
 
 
 @router_obj.delete("/admin/accounts/{aid}")
@@ -889,6 +919,30 @@ async def admin_delete_account(
     db.delete_account(aid)
     control_plane.invalidate_credit_summary_cache()
     return {"status": "ok"}
+
+
+@router_obj.post("/admin/accounts/resources/batch")
+async def admin_resources_batch(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """批量刷新账号额度。body 可选 {"account_ids": [..], "force": bool,
+    "max_age_seconds": int};缺省刷全部账号。单账号失败逐条返回,不整体 500。"""
+    _check_admin(authorization)
+    data = await _read_json_object(request, allow_empty=True)
+    ids = data.get("account_ids")
+    if ids is not None and (
+        not isinstance(ids, list) or not all(isinstance(i, int) for i in ids)
+    ):
+        raise HTTPException(status_code=400, detail="account_ids must be an array of integers")
+    force = bool(data.get("force") or False)
+    try:
+        max_age_seconds = max(0, int(data.get("max_age_seconds", 60)))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="max_age_seconds must be an integer")
+    return await control_plane.fetch_resources_batch(
+        ids, force=force, max_age_seconds=max_age_seconds
+    )
 
 
 @router_obj.post("/admin/accounts/{aid}/refresh")
@@ -1162,7 +1216,24 @@ async def admin_traesolo_login_complete(
 @router_obj.get("/admin/api-keys")
 async def admin_list_keys(authorization: str | None = Header(default=None)):
     _check_admin(authorization)
-    return db.list_api_keys(include_secret=True)
+    # 列表不再携带明文(此前 include_secret=True 把 key_secret/key 全量回传);
+    # 需要 明文 的场景走 GET /admin/api-keys/{kid}/reveal 按需取一次。
+    return db.list_api_keys()
+
+
+@router_obj.get("/admin/api-keys/{kid}/reveal")
+async def admin_reveal_key(kid: int, authorization: str | None = Header(default=None)):
+    """按需返回单个 Key 明文。全仓库唯一返回明文的端点。"""
+    _check_admin(authorization)
+    row = await run_in_threadpool(_get_api_key_by_id, kid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    key = await run_in_threadpool(_get_api_key_secret, kid)
+    if key is None:
+        raise HTTPException(
+            status_code=400, detail="旧版本只保存了哈希,无法还原原始 Key"
+        )
+    return {"ok": True, "key": key}
 
 
 @router_obj.post("/admin/api-keys")
@@ -1221,7 +1292,10 @@ async def admin_update_key(
     ):
         raise HTTPException(status_code=400, detail="allowed_models must be an array of strings")
     db.update_api_key(kid, data)
-    return {"status": "ok"}
+    row = await run_in_threadpool(_get_api_key_by_id, kid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    return {"status": "ok", "ok": True, "key": row}
 
 
 @router_obj.delete("/admin/api-keys/{kid}")
