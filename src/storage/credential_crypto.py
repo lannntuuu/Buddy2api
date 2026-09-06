@@ -82,29 +82,6 @@ def _get_fernet(db_path: Path) -> Fernet:
         return _fernet
 
 
-def _dpapi_encrypt(data: bytes) -> bytes:
-    from ctypes import wintypes
-
-    class DataBlob(ctypes.Structure):
-        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
-
-    source_buffer = ctypes.create_string_buffer(data)
-    source = DataBlob(len(data), ctypes.cast(source_buffer, ctypes.POINTER(ctypes.c_char)))
-    output = DataBlob()
-    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
-    crypt32.CryptProtectData.argtypes = [
-        ctypes.POINTER(DataBlob), ctypes.c_wchar_p, ctypes.POINTER(DataBlob),
-        ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(DataBlob),
-    ]
-    crypt32.CryptProtectData.restype = wintypes.BOOL
-    if not crypt32.CryptProtectData(ctypes.byref(source), None, None, None, None, 0x1, ctypes.byref(output)):
-        raise CredentialCryptoError(f"DPAPI encryption failed with error {ctypes.get_last_error()}")
-    try:
-        return ctypes.string_at(output.pbData, output.cbData)
-    finally:
-        ctypes.windll.kernel32.LocalFree(output.pbData)
-
-
 def _dpapi_decrypt(data: bytes) -> bytes:
     from ctypes import wintypes
 
