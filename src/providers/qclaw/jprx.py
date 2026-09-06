@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-import httpx
+import json
+
+from storage import database as db
+from storage.http_pool import get_client
 
 from providers.qclaw.constants import (
     CHANNEL_ID,
@@ -90,14 +93,12 @@ async def post_cmd(
     *,
     timeout: float = 30.0,
 ) -> tuple[dict, str | None]:
-    import json as json_lib
-
     payload = business_body(extra)
-    body = json_lib.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     url = f"{channel_host(CHANNEL_ID, 'jprx_gateway', JPRX_GATEWAY)}/data/{cmd}/forward"
     headers = build_headers(account, body)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(url, headers=headers, content=body)
+    client = get_client()
+    response = await client.post(url, headers=headers, content=body, timeout=timeout)
     new_token = response.headers.get("X-New-Token")
     try:
         parsed = response.json()
@@ -111,7 +112,6 @@ async def post_cmd(
 def apply_new_token(account: dict, new_token: str | None) -> dict:
     if not new_token:
         return account
-    from storage import database as db
 
     aid = account.get("id")
     if aid:
@@ -167,8 +167,6 @@ async def refresh_channel(account: dict) -> dict:
         extra["openclaw_channel_token"] = channel_token
         aid = account.get("id")
         if aid:
-            from storage import database as db
-
             db.update_account(int(aid), {"extra": extra})
     return data
 

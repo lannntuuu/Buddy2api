@@ -11,7 +11,8 @@ from typing import AsyncGenerator
 import httpx
 
 from accounts import auth_manager
-from storage import database as db
+from storage.http_pool import get_client
+from providers import store_common
 from providers.model_config import channel_aliases, channel_model_ids
 from providers.traework.constants import (
     AGENT_API,
@@ -22,16 +23,25 @@ from providers.traework.constants import (
     SESSIONS_PATH,
     STATIC_MODELS,
 )
-from providers.traework.token import TraeWorkAuthError, auth_headers, is_token_expired, refresh_account
+from providers.traework.token import TraeWorkAuthError, auth_headers, refresh_account
+from providers.trae_shared import pick_with_refresh_fallback
 from providers.host_override import channel_host
 
-# 持有最近一次后台清理（删会话 / 关连接）的任务引用，避免被 GC 提前回收。
-_bg_close: asyncio.Task | None = None
+# 后台收尾任务（删会话 / 关连接）的引用集合：持强引用避免被 GC 提前回收，
+# 任务完成即通过 done_callback 自动移除（旧实现只留最后一个引用且从不清理）。
+_bg_close_tasks: set[asyncio.Task] = set()
 
 
-def translate_model(model: str) -> str:
-    inner = (model or "auto").strip() or "auto"
-    return channel_aliases(CHANNEL_ID, ALIASES).get(inner, inner)
+def _spawn_bg_close(coro) -> None:
+    task = asyncio.create_task(coro)
+    _bg_close_tasks.add(task)
+    task.add_done_callback(_bg_close_tasks.discard)
+
+
+# 与 qclaw / qwenwork 的同名单行拷贝收敛：见 store_common.make_translator
+translate_model = store_common.make_translator(
+    lambda: channel_aliases(CHANNEL_ID, ALIASES), "auto"
+)
 
 
 def accepts_model(inner: str) -> bool:
@@ -204,54 +214,19 @@ def _openai_json(model: str, text: str, finish: str = "stop") -> dict:
 
 
 async def _pick(tried: set[int]) -> dict | None:
-    account = auth_manager.pick_account(tried, provider=CHANNEL_ID)
-    if account:
-        if is_token_expired(account):
-            try:
-                return await refresh_account(account)
-            except Exception:
-                pass
-        else:
-            return account
-    expired = [
-        row
-        for row in db.list_accounts(provider=CHANNEL_ID)
-        if row.get("status") == "expired" and row.get("id") not in tried
-    ]
-    for row in expired:
-        try:
-            return await refresh_account(row)
-        except Exception:
-            continue
-    return None
+    # 兜底收敛到共享实现（含 refresh 失败 60s 负缓存），与 qwenwork 同源
+    return await pick_with_refresh_fallback(CHANNEL_ID, refresh_account, exclude_ids=tried)
 
 
-def _log(api_key_info, account, model_name, stream, finish, status, error, t0):
-    try:
-        db.record_request(
-            {
-                "api_key_id": api_key_info["id"] if api_key_info else None,
-                "api_key_name": api_key_info["name"] if api_key_info else None,
-                "account_id": account["id"] if account else None,
-                "account_name": account.get("name") if account else None,
-                "provider": CHANNEL_ID,
-                "model": model_name,
-                "stream": 1 if stream else 0,
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-                "credit": 0,
-                "finish_reason": finish,
-                "duration_ms": int((time.time() - t0) * 1000),
-                "status_code": status,
-                "error_msg": error,
-                "increment_usage": True,
-                "client": (api_key_info or {}).get("_client_tag"),
-                "client_version": (api_key_info or {}).get("_client_version"),
-            }
-        )
-    except Exception:
-        pass
+async def _log(api_key_info, account, model_name, stream, finish, status, error, t0):
+    # 落库线程化 + 语义收敛：见 store_common.log_request（三家 _log 的一份实现）。
+    # TraeWork 上游不回报 token，usage 传 None（tokens/credit 记 0）。
+    await store_common.log_request(
+        api_key_info, account,
+        channel=CHANNEL_ID, model=model_name, stream=stream, usage=None,
+        finish_reason=finish, status_code=status,
+        duration_ms=int((time.time() - t0) * 1000), error_msg=error,
+    )
 
 
 async def _turn(
@@ -269,31 +244,33 @@ async def _turn(
     headers = auth_headers(account)
     session_url = f"{channel_host(CHANNEL_ID, 'agent_host', AGENT_API)}{SESSIONS_PATH}"
     sid = ""
-    client = httpx.AsyncClient(timeout=timeout)
+    # 复用进程级共享连接池，超时按请求传参；绝不 aclose 共享 client。
+    client = get_client()
     task: asyncio.Task | None = None
     closed = False
 
     async def _close_session() -> None:
         if sid:
             try:
-                await client.delete(f"{session_url}/{sid}", headers=headers)
+                await client.delete(f"{session_url}/{sid}", headers=headers, timeout=timeout)
             except Exception:
                 pass
 
     async def _close_client() -> None:
         # 幂等：成功/失败/外层兜底可能多次触达，只真正执行一次。
+        # client 是共享池的连接，这里只清会话，不做 aclose。
         nonlocal closed
         if closed:
             return
         closed = True
         await _close_session()
-        await client.aclose()
 
     try:
         created = await client.post(
             session_url,
             headers=headers,
             json={"mode": SESSION_MODE, "auto_create_project": True, "origin": "web"},
+            timeout=timeout,
         )
         if created.status_code >= 400:
             raise TraeWorkAuthError(f"create session HTTP {created.status_code}")
@@ -314,6 +291,7 @@ async def _turn(
                     "GET",
                     f"{session_url}/{sid}/events",
                     headers={**headers, "Accept": "text/event-stream"},
+                    timeout=timeout,
                 ) as response:
                     if response.status_code >= 400:
                         finished.set()
@@ -366,6 +344,7 @@ async def _turn(
                     "agent_id": AGENT_ID,
                     "agent_type": AGENT_ID,
                 },
+                timeout=timeout,
             )
             payload = sent.json() if sent.content else {}
             if sent.status_code >= 400 or payload.get("code") not in (None, 0):
@@ -374,21 +353,20 @@ async def _turn(
                 await asyncio.wait_for(finished.wait(), timeout=timeout)
             except asyncio.TimeoutError:
                 pass
-            messages = await client.get(f"{session_url}/{sid}/messages", headers=headers)
+            messages = await client.get(f"{session_url}/{sid}/messages", headers=headers, timeout=timeout)
             body = messages.json() if messages.content else {}
             items = ((body.get("data") or {}).get("items") or [])
             text = extract_assistant_text(items) or "\n".join(dict.fromkeys(pieces)).strip()
             if not text:
                 raise TraeWorkAuthError("TraeWork turn finished without assistant text")
-            # 成功路径：读流任务收尾后，会话删除 + 连接关闭放到后台，
+            # 成功路径：读流任务收尾后，会话删除放到后台（连接属共享池无需关闭），
             # 不阻塞对客户端的响应（省 ~150ms 尾延迟）。
             task.cancel()
             try:
                 await task
             except BaseException:
                 pass
-            global _bg_close
-            _bg_close = asyncio.create_task(_close_client())
+            _spawn_bg_close(_close_client())
             return text
         except BaseException:
             # 失败路径：同步清理，会话删除尽量做到，再抛出。
@@ -427,12 +405,12 @@ async def _run_turn(
         try:
             text = await _turn(account, prompt, model, timeout=timeout, on_thinking=on_thinking)
             auth_manager.mark_account_success(account["id"])
-            _log(api_key_info, account, client_model, stream, "stop", 200, "", t0)
+            await _log(api_key_info, account, client_model, stream, "stop", 200, "", t0)
             return "ok", text
         except TraeWorkAuthError as exc:
             auth_manager.mark_account_failure(account["id"], 503)
             last_error = ("error", (503, {"error": {"message": str(exc)[:240], "type": "server_error"}}))
-            _log(api_key_info, account, client_model, stream, "error", 503, str(exc)[:240], t0)
+            await _log(api_key_info, account, client_model, stream, "error", 503, str(exc)[:240], t0)
             continue
         except httpx.HTTPError as exc:
             auth_manager.mark_account_failure(account["id"], 503)
@@ -511,7 +489,7 @@ async def _stream_chat(
     async def on_thinking(fragment: str) -> None:
         queue.put_nowait(fragment)
 
-    turn_task = asyncio.get_event_loop().create_task(
+    turn_task = asyncio.create_task(
         _run_turn(prompt, model, client_model, api_key_info, stream=True, on_thinking=on_thinking)
     )
     emitted: list[str] = []  # 完整片段（供最终答案去重判断）

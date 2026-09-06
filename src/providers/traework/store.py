@@ -8,6 +8,7 @@ from pathlib import Path
 
 from storage.credential_crypto import CredentialCryptoError
 from providers.store_common import (
+    dedupe_dirs,
     discover_summary,
     existing_uids,
     imported_file_meta,
@@ -42,14 +43,7 @@ def traework_auth_dirs() -> list[Path]:
     if explicit:
         dirs.append(Path(explicit).expanduser())
     dirs.append(traework_user_data_dir() / "User" / "globalStorage")
-    seen: set[str] = set()
-    out: list[Path] = []
-    for item in dirs:
-        key = str(item)
-        if key not in seen:
-            seen.add(key)
-            out.append(item)
-    return out
+    return dedupe_dirs(dirs)
 
 
 def _read_storage(path: Path) -> dict:

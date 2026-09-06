@@ -9,6 +9,7 @@ from pathlib import Path
 
 from providers.qclaw.constants import CHANNEL_ID, CLIENT_VERSION
 from providers.store_common import (
+    dedupe_dirs,
     file_meta,
     chromium_os_crypt_key,
     decrypt_chromium_v10,
@@ -34,15 +35,7 @@ def qclaw_auth_dirs() -> list[Path]:
     if explicit:
         dirs.append(Path(explicit).expanduser())
     dirs.append(qclaw_user_data_dir())
-    # Deduplicate while preserving order.
-    seen: set[str] = set()
-    out: list[Path] = []
-    for item in dirs:
-        key = str(item)
-        if key not in seen:
-            seen.add(key)
-            out.append(item)
-    return out
+    return dedupe_dirs(dirs)
 
 
 def _chromium_os_crypt_key(local_state: dict) -> bytes:

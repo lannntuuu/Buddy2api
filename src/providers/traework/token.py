@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import os
 import time
-import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from providers.trae_shared import extra_of, is_token_expired
 from providers.traework.constants import (
     CHANNEL_ID,
     CLIENT_ID,
@@ -18,22 +18,11 @@ from providers.traework.constants import (
 )
 from providers.traework.store import iso_to_ms
 from providers.host_override import channel_host
+from storage.http_pool import get_client
 
 
 class TraeWorkAuthError(RuntimeError):
     pass
-
-
-def is_token_expired(account: dict, skew_ms: int = 300_000) -> bool:
-    expires_at = int(account.get("expires_at") or 0)
-    if expires_at <= 0:
-        return False
-    return time.time() * 1000 >= expires_at - skew_ms
-
-
-def extra_of(account: dict) -> dict:
-    extra = account.get("extra") if isinstance(account.get("extra"), dict) else {}
-    return extra
 
 
 def auth_headers(account: dict) -> dict[str, str]:
@@ -126,8 +115,8 @@ async def refresh_account(account: dict) -> dict:
         "IDEVersion": IDE_VERSION,
     }
     url = f"{_host(account)}{EXCHANGE_PATH}"
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(url, headers=oauth_headers(access), json=body)
+    client = get_client()
+    response = await client.post(url, headers=oauth_headers(access), json=body, timeout=30.0)
     if response.status_code >= 400:
         raise TraeWorkAuthError(f"ExchangeToken failed: HTTP {response.status_code}")
     try:

@@ -7,10 +7,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def is_relative_to(path: Path, root: Path) -> bool:
@@ -270,3 +274,121 @@ def extract_cache_tokens(usage: dict | None) -> tuple[int, int]:
         max(0, min(cache_read, prompt_tokens)),
         max(0, cache_creation),
     )
+
+
+# ============================================================
+# 请求日志（qclaw / qwenwork / traework 三家 _log 的收敛实现）
+# ============================================================
+
+_USAGE_JSON_LIMIT_BYTES = 65536
+
+
+def _usage_json(usage) -> str | None:
+    """usage 整包序列化留证据；>64KB 时只留存提取结果，避免污染日志表。"""
+    if usage is None:
+        return None
+    try:
+        serialized = json.dumps(usage, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
+    if len(serialized.encode("utf-8")) > _USAGE_JSON_LIMIT_BYTES:
+        cache_read, cache_creation = extract_cache_tokens(
+            usage if isinstance(usage, dict) else None
+        )
+        serialized = json.dumps(
+            {
+                "truncated": True,
+                "cache_read_tokens": cache_read,
+                "cache_creation_tokens": cache_creation,
+            },
+            ensure_ascii=False,
+        )
+    return serialized
+
+
+async def log_request(
+    api_key_info,
+    account,
+    *,
+    channel: str,
+    model: str,
+    stream: bool,
+    usage=None,
+    finish_reason: str = "",
+    status_code: int = 0,
+    duration_ms: int = 0,
+    error_msg: str = "",
+    **extra,
+) -> None:
+    """写一条请求日志并更新账号/密钥用量计数，sqlite 写放 worker 线程执行。
+
+    qclaw / qwenwork / traework 三家 chat 的 _log 收敛为这一份实现，
+    字段语义逐字对齐 qclaw 版（含 extract_cache_tokens 与 usage_json 截断）；
+    credit = round(total_tokens / channel_credit_rate(channel), 6)。
+    extra 透传 prompt_tokens / completion_tokens / total_tokens /
+    increment_usage 及其他 record_request 覆盖字段。
+    """
+    from providers.model_config import channel_credit_rate
+    from storage import database as db
+
+    cache_read, cache_creation = extract_cache_tokens(usage if isinstance(usage, dict) else None)
+    total_tokens = int(extra.pop("total_tokens", 0) or 0)
+    rate = channel_credit_rate(channel)
+    credit = round(total_tokens / rate, 6) if rate else 0
+    row = {
+        "api_key_id": api_key_info["id"] if api_key_info else None,
+        "api_key_name": api_key_info["name"] if api_key_info else None,
+        "account_id": account["id"] if account else None,
+        "account_name": account.get("name") if account else None,
+        "provider": channel,
+        "model": model,
+        "stream": 1 if stream else 0,
+        "prompt_tokens": int(extra.pop("prompt_tokens", 0) or 0),
+        "completion_tokens": int(extra.pop("completion_tokens", 0) or 0),
+        "total_tokens": total_tokens,
+        "cache_read_tokens": cache_read,
+        "cache_creation_tokens": cache_creation,
+        "credit": credit,
+        "usage_json": _usage_json(usage),
+        "finish_reason": finish_reason,
+        "duration_ms": duration_ms,
+        "status_code": status_code,
+        "error_msg": error_msg,
+        "increment_usage": extra.pop("increment_usage", True),
+        "client": (api_key_info or {}).get("_client_tag"),
+        "client_version": (api_key_info or {}).get("_client_version"),
+    }
+    row.update(extra)
+    try:
+        # BEGIN IMMEDIATE 写事务是同步阻塞调用，放线程池避免卡事件循环
+        await asyncio.to_thread(db.record_request, row)
+    except Exception:
+        logger.debug("record_request failed", exc_info=True)
+
+
+# ============================================================
+# 其他跨通道小工具
+# ============================================================
+
+def make_translator(aliases_fn, default_model: str):
+    """生成 translate_model：inner 模型名经通道别名表映射，未命中原样返回。
+
+    aliases_fn 每次调用时求值，保证管理员热更新别名表后立即生效。
+    收敛 qclaw / qwenwork / traework 三份逐字相同的单行拷贝。
+    """
+    def translate_model(model: str) -> str:
+        inner = (model or default_model).strip() or default_model
+        return aliases_fn().get(inner, inner)
+    return translate_model
+
+
+def dedupe_dirs(dirs: list[Path]) -> list[Path]:
+    """按字符串形式去重并保持顺序（三家 store 的 _auth_dirs 收敛块）。"""
+    seen: set[str] = set()
+    out: list[Path] = []
+    for item in dirs:
+        key = str(item)
+        if key not in seen:
+            seen.add(key)
+            out.append(item)
+    return out

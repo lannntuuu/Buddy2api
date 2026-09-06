@@ -10,10 +10,12 @@ from typing import AsyncGenerator
 import httpx
 
 from accounts import auth_manager
-from storage import database as db
-from providers.model_config import channel_aliases, channel_credit_rate
+from storage.http_pool import get_client
+from providers import store_common
+from providers.model_config import channel_aliases
 from providers.retry import retry_delay
 from providers.qwenwork import cosy
+from providers.trae_shared import pick_with_refresh_fallback
 from providers.qwenwork.constants import (
     ALIASES,
     BUILD,
@@ -34,12 +36,13 @@ from providers.qwenwork.constants import (
     USER_AGENT,
 )
 from providers.host_override import channel_host
-from providers.qwenwork.token import is_token_expired, refresh_account
+from providers.qwenwork.token import refresh_account
 
 
-def translate_model(model: str) -> str:
-    inner = (model or "qwork-advanced").strip() or "qwork-advanced"
-    return channel_aliases(CHANNEL_ID, ALIASES).get(inner, inner)
+# 与 qclaw / traework 的同名单行拷贝收敛：见 store_common.make_translator
+translate_model = store_common.make_translator(
+    lambda: channel_aliases(CHANNEL_ID, ALIASES), "qwork-advanced"
+)
 
 
 def chat_url() -> str:
@@ -55,43 +58,17 @@ def _ids(account: dict) -> tuple[str, str, str, str]:
     return uid, name, email, token
 
 
-def _log(api_key_info, account, model_name, stream, prompt_t, completion_t, total_t,
-         finish_reason, status_code, error_msg, t0, increment_usage=True, usage=None):
-    # 缓存命中提取（三种风格取最大非零值，见 store_common.extract_cache_tokens）
-    try:
-        from providers.store_common import extract_cache_tokens
-        cache_read, cache_creation = extract_cache_tokens(usage if isinstance(usage, dict) else None)
-    except Exception:
-        cache_read, cache_creation = 0, 0
-    rate = channel_credit_rate(CHANNEL_ID)
-    credit = round(total_t / rate, 6) if rate else 0
-    try:
-        db.record_request(
-            {
-                "api_key_id": api_key_info["id"] if api_key_info else None,
-                "api_key_name": api_key_info["name"] if api_key_info else None,
-                "account_id": account["id"] if account else None,
-                "account_name": account.get("name") if account else None,
-                "provider": CHANNEL_ID,
-                "model": model_name,
-                "stream": 1 if stream else 0,
-                "prompt_tokens": prompt_t,
-                "completion_tokens": completion_t,
-                "total_tokens": total_t,
-                "cache_read_tokens": cache_read,
-                "cache_creation_tokens": cache_creation,
-                "credit": credit,
-                "finish_reason": finish_reason,
-                "duration_ms": int((time.time() - t0) * 1000),
-                "status_code": status_code,
-                "error_msg": error_msg,
-                "increment_usage": increment_usage,
-                "client": (api_key_info or {}).get("_client_tag"),
-                "client_version": (api_key_info or {}).get("_client_version"),
-            }
-        )
-    except Exception:
-        pass
+async def _log(api_key_info, account, model_name, stream, prompt_t, completion_t, total_t,
+               finish_reason, status_code, error_msg, t0, increment_usage=True, usage=None):
+    # 落库线程化 + 语义收敛：见 store_common.log_request（三家 _log 的一份实现）
+    await store_common.log_request(
+        api_key_info, account,
+        channel=CHANNEL_ID, model=model_name, stream=stream, usage=usage,
+        finish_reason=finish_reason, status_code=status_code,
+        duration_ms=int((time.time() - t0) * 1000), error_msg=error_msg,
+        prompt_tokens=prompt_t, completion_tokens=completion_t, total_tokens=total_t,
+        increment_usage=increment_usage,
+    )
 
 
 def _split_messages(payload: dict) -> tuple[str, list]:
@@ -336,25 +313,8 @@ def _aggregate(chunks: list[dict], model: str) -> dict:
 
 
 async def _pick(tried: set[int]) -> dict | None:
-    account = auth_manager.pick_account(tried, provider=CHANNEL_ID)
-    if account and is_token_expired(account):
-        try:
-            account = await refresh_account(account)
-        except Exception:
-            account = None
-    if account:
-        return account
-    expired = [
-        row
-        for row in db.list_accounts(provider=CHANNEL_ID)
-        if row.get("status") == "expired" and row.get("id") not in tried
-    ]
-    for row in expired:
-        try:
-            return await refresh_account(row)
-        except Exception:
-            continue
-    return None
+    # 兜底收敛到共享实现（含 refresh 失败 60s 负缓存），与 traework 同源
+    return await pick_with_refresh_fallback(CHANNEL_ID, refresh_account, exclude_ids=tried)
 
 
 async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
@@ -381,49 +341,49 @@ async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
         try:
             headers = _headers_for(account, url, raw, upstream_model, request_id)
             chunks: list[dict] = []
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                async with client.stream("POST", url, headers=headers, content=raw) as response:
-                    if response.status_code >= 400:
-                        text = (await response.aread()).decode("utf-8", errors="replace")[:400]
-                        auth_manager.mark_account_failure(account["id"], response.status_code)
+            client = get_client()
+            async with client.stream("POST", url, headers=headers, content=raw, timeout=120.0) as response:
+                if response.status_code >= 400:
+                    text = (await response.aread()).decode("utf-8", errors="replace")[:400]
+                    auth_manager.mark_account_failure(account["id"], response.status_code)
+                    last_error = (
+                        "error",
+                        (response.status_code, {"error": {"message": text, "type": "server_error"}}),
+                    )
+                    await _log(
+                        api_key_info, account, model_name, False, 0, 0, 0,
+                        "retry" if response.status_code in RETRYABLE_STATUS and attempt < 2 else "error",
+                        response.status_code, text, t0,
+                        increment_usage=response.status_code not in RETRYABLE_STATUS or attempt == 2,
+                    )
+                    if response.status_code not in RETRYABLE_STATUS:
+                        return last_error
+                    await retry_delay(attempt)
+                    continue
+                auth_manager.mark_account_success(account["id"])
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    env_err = envelope_error(data)
+                    if env_err:
                         last_error = (
                             "error",
-                            (response.status_code, {"error": {"message": text, "type": "server_error"}}),
+                            (400, {"error": {"message": env_err, "type": "invalid_request_error"}}),
                         )
-                        _log(
-                            api_key_info, account, model_name, False, 0, 0, 0,
-                            "retry" if response.status_code in RETRYABLE_STATUS and attempt < 2 else "error",
-                            response.status_code, text, t0,
-                            increment_usage=response.status_code not in RETRYABLE_STATUS or attempt == 2,
-                        )
-                        if response.status_code not in RETRYABLE_STATUS:
-                            return last_error
-                        await retry_delay(attempt)
-                        continue
-                    auth_manager.mark_account_success(account["id"])
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data:"):
+                        chunks = []
+                        break
+                    for inner in unwrap_sse_payload(data):
+                        try:
+                            chunks.append(json.loads(inner))
+                        except json.JSONDecodeError:
                             continue
-                        data = line[5:].strip()
-                        env_err = envelope_error(data)
-                        if env_err:
-                            last_error = (
-                                "error",
-                                (400, {"error": {"message": env_err, "type": "invalid_request_error"}}),
-                            )
-                            chunks = []
-                            break
-                        for inner in unwrap_sse_payload(data):
-                            try:
-                                chunks.append(json.loads(inner))
-                            except json.JSONDecodeError:
-                                continue
             if last_error and last_error[0] == "error" and last_error[1][0] == 400 and not chunks:
-                _log(api_key_info, account, model_name, False, 0, 0, 0, "error", 400, str(last_error[1][1])[:400], t0)
+                await _log(api_key_info, account, model_name, False, 0, 0, 0, "error", 400, str(last_error[1][1])[:400], t0)
                 return last_error
             aggregated = _aggregate(chunks, model_name)
             usage = aggregated.get("usage") or {}
-            _log(
+            await _log(
                 api_key_info, account, model_name, False,
                 int(usage.get("prompt_tokens") or 0),
                 int(usage.get("completion_tokens") or 0),
@@ -465,47 +425,50 @@ async def _stream(raw: str, url: str, request_id: str, upstream_model: str, api_
         usage = None
         try:
             headers = _headers_for(account, url, raw, upstream_model, request_id)
-            async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10.0, read=None)) as client:
-                async with client.stream("POST", url, headers=headers, content=raw) as response:
-                    last_status = response.status_code
-                    if response.status_code >= 400:
-                        text = (await response.aread()).decode("utf-8", errors="replace")[:400]
-                        auth_manager.mark_account_failure(account["id"], response.status_code)
-                        last_error = f"data: {json.dumps({'error': {'message': text}}, ensure_ascii=False)}\n\n".encode()
-                        if response.status_code not in RETRYABLE_STATUS:
-                            yield last_error
-                            _log(api_key_info, account, model_name, True, 0, 0, 0, "error", response.status_code, text, t0)
-                            return
-                        await retry_delay(attempt)
+            client = get_client()
+            async with client.stream(
+                "POST", url, headers=headers, content=raw,
+                timeout=httpx.Timeout(None, connect=10.0, read=None),
+            ) as response:
+                last_status = response.status_code
+                if response.status_code >= 400:
+                    text = (await response.aread()).decode("utf-8", errors="replace")[:400]
+                    auth_manager.mark_account_failure(account["id"], response.status_code)
+                    last_error = f"data: {json.dumps({'error': {'message': text}}, ensure_ascii=False)}\n\n".encode()
+                    if response.status_code not in RETRYABLE_STATUS:
+                        yield last_error
+                        await _log(api_key_info, account, model_name, True, 0, 0, 0, "error", response.status_code, text, t0)
+                        return
+                    await retry_delay(attempt)
+                    continue
+                auth_manager.mark_account_success(account["id"])
+                async for line in response.aiter_lines():
+                    if not line:
                         continue
-                    auth_manager.mark_account_success(account["id"])
-                    async for line in response.aiter_lines():
-                        if not line:
-                            continue
-                        if not line.startswith("data:"):
-                            continue
-                        data = line[5:].strip()
-                        env_err = envelope_error(data)
-                        if env_err:
-                            last_error = f"data: {json.dumps({'error': {'message': env_err}}, ensure_ascii=False)}\n\n".encode()
-                            if not output_started:
-                                yield last_error
-                            _log(api_key_info, account, model_name, True, 0, 0, 0, "error", 400, env_err, t0)
-                            return
-                        for inner in unwrap_sse_payload(data):
-                            output_started = True
-                            yield f"data: {inner}\n\n".encode("utf-8")
-                            try:
-                                chunk = json.loads(inner)
-                            except json.JSONDecodeError:
-                                chunk = None
-                            if isinstance(chunk, dict) and isinstance(chunk.get("usage"), dict):
-                                # 上游最后一个 chunk 常带 usage，用它回填统计
-                                usage = chunk["usage"]
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    env_err = envelope_error(data)
+                    if env_err:
+                        last_error = f"data: {json.dumps({'error': {'message': env_err}}, ensure_ascii=False)}\n\n".encode()
+                        if not output_started:
+                            yield last_error
+                        await _log(api_key_info, account, model_name, True, 0, 0, 0, "error", 400, env_err, t0)
+                        return
+                    for inner in unwrap_sse_payload(data):
+                        output_started = True
+                        yield f"data: {inner}\n\n".encode("utf-8")
+                        try:
+                            chunk = json.loads(inner)
+                        except json.JSONDecodeError:
+                            chunk = None
+                        if isinstance(chunk, dict) and isinstance(chunk.get("usage"), dict):
+                            # 上游最后一个 chunk 常带 usage，用它回填统计
+                            usage = chunk["usage"]
             if output_started:
                 yield b"data: [DONE]\n\n"
             if isinstance(usage, dict):
-                _log(
+                await _log(
                     api_key_info, account, model_name, True,
                     int(usage.get("prompt_tokens") or 0),
                     int(usage.get("completion_tokens") or 0),
@@ -513,7 +476,7 @@ async def _stream(raw: str, url: str, request_id: str, upstream_model: str, api_
                     "stop", 200, "", t0, usage=usage,
                 )
             else:
-                _log(api_key_info, account, model_name, True, 0, 0, 0, "stop", 200, "", t0)
+                await _log(api_key_info, account, model_name, True, 0, 0, 0, "stop", 200, "", t0)
             return
         except httpx.HTTPError as exc:
             if output_started:
@@ -524,7 +487,7 @@ async def _stream(raw: str, url: str, request_id: str, upstream_model: str, api_
             await retry_delay(attempt)
             continue
     yield last_error
-    _log(api_key_info, None, model_name, True, 0, 0, 0, "error", last_status, "stream failed", t0)
+    await _log(api_key_info, None, model_name, True, 0, 0, 0, "error", last_status, "stream failed", t0)
 
 
 async def test_chat(account: dict, model: str = "qwork-advanced", prompt: str = "ping") -> dict:

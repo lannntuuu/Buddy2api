@@ -9,6 +9,7 @@ from storage import database as db
 from providers.model_config import channel_aliases, channel_model_ids
 from providers.protocol import ChannelId, QuotaSnapshot
 from providers.qclaw import chat, jprx, oauth, store
+from providers.trae_shared import pick_with_refresh_fallback
 from providers.qclaw.constants import (
     ALIASES,
     CHANNEL_ID,
@@ -60,25 +61,18 @@ class QClawProvider:
     async def pick_account_with_fallback(
         self, exclude_ids: set[int] | None = None
     ) -> Optional[dict]:
-        account = self.pick_account(exclude_ids)
-        if account:
-            return account
-        expired = [
-            row
-            for row in db.list_accounts(provider=self.id)
-            if row.get("status") == "expired"
-            and row.get("id") not in (exclude_ids or set())
-        ]
-        for row in expired:
-            try:
-                await jprx.refresh_channel(row)
-                fresh = db.get_account(row["id"])
-                if fresh:
-                    db.update_account(fresh["id"], {"status": "active"})
-                    return db.get_account(fresh["id"])
-            except jprx.JprxError:
-                continue
-        return None
+        async def _refresh_expired(row: dict) -> dict:
+            await jprx.refresh_channel(row)
+            fresh = db.get_account(row["id"])
+            if not fresh:
+                raise jprx.JprxError("account disappeared after refresh")
+            db.update_account(fresh["id"], {"status": "active"})
+            return db.get_account(fresh["id"])
+
+        # 兜底收敛到共享实现（含 refresh 失败 60s 负缓存）；JprxError 才算刷新失败
+        return await pick_with_refresh_fallback(
+            self.id, _refresh_expired, exclude_ids=exclude_ids, refresh_errors=jprx.JprxError
+        )
 
     async def has_usable_account(self) -> bool:
         return await self.pick_account_with_fallback() is not None
@@ -118,8 +112,6 @@ class QClawProvider:
 
     async def refresh(self, account: dict) -> dict:
         await jprx.refresh_channel(account)
-        from storage import database as db
-
         fresh = db.get_account(account["id"])
         if fresh:
             db.update_account(fresh["id"], {"status": "active"})

@@ -14,6 +14,7 @@ from providers.qwenwork.constants import CHANNEL_ID, IDE_VERSION
 from providers.store_common import (
     chromium_os_crypt_key,
     decrypt_chromium_v10,
+    dedupe_dirs,
     discover_summary,
     existing_uids,
     imported_file_meta,
@@ -38,14 +39,7 @@ def qwenwork_auth_dirs() -> list[Path]:
     if explicit:
         dirs.append(Path(explicit).expanduser())
     dirs.append(qwenwork_user_data_dir())
-    seen: set[str] = set()
-    out: list[Path] = []
-    for item in dirs:
-        key = str(item)
-        if key not in seen:
-            seen.add(key)
-            out.append(item)
-    return out
+    return dedupe_dirs(dirs)
 
 
 def _chromium_os_crypt_key(local_state: dict) -> bytes:
