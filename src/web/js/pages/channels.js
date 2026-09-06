@@ -117,8 +117,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
       p.toast('已删除 '+c.id);
       await Promise.all([loadCC(),loadList()]);
     }catch(e){
-      const m=String(e.message||'');
-      p.toast(m==='409'?'seed 通道不允许删除，请用「启用通道」开关停用':'删除失败：'+apiErr(e),'err');
+      p.toast('删除失败：'+apiErr(e),'err');
     }
   }
 
@@ -398,8 +397,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
               </div>
               <div style="display:flex;gap:6px;flex-shrink:0" v-if="ccOf(um.infoId)">
                 <button class="btn s pri" @click="um.tab='form'"><span v-html="I.plus"></span>编辑</button>
-                <button class="btn s danger" @click="ccDelete(ccOf(um.infoId))" v-if="ccOf(um.infoId).source!=='seed'" title="删除自定义通道">删除</button>
-                <button class="btn s danger" v-else disabled title="seed 通道不允许删除，请用「启用通道」开关停用">删除(禁用)</button>
+                <button class="btn s danger" @click="ccDelete(ccOf(um.infoId))" title="删除通道（seed 通道删除后不会在下次启动重建）">删除</button>
               </div>
               <div class="hint" style="margin:0" v-else>内置通道 · 定义不可编辑；启用 / 停用在上方开关</div>
             </div>
