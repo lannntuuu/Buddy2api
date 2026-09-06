@@ -51,11 +51,13 @@ async def health():
         return accounts, keys, channels
 
     accounts, keys, channels = await run_in_threadpool(_collect)
+    credential_error_accounts = sum(1 for a in accounts if a.get("credential_error"))
     return {
         "status": "ok",
         "version": VERSION,
         "accounts": len(accounts),
         "active_accounts": sum(1 for account in accounts if account.get("status") == "active"),
+        "credential_error_accounts": credential_error_accounts,
         "active_keys": sum(1 for key in keys if key.get("status") == "active"),
         "channels": channels,
     }
