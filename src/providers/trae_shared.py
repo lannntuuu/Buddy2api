@@ -87,6 +87,16 @@ def _mark_refresh_success(channel_id: str, account_id: int) -> None:
     _refresh_failed_at.pop((channel_id, account_id), None)
 
 
+def refresh_backoff_view() -> list[dict]:
+    """refresh 负缓存观测面(只读):[{channel, account_id, fail_count, remaining_seconds}]。"""
+    now = _now()
+    out = []
+    for (channel_id, account_id), (count, next_try) in _refresh_failed_at.items():
+        if next_try > now:
+            out.append({"channel": channel_id, "account_id": account_id,
+                        "fail_count": count, "remaining_seconds": int(next_try - now)})
+    return out
+
 def reset_refresh_failures() -> None:
     """清空 refresh 失败负缓存（测试与账号变更场景使用）。"""
     _refresh_failed_at.clear()
@@ -98,14 +108,16 @@ async def pick_with_refresh_fallback(
     *,
     exclude_ids=None,
     refresh_errors: type[BaseException] | tuple = Exception,
+    sticky: bool = False,
 ) -> dict | None:
-    """pick_account + expired 账号逐个 refresh 兜底（qwenwork / traework / qclaw 共用）。
+    """pick_account + expired 账号逐个 refresh 兜底(五家 facade 共用)。
 
     refresh 失败的账号进自适应负缓存：第 n 次连续失败后 60×2^(n-1) 秒
     （封顶 600s）内不再对同一账号重复发 refresh 请求，成功即清零，
     避免上游故障时每个请求都原样重放失败的刷新。
     refresh_errors 指定哪些异常按"刷新失败"处理（负缓存 + 尝试下一个），
     其余异常照常向上抛（qclaw 只把 JprxError 当刷新失败）。
+    sticky=True 时刷新成功后把该账号设为通道粘住项(workbuddy 正典语义)。
     """
     from accounts import auth_manager
     from storage import database as db
@@ -131,6 +143,8 @@ async def pick_with_refresh_fallback(
                     _mark_refresh_failure(channel_id, account_id, _now())
                 else:
                     _mark_refresh_success(channel_id, account_id)
+                    if sticky:
+                        auth_manager._set_sticky_account(result["id"], channel_id)
                     return result
         else:
             return account
@@ -141,6 +155,8 @@ async def pick_with_refresh_fallback(
         and row.get("id") not in exclude
         and not _recently_failed(channel_id, int(row.get("id") or 0), now)
     ]
+    # 与 workbuddy 正典语义对齐:按调度排序键决定刷新尝试顺序。
+    expired.sort(key=auth_manager._route_sort_key)
     for row in expired:
         try:
             result = await refresh_fn(row)
@@ -152,5 +168,7 @@ async def pick_with_refresh_fallback(
             _mark_refresh_failure(channel_id, int(row.get("id") or 0), _now())
             continue
         _mark_refresh_success(channel_id, int(row.get("id") or 0))
+        if sticky:
+            auth_manager._set_sticky_account(result["id"], channel_id)
         return result
     return None
