@@ -408,7 +408,6 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
               </div>
               <div class="hint" style="margin:0" v-else>内置通道 · 定义不可编辑；启用 / 停用在上方开关</div>
             </div>
-            <div class="hint" style="margin-top:10px">添加 / 轮换密钥：点「编辑」在 API Key 栏粘贴（不同 Key 各自成行、都参与调度；密钥不回显只显尾号）。多把密钥的启停与权重在下方「凭证列表」管理。</div>
           </div>
           <div v-else style="border:1px solid var(--border);border-radius:6px;padding:12px;background:var(--bg-elevated)">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
