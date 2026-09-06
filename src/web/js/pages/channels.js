@@ -32,12 +32,19 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
   const um=ref({open:false,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',draft:{},warning:null,busy:false,envTouched:false});
   function umEmptyDraft(){return {id:'',display_name:'',base_url:'',modelsText:'',aliasRows:[{k:'',v:''}],env_api_key:'',api_key:''}}
   function openKeyModal(def){  // def: existing definition for edit; omit for create
-    if(def){um.value={open:true,mode:'edit',kind:'apikey',channelId:def.id,tab:'form',infoId:'',infoKind:'',warning:null,busy:false,envTouched:false,draft:{
+    if(def){um.value={open:true,mode:'edit',kind:'apikey',channelId:def.id,tab:'form',infoId:def.id,infoKind:'apikey',warning:null,busy:false,envTouched:false,draft:{
       id:def.id,display_name:def.display_name||'',base_url:def.base_url||'',
       modelsText:(def.models||[]).join(', '),
       aliasRows:Object.entries(def.aliases||{}).map(([k,v])=>({k,v})).concat([{k:'',v:''}]),
       env_api_key:def.env_api_key||'',api_key:''}};}
     else{um.value={open:true,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',warning:null,busy:false,envTouched:false,draft:umEmptyDraft()}}
+  }
+  // 详情浮窗「编辑」:把当前通道定义灌入 draft 再切到表单 tab。
+  // 之前只切 tab 不填 draft → 编辑态 id/名称全空且输入框 :disabled,无法保存。
+  function umEditFromInfo(){
+    const def=ccOf(um.value.infoId);
+    if(!def){um.value.tab='form';return}
+    openKeyModal(def);
   }
   // 别名行编辑器:添加/删除行(对齐 models.js 各平台设置)
   function addAliasRow(){um.value.draft.aliasRows.push({k:'',v:''})}
@@ -315,7 +322,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
   });
   function onEnvInput(){um.value.envTouched=true}
 
-  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,loginChannels,apikeyChannels,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccDelete,um,openKeyModal,umClose,umSave,addAliasRow,rmAliasRow,onEnvInput,onModalImported,openInfo,disc,dl,scanning,authPath,discover,scan,scanCustom,clearPath,solo,soloBusy,soloSelected,startSoloLogin,cancelSolo,completeSolo,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,size,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I,keyPanelMetaById,loginTbody,apikeyTbody}
+  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,loginChannels,apikeyChannels,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccDelete,um,openKeyModal,umEditFromInfo,umClose,umSave,addAliasRow,rmAliasRow,onEnvInput,onModalImported,openInfo,disc,dl,scanning,authPath,discover,scan,scanCustom,clearPath,solo,soloBusy,soloSelected,startSoloLogin,cancelSolo,completeSolo,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,size,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I,keyPanelMetaById,loginTbody,apikeyTbody}
 },template:`
 <div>
   <div class="phead"><h1>通道管理</h1><p>定义通道 · 管理凭证 · 启用开关</p></div>
@@ -396,7 +403,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
                 <div v-if="!ccOf(um.infoId)&&keyPanelMetaById[um.infoId]"><span class="hint" style="margin:0">环境变量</span> <span class="mono">{{keyPanelMetaById[um.infoId].env||'-'}}</span></div>
               </div>
               <div style="display:flex;gap:6px;flex-shrink:0" v-if="ccOf(um.infoId)">
-                <button class="btn s pri" @click="um.tab='form'"><span v-html="I.plus"></span>编辑</button>
+                <button class="btn s pri" @click="umEditFromInfo()"><span v-html="I.plus"></span>编辑</button>
                 <button class="btn s danger" @click="ccDelete(ccOf(um.infoId))" title="删除通道（seed 通道删除后不会在下次启动重建）">删除</button>
               </div>
               <div class="hint" style="margin:0" v-else>内置通道 · 定义不可编辑；启用 / 停用在上方开关</div>
