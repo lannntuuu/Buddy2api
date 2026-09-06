@@ -31,16 +31,26 @@ router_obj = APIRouter()
 
 @router_obj.get("/health")
 async def health():
-    accounts = db.list_accounts()
-    keys = db.list_api_keys()
-    channels = {}
-    for channel in providers.enabled_provider_ids():
-        rows = db.list_accounts(provider=channel)
-        channels[channel] = {
-            "accounts": len(rows),
-            "active": sum(1 for account in rows if account.get("status") == "active"),
-            "loaded": providers.get_provider(channel) is not None,
+    def _collect():
+        accounts = db.list_accounts()
+        keys = db.list_api_keys()
+        # 单次查询后按 provider 内存分组,取代原先每通道一次的 N+1 查询
+        channels = {
+            channel: {"accounts": 0, "active": 0, "loaded": providers.get_provider(channel) is not None}
+            for channel in providers.enabled_provider_ids()
         }
+        for account in accounts:
+            provider = account.get("provider") or "workbuddy"
+            bucket = channels.get(provider)
+            if bucket is None:
+                # 未启用通道的账号不进 /health(与旧的按启用通道查询语义一致)
+                continue
+            bucket["accounts"] += 1
+            if account.get("status") == "active":
+                bucket["active"] += 1
+        return accounts, keys, channels
+
+    accounts, keys, channels = await run_in_threadpool(_collect)
     return {
         "status": "ok",
         "version": VERSION,
@@ -152,13 +162,13 @@ async def chat_completions(
     try:
         result = await router.chat_after_bind(bound, payload, api_key_info)
     except BaseException:
-        _release_client_quota(api_key_info)
+        await run_in_threadpool(_release_client_quota, api_key_info)
         raise
 
     if result[0] == "error":
         # Dispatch sync failure (upstream 4xx/5xx): roll back this slot so
         # retries don't double-charge.
-        _release_client_quota(api_key_info)
+        await run_in_threadpool(_release_client_quota, api_key_info)
         status, detail = result[1]
         return JSONResponse(status_code=status, content=detail)
     elif result[0] == "json":
@@ -203,14 +213,14 @@ async def resp_responses(
         result = await responses.proxy_responses(dispatch, info, channel=bound.channel)
         result = await router.echo_original(result, bound.original)
     except Exception:
-        _release_client_quota(api_key_info)
+        await run_in_threadpool(_release_client_quota, api_key_info)
         import logging
         logger = logging.getLogger("buddy2api.server")
         logger.exception("[responses] bridge error")
         return JSONResponse(status_code=502, content={"error": {"message": "internal bridge error", "type": "server_error"}})
 
     if result[0] == "error":
-        _release_client_quota(api_key_info)
+        await run_in_threadpool(_release_client_quota, api_key_info)
         status, detail = result[1]
         return JSONResponse(status_code=status, content=detail)
     elif result[0] == "json":

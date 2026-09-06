@@ -561,12 +561,15 @@ async def admin_credit_overview(authorization: str | None = Header(default=None)
 async def admin_traework_usage(authorization: str | None = Header(default=None)):
     """View synced TraeWork official consumption truth (per day)."""
     _check_admin(authorization)
-    by_day = db.get_traework_daily_credit(days=90)
-    return {
-        "by_day": by_day,
-        "total_credits": db.get_traework_total_credit(),
-        "last_sync_at": db.latest_traework_sync_at(),
-    }
+
+    def _load():
+        return {
+            "by_day": db.get_traework_daily_credit(days=90),
+            "total_credits": db.get_traework_total_credit(),
+            "last_sync_at": db.latest_traework_sync_at(),
+        }
+
+    return await run_in_threadpool(_load)
 
 
 @router_obj.get("/admin/unified-models")
@@ -597,7 +600,8 @@ async def admin_set_unified_models(
 @router_obj.get("/admin/stats")
 async def admin_stats(authorization: str | None = Header(default=None)):
     _check_admin(authorization)
-    stats = db.get_stats()
+    # get_stats 聚合 logs 全表多个维度,不能在事件循环上同步跑
+    stats = await run_in_threadpool(db.get_stats)
     stats["compaction"] = proxy.compaction_stats()
     return stats
 
@@ -665,7 +669,7 @@ async def admin_credit_summary(
 @router_obj.get("/admin/accounts")
 async def admin_list_accounts(authorization: str | None = Header(default=None)):
     _check_admin(authorization)
-    accounts = db.list_accounts()
+    accounts = await run_in_threadpool(db.list_accounts)
     result = []
     for a in accounts:
         s = auth_manager.get_account_status(a)

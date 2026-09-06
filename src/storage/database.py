@@ -71,7 +71,6 @@ from storage.repos.api_keys import (
     update_api_key,
 )
 from storage.repos.logs import (
-    add_log,
     list_logs,
     prune_logs,
     record_request,
@@ -118,7 +117,6 @@ __all__ = [
     "release_api_key_request",
     "api_key_increment_usage",
     # logs
-    "add_log",
     "record_request",
     "prune_logs",
     "list_logs",

@@ -321,6 +321,16 @@ _USAGE_RATE_LIMIT = max(0, _env_int("CB_GATEWAY_USAGE_RATE_LIMIT", 30))
 _USAGE_RATE_WINDOW_S = 60.0
 _usage_rate_bucket: dict[str, deque[float]] = {}
 
+# 桶字典只增不减(key 是 token 哈希/客户端 IP,长期运行会缓慢累积)。
+# 写入路径顺带清理:过期条目在各自方法里本就会被 popleft,这里补"删空 key"
+# 与总 key 数超限时的强制清扫。
+_RATE_BUCKET_MAX_KEYS = 4096
+
+
+def _prune_rate_bucket(bucket: dict[str, deque[float]], window_s: float, now: float) -> None:
+    for key in [k for k, hits in bucket.items() if not hits or now - hits[0] >= window_s]:
+        del bucket[key]
+
 
 def _usage_rate_key() -> str:
     request = _CURRENT_REQUEST.get()
@@ -350,6 +360,8 @@ async def _check_usage_rate_limit() -> None:
     if len(hits) >= _USAGE_RATE_LIMIT:
         raise HTTPException(status_code=429, detail="Too many requests")
     hits.append(now)
+    if len(_usage_rate_bucket) > _RATE_BUCKET_MAX_KEYS:
+        _prune_rate_bucket(_usage_rate_bucket, _USAGE_RATE_WINDOW_S, now)
 
 
 # --- Admin login rate limiting: sliding window per client IP, 10 fails / 5 min
@@ -365,6 +377,8 @@ def _record_login_failure(request: Request) -> None:
     while fails and now - fails[0] >= _LOGIN_FAIL_WINDOW_S:
         fails.popleft()
     fails.append(now)
+    if len(_login_failures) > _RATE_BUCKET_MAX_KEYS:
+        _prune_rate_bucket(_login_failures, _LOGIN_FAIL_WINDOW_S, now)
 
 
 def _check_login_rate(request: Request) -> None:

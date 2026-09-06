@@ -10,30 +10,21 @@ from typing import Any, Optional
 from storage.repos._common import _lock, connection, get_conn
 
 
-def migrate(conn: sqlite3.Connection) -> None:
+def migrate_provider(conn: sqlite3.Connection):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(logs)").fetchall()}
     if "provider" not in cols:
         conn.execute(
             "ALTER TABLE logs ADD COLUMN provider TEXT NOT NULL DEFAULT 'workbuddy'"
         )
-    if "cache_read_tokens" not in cols:
-        conn.execute("ALTER TABLE logs ADD COLUMN cache_read_tokens INTEGER DEFAULT 0")
-    if "cache_creation_tokens" not in cols:
-        conn.execute(
-            "ALTER TABLE logs ADD COLUMN cache_creation_tokens INTEGER DEFAULT 0"
-        )
-    if "usage_json" not in cols:
-        conn.execute("ALTER TABLE logs ADD COLUMN usage_json TEXT")
-    if "credit_source" not in cols:
-        conn.execute(
-            "ALTER TABLE logs ADD COLUMN credit_source TEXT DEFAULT 'live'"
-        )
-    if "client" not in cols:
-        conn.execute("ALTER TABLE logs ADD COLUMN client TEXT")
-    if "client_version" not in cols:
-        conn.execute("ALTER TABLE logs ADD COLUMN client_version TEXT")
-    if "reasoning_effort" not in cols:
-        conn.execute("ALTER TABLE logs ADD COLUMN reasoning_effort TEXT")
+    migrate_indexes(conn)
+
+
+def migrate_indexes(conn: sqlite3.Connection) -> None:
+    """高频过滤/排序列的索引。
+
+    旧 migrate() 里建索引,但 init_db 从不调用它(拆分重构时漏掉),
+    索引实际从未建过;这里接入 init_db 的迁移链路。
+    """
     conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_api_key ON logs(api_key_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_account ON logs(account_id)")
@@ -42,14 +33,6 @@ def migrate(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_logs_status "
         "ON logs(status_code, finish_reason)"
     )
-
-
-def migrate_provider(conn: sqlite3.Connection):
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(logs)").fetchall()}
-    if "provider" not in cols:
-        conn.execute(
-            "ALTER TABLE logs ADD COLUMN provider TEXT NOT NULL DEFAULT 'workbuddy'"
-        )
 
 
 def migrate_cache_tokens(conn: sqlite3.Connection):
@@ -85,41 +68,6 @@ def migrate_client(conn: sqlite3.Connection):
 # ============================================================
 # Log writes
 # ============================================================
-
-def add_log(data: dict):
-    now = int(time.time())
-    with _lock:
-        conn = get_conn()
-        conn.execute(
-            """
-            INSERT INTO logs
-                (api_key_id, api_key_name, account_id, account_name, model, stream,
-                 prompt_tokens, completion_tokens, total_tokens, credit,
-                 finish_reason, duration_ms, status_code, error_msg, provider, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                data.get("api_key_id"),
-                data.get("api_key_name"),
-                data.get("account_id"),
-                data.get("account_name"),
-                data.get("model", ""),
-                data.get("stream", 0),
-                data.get("prompt_tokens", 0),
-                data.get("completion_tokens", 0),
-                data.get("total_tokens", 0),
-                data.get("credit", 0),
-                data.get("finish_reason", ""),
-                data.get("duration_ms", 0),
-                data.get("status_code", 200),
-                data.get("error_msg", ""),
-                data.get("provider") or "workbuddy",
-                now,
-            ),
-        )
-        conn.commit()
-        conn.close()
-
 
 def record_request(data: dict):
     """Write a request log and update account/key counters in one transaction."""

@@ -157,31 +157,33 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
 
 def get_stats() -> dict:
     conn = get_conn()
-    total_requests = conn.execute("SELECT COUNT(*) as c FROM logs").fetchone()["c"]
-    total_tokens = conn.execute(
-        "SELECT COALESCE(SUM(total_tokens),0) as s FROM logs"
-    ).fetchone()["s"]
-    total_credit = conn.execute(
-        "SELECT COALESCE(SUM(credit),0) as s FROM logs"
-    ).fetchone()["s"]
-    success_requests = conn.execute(
+    # 原先对 logs 全表扫 6 次(COUNT/SUM×2/success/error/filtered/avg)合并为一条
+    # 条件聚合;today 窗口的 4 条同理。语义逐字段保持:success/error/filtered 的
+    # 判定条件与旧 SQL 完全一致,AVG 本身就忽略 NULL。
+    overall = conn.execute(
         """
-        SELECT COUNT(*) as c FROM logs
-        WHERE status_code BETWEEN 200 AND 299
-          AND finish_reason NOT IN ('error', 'content_filter')
-        """
-    ).fetchone()["c"]
-    error_requests = conn.execute(
-        "SELECT COUNT(*) as c FROM logs "
-        "WHERE status_code < 200 OR status_code >= 300 OR finish_reason='error'"
-    ).fetchone()["c"]
-    filtered_requests = conn.execute(
-        "SELECT COUNT(*) as c FROM logs WHERE finish_reason='content_filter'"
-    ).fetchone()["c"]
-    avg_duration_ms = conn.execute(
-        "SELECT COALESCE(AVG(duration_ms),0) as v FROM logs "
-        "WHERE duration_ms IS NOT NULL"
-    ).fetchone()["v"]
+        SELECT COUNT(*) AS total_requests,
+               COALESCE(SUM(total_tokens), 0) AS total_tokens,
+               COALESCE(SUM(credit), 0) AS total_credit,
+               COALESCE(SUM(CASE WHEN status_code BETWEEN 200 AND 299
+                                  AND finish_reason NOT IN ('error', 'content_filter')
+                            THEN 1 ELSE 0 END), 0) AS success_requests,
+               COALESCE(SUM(CASE WHEN status_code < 200 OR status_code >= 300
+                                  OR finish_reason = 'error'
+                            THEN 1 ELSE 0 END), 0) AS error_requests,
+               COALESCE(SUM(CASE WHEN finish_reason = 'content_filter'
+                            THEN 1 ELSE 0 END), 0) AS filtered_requests,
+               COALESCE(AVG(duration_ms), 0) AS avg_duration_ms
+        FROM logs
+        """,
+    ).fetchone()
+    total_requests = overall["total_requests"]
+    total_tokens = overall["total_tokens"]
+    total_credit = overall["total_credit"]
+    success_requests = overall["success_requests"]
+    error_requests = overall["error_requests"]
+    filtered_requests = overall["filtered_requests"]
+    avg_duration_ms = overall["avg_duration_ms"]
     active_accounts = conn.execute(
         "SELECT COUNT(*) as c FROM accounts WHERE status='active'"
     ).fetchone()["c"]
@@ -198,37 +200,25 @@ def get_stats() -> dict:
     today_start = today_start_ts()
     today = conn.execute(
         """
-        SELECT COUNT(*) as requests,
-               COALESCE(SUM(total_tokens),0) as tokens,
-               COALESCE(SUM(credit),0) as credit,
-               COALESCE(AVG(duration_ms),0) as avg_duration_ms
+        SELECT COUNT(*) AS requests,
+               COALESCE(SUM(total_tokens), 0) AS tokens,
+               COALESCE(SUM(credit), 0) AS credit,
+               COALESCE(AVG(duration_ms), 0) AS avg_duration_ms,
+               COALESCE(SUM(CASE WHEN status_code BETWEEN 200 AND 299
+                                  AND finish_reason NOT IN ('error', 'content_filter')
+                            THEN 1 ELSE 0 END), 0) AS success,
+               COALESCE(SUM(CASE WHEN status_code < 200 OR status_code >= 300
+                                  OR finish_reason = 'error'
+                            THEN 1 ELSE 0 END), 0) AS errors,
+               COALESCE(SUM(CASE WHEN finish_reason = 'content_filter'
+                            THEN 1 ELSE 0 END), 0) AS filtered
         FROM logs WHERE created_at >= ?
         """,
         (today_start,),
     ).fetchone()
-    today_success = conn.execute(
-        """
-        SELECT COUNT(*) as c FROM logs
-        WHERE created_at >= ?
-          AND status_code BETWEEN 200 AND 299
-          AND finish_reason NOT IN ('error', 'content_filter')
-        """,
-        (today_start,),
-    ).fetchone()["c"]
-    today_errors = conn.execute(
-        """
-        SELECT COUNT(*) as c FROM logs
-        WHERE created_at >= ? AND (
-            status_code < 200 OR status_code >= 300 OR finish_reason='error'
-        )
-        """,
-        (today_start,),
-    ).fetchone()["c"]
-    today_filtered = conn.execute(
-        "SELECT COUNT(*) as c FROM logs "
-        "WHERE created_at >= ? AND finish_reason='content_filter'",
-        (today_start,),
-    ).fetchone()["c"]
+    today_success = today["success"]
+    today_errors = today["errors"]
+    today_filtered = today["filtered"]
 
     hourly_rows = conn.execute(
         """
@@ -256,7 +246,7 @@ def get_stats() -> dict:
         )
 
     # 最近 7 个自然日每日统计
-    seven_days_ago = today_start_ts() - 6 * 86400
+    seven_days_ago = today_start - 6 * 86400
     daily_rows = conn.execute(
         """
         SELECT date(created_at, 'unixepoch', 'localtime') as date,
