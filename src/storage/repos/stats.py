@@ -6,6 +6,7 @@ from typing import Any, Optional
 
 from storage.repos._common import get_conn, today_start_ts
 from storage.repos.accounts import get_traework_daily_credit
+from storage.repos.logs import stream_p95_by_provider
 
 
 def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
@@ -365,6 +366,8 @@ def get_stats() -> dict:
             (success_requests / total_requests * 100) if total_requests else 0, 2
         ),
         "avg_duration_ms": int(avg_duration_ms or 0),
+        # 近 7 天流式请求 first_token_ms 的分通道 P95(毫秒);无样本为 {}
+        "stream_p95": stream_p95_by_provider(),
         "today": {
             "requests": int(today["requests"] or 0),
             "tokens": int(today["tokens"] or 0),

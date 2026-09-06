@@ -83,7 +83,8 @@ def _ids(account: dict) -> tuple[str, str, str, str]:
 
 
 async def _log(api_key_info, account, model_name, stream, prompt_t, completion_t, total_t,
-               finish_reason, status_code, error_msg, t0, increment_usage=True, usage=None):
+               finish_reason, status_code, error_msg, t0, increment_usage=True, usage=None,
+               first_token_ms=None):
     # 落库线程化 + 语义收敛：见 store_common.log_request（三家 _log 的一份实现）
     await store_common.log_request(
         api_key_info, account,
@@ -92,6 +93,7 @@ async def _log(api_key_info, account, model_name, stream, prompt_t, completion_t
         duration_ms=int((time.time() - t0) * 1000), error_msg=error_msg,
         prompt_tokens=prompt_t, completion_tokens=completion_t, total_tokens=total_t,
         increment_usage=increment_usage,
+        created_at=int(t0), first_token_ms=first_token_ms,
     )
 
 
@@ -183,6 +185,9 @@ async def _stream(body: dict, raw: str, api_key_info, model_name: str) -> AsyncG
     last_error = b"data: {\"error\":{\"message\":\"No available accounts\"}}\n\n"
     last_status = 503
     t0 = time.time()
+    # first_token_ms 基线取账号轮换循环之前（= 用户真实等待，含 pick/退避）
+    ft_t0 = time.monotonic()
+    first_token_ms: int | None = None
     for attempt in range(3):
         account = auth_manager.pick_account(tried, provider=CHANNEL_ID)
         if not account:
@@ -216,6 +221,8 @@ async def _stream(body: dict, raw: str, api_key_info, model_name: str) -> AsyncG
                 async for line in response.aiter_lines():
                     if not line:
                         continue
+                    if first_token_ms is None:
+                        first_token_ms = int((time.monotonic() - ft_t0) * 1000)
                     if not line.startswith("data:"):
                         output_started = True
                         yield (line + "\n").encode("utf-8")
@@ -243,9 +250,11 @@ async def _stream(body: dict, raw: str, api_key_info, model_name: str) -> AsyncG
                     int(usage.get("completion_tokens") or 0),
                     int(usage.get("total_tokens") or (usage.get("prompt_tokens") or 0) + (usage.get("completion_tokens") or 0)),
                     "stop", 200, "", t0, usage=usage,
+                    first_token_ms=first_token_ms,
                 )
             else:
-                await _log(api_key_info, account, model_name, True, 0, 0, 0, "stop", 200, "", t0)
+                await _log(api_key_info, account, model_name, True, 0, 0, 0, "stop", 200, "", t0,
+                           first_token_ms=first_token_ms)
             return
         except httpx.HTTPError as exc:
             if output_started:

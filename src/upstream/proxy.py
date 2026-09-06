@@ -77,6 +77,23 @@ RETRYABLE_STATUS_CODES = RETRYABLE_STATUS | {401, 403}
 def _is_retryable_status(status: int) -> bool:
     return status in RETRYABLE_STATUS_CODES
 
+
+def _parse_retry_after(value) -> float | None:
+    """Retry-After 头的纯数字秒解析；缺失/非数字/非法值返回 None。
+
+    只接受纯数字秒（HTTP-date 不支持）；NaN/负数/inf 一律视为缺失。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+    except ValueError:
+        return None
+    if not (seconds >= 0) or seconds == float("inf"):
+        return None
+    return seconds
+
 # 进程级长寿命上游客户端(keep-alive 复用,降低每次转发的 TCP+TLS 建连成本)。
 # 与 openai_compat._get_client / storage.http_pool 同模式:按"当前事件循环"绑定,
 # 单 loop 生产环境全程复用;测试里每个 asyncio.run 是新 loop,自动重建,
@@ -100,8 +117,8 @@ def _get_client() -> httpx.AsyncClient:
     ):
         _upstream_client = httpx.AsyncClient(
             limits=httpx.Limits(
-                max_connections=32,
-                max_keepalive_connections=12,
+                max_connections=64,
+                max_keepalive_connections=32,
                 keepalive_expiry=60.0,
             ),
             # 每次请求经 client.stream(..., timeout=...) 传入具体超时
@@ -528,7 +545,8 @@ def _log_request(api_key_info, account, model_name, stream,
                   finish_reason, status_code, error_msg, t0,
                   increment_usage: bool = True,
                   usage: dict | None = None,
-                  reasoning_effort: str | None = None):
+                  reasoning_effort: str | None = None,
+                  first_token_ms: int | None = None):
     elapsed_ms = int((time.time() - t0) * 1000)
     if not reasoning_effort:
         reasoning_effort = _UPSTREAM_DEFAULT_REASONING.get(model_name, "upstream")
@@ -554,6 +572,10 @@ def _log_request(api_key_info, account, model_name, stream,
         "increment_usage": increment_usage,
         "client": (api_key_info or {}).get("_client_tag"),
         "client_version": (api_key_info or {}).get("_client_version"),
+        # 请求起点秒级时间戳(入队时携带,落库层缺省用当前时刻)
+        "created_at": int(t0),
+        # 流式首个内容帧毫秒数;retry / eof / 错误行由调用方保持缺省 None
+        "first_token_ms": first_token_ms,
     }
     # Cache 命中追踪：兼容三种字段风格，整包 dump 留证据。
     cache_read, cache_creation = _extract_cache_tokens(usage)
@@ -782,6 +804,10 @@ async def _stream_upstream(
     last_account = None
     last_started = time.time()
     pending_retry_log: dict | None = None
+    # first_token_ms 基线取账号轮换/重试循环之前（= 用户真实等待，含 pick/
+    # refresh/退避）；重试或换号不重置起点。
+    request_t0 = time.monotonic()
+    first_token_ms: int | None = None
 
     for attempt in range(3):
         account = await auth_manager.pick_account_with_fallback(tried_ids)
@@ -805,7 +831,11 @@ async def _stream_upstream(
                 increment_usage=False,
                 reasoning_effort=effective_reasoning,
             )
-            await _retry_delay(pending_retry_log["attempt"])
+            retry_after = pending_retry_log.get("retry_after")
+            if retry_after is not None:
+                await _retry_delay(pending_retry_log["attempt"], retry_after=retry_after)
+            else:
+                await _retry_delay(pending_retry_log["attempt"])
             pending_retry_log = None
         last_account = account
         tried_ids.add(account["id"])
@@ -877,6 +907,11 @@ async def _stream_upstream(
                                 "message": raw_error.decode("utf-8", "replace")[:500],
                                 "started": t0,
                                 "attempt": attempt,
+                                # 429 等响应可能带 Retry-After(纯数字秒):
+                                # 存入 pending_retry_log,在重试前透传给 retry_delay
+                                "retry_after": _parse_retry_after(
+                                    response.headers.get("retry-after")
+                                ),
                             }
                             continue
                         _log_request(
@@ -904,6 +939,8 @@ async def _stream_upstream(
                                         )
                                 else:
                                     output_started = True
+                                    if first_token_ms is None:
+                                        first_token_ms = int((time.monotonic() - request_t0) * 1000)
                                     yield encoded
                             if (
                                 observer.seen_done
@@ -958,6 +995,8 @@ async def _stream_upstream(
                             )
                     else:
                         output_started = True
+                        if first_token_ms is None:
+                            first_token_ms = int((time.monotonic() - request_t0) * 1000)
                         yield encoded
         if decoder.parser_error and not observer.seen_done:
             observer.parser_error = decoder.parser_error
@@ -971,20 +1010,24 @@ async def _stream_upstream(
             )
             last_error_event = observer.upstream_error_event
             last_status = 502
-            auth_manager.mark_account_failure(account["id"], 502)
-            if not output_started and attempt < 2:
-                pending_retry_log = {
-                    "account": account,
-                    "prompt_tokens": observer.usage.get("prompt_tokens", 0),
-                    "completion_tokens": observer.usage.get("completion_tokens", 0),
-                    "total_tokens": observer.usage.get("total_tokens", 0),
-                    "credit": observer.usage.get("credit", 0),
-                    "status": 502,
-                    "message": eof_error,
-                    "started": t0,
-                    "attempt": attempt,
-                }
-                continue
+            # eof 分类（WS-1 §1.2）：已经向客户端出流后的 eof 不再降分、不再
+            # 跨账号重试（换号也无法撤回已发出的增量），按现状记 error 日志并
+            # 把已收内容/错误事件透传收尾；未出流的 eof 维持 mark + 重试。
+            if not output_started:
+                auth_manager.mark_account_failure(account["id"], 502)
+                if attempt < 2:
+                    pending_retry_log = {
+                        "account": account,
+                        "prompt_tokens": observer.usage.get("prompt_tokens", 0),
+                        "completion_tokens": observer.usage.get("completion_tokens", 0),
+                        "total_tokens": observer.usage.get("total_tokens", 0),
+                        "credit": observer.usage.get("credit", 0),
+                        "status": 502,
+                        "message": eof_error,
+                        "started": t0,
+                        "attempt": attempt,
+                    }
+                    continue
             _log_request(
                 api_key_info, account, model_name, True,
                 observer.usage.get("prompt_tokens", 0),
@@ -1031,6 +1074,7 @@ async def _stream_upstream(
             log_finish, 200, log_error, t0,
             usage=observer.usage,
             reasoning_effort=effective_reasoning,
+            first_token_ms=first_token_ms,
         )
         if tool_stall and TOOL_STALL_FAIL_STREAM:
             # 流式已发出文本增量，无法回退重试；把本回合标记为失败，

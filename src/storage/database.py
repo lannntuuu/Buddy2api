@@ -264,6 +264,7 @@ def init_db():
         _logs_repo.migrate_cache_tokens(conn)
         _logs_repo.migrate_reasoning(conn)
         _logs_repo.migrate_client(conn)
+        _logs_repo.migrate_first_token(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS api_key_daily_usage (

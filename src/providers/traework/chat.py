@@ -218,7 +218,8 @@ async def _pick(tried: set[int]) -> dict | None:
     return await pick_with_refresh_fallback(CHANNEL_ID, refresh_account, exclude_ids=tried)
 
 
-async def _log(api_key_info, account, model_name, stream, finish, status, error, t0):
+async def _log(api_key_info, account, model_name, stream, finish, status, error, t0,
+               first_token_ms=None):
     # 落库线程化 + 语义收敛：见 store_common.log_request（三家 _log 的一份实现）。
     # TraeWork 上游不回报 token，usage 传 None（tokens/credit 记 0）。
     await store_common.log_request(
@@ -226,6 +227,7 @@ async def _log(api_key_info, account, model_name, stream, finish, status, error,
         channel=CHANNEL_ID, model=model_name, stream=stream, usage=None,
         finish_reason=finish, status_code=status,
         duration_ms=int((time.time() - t0) * 1000), error_msg=error,
+        created_at=int(t0), first_token_ms=first_token_ms,
     )
 
 
@@ -393,7 +395,14 @@ async def _run_turn(
     on_thinking=None,
     timeout: float = 90.0,
 ) -> tuple:
-    """账号重试循环。返回 ("ok", text) 或 ("error", (status, detail))。"""
+    """账号重试循环。返回 ("ok", text) 或 ("error", (status, detail))。
+
+    流式路径在 on_thinking 回调上挂 first_token_cell（{"t0": 起点}）：
+    思考帧在 _stream_chat 侧打点；回合结束时若还没有内容帧（最终回答
+    才出的场景），由这里补记一次，避免漏采。签名保持不变以兼容既有
+    测试替身（tests/test_perf_providers.py 的 fake _run_turn）。
+    """
+    first_token_cell = getattr(on_thinking, "first_token_cell", None)
     tried: set[int] = set()
     last_error = None
     for _ in range(3):
@@ -405,7 +414,14 @@ async def _run_turn(
         try:
             text = await _turn(account, prompt, model, timeout=timeout, on_thinking=on_thinking)
             auth_manager.mark_account_success(account["id"])
-            await _log(api_key_info, account, client_model, stream, "stop", 200, "", t0)
+            if first_token_cell is not None and "ms" not in first_token_cell:
+                first_token_cell["ms"] = int(
+                    (time.monotonic() - first_token_cell.get("t0", time.monotonic())) * 1000
+                )
+            await _log(
+                api_key_info, account, client_model, stream, "stop", 200, "", t0,
+                first_token_ms=(first_token_cell or {}).get("ms"),
+            )
             return "ok", text
         except TraeWorkAuthError as exc:
             auth_manager.mark_account_failure(account["id"], 503)
@@ -470,6 +486,15 @@ async def _stream_chat(
 ) -> AsyncGenerator[str, None]:
     chunk_id = f"traework-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
+    # first_token_ms：基线 = 生成器启动（含账号轮换/_run_turn 内的建连），
+    # 首个内容帧（思考增量或最终回答）打点，经共享 cell 透传给 _run_turn 的落库。
+    request_t0 = time.monotonic()
+    first_token_cell: dict = {"t0": request_t0}
+
+    def mark_first_token() -> None:
+        first_token_cell.setdefault(
+            "ms", int((time.monotonic() - first_token_cell["t0"]) * 1000)
+        )
 
     def sse(delta: dict, finish: str | None = None) -> str:
         body = {
@@ -482,12 +507,20 @@ async def _stream_chat(
         return f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
 
     # 立即首包：客户端马上有 TTFB，不再是干等 10s+ 毫无输出。
+    # （role 帧不含内容，不计入 first_token_ms。）
     yield sse({"role": "assistant"})
 
     queue: asyncio.Queue = asyncio.Queue()
 
     async def on_thinking(fragment: str) -> None:
+        # 思考片段到达即打点：首个片段必然被转发（首个 piece 永远非空），
+        # 且必须赶在 _run_turn 完成并落库之前记录真实的首帧时刻。
+        mark_first_token()
         queue.put_nowait(fragment)
+
+    # first_token_cell 挂在 on_thinking 回调上（_run_turn 经 getattr 读取），
+    # 不改 _run_turn 签名。
+    on_thinking.first_token_cell = first_token_cell  # type: ignore[attr-defined]
 
     turn_task = asyncio.create_task(
         _run_turn(prompt, model, client_model, api_key_info, stream=True, on_thinking=on_thinking)
@@ -537,6 +570,7 @@ async def _stream_chat(
         text = result
         # 最终回答若已包含在转发过的思考文本里就不重复发，避免正文出现两遍。
         if text and text not in "".join(emitted):
+            mark_first_token()
             yield sse({"content": ("\n" if emitted else "") + text})
         yield sse({}, "stop")
         yield "data: [DONE]\n\n"

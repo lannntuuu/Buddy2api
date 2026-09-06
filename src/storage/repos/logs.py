@@ -1,6 +1,7 @@
 """Logs repository: request logs table, search, retention."""
 from __future__ import annotations
 
+import math
 import os
 import sqlite3
 import time
@@ -65,6 +66,13 @@ def migrate_client(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE logs ADD COLUMN client_version TEXT")
 
 
+def migrate_first_token(conn: sqlite3.Connection):
+    """first_token_ms:流式请求从请求起点到首个内容帧的毫秒数(非流式为 NULL)。"""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(logs)").fetchall()}
+    if "first_token_ms" not in cols:
+        conn.execute("ALTER TABLE logs ADD COLUMN first_token_ms INTEGER")
+
+
 # ============================================================
 # Log writes
 # ============================================================
@@ -83,8 +91,8 @@ def record_request(data: dict):
                      cache_read_tokens, cache_creation_tokens,
                      usage_json, credit_source,
                      finish_reason, duration_ms, status_code, error_msg, provider, client, client_version,
-                     reasoning_effort, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     reasoning_effort, created_at, first_token_ms)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     data.get("api_key_id"),
@@ -109,7 +117,9 @@ def record_request(data: dict):
                     data.get("client"),
                     data.get("client_version"),
                     data.get("reasoning_effort"),
-                    now,
+                    # 入队方携带的请求起点优先(created_at=int(t0)),缺省落库时刻
+                    data.get("created_at") or now,
+                    data.get("first_token_ms"),
                 ),
             )
             if data.get("account_id") and data.get("increment_usage", True):
@@ -222,12 +232,22 @@ def search_logs(filters: Optional[dict] = None) -> dict:
         values.append(model)
 
     start = filters.get("start")
-    if start not in (None, "", "all"):
+    has_start = start not in (None, "", "all")
+    end = filters.get("end")
+    has_end = end not in (None, "", "all")
+
+    # 防大表全扫:请求完全没给时间窗口时强制默认只看近 7 天。
+    window_applied = False
+    if not has_start and not has_end:
+        start = int(time.time()) - 7 * 86400
+        has_start = True
+        window_applied = True
+
+    if has_start:
         where.append("created_at>=?")
         values.append(int(start))
 
-    end = filters.get("end")
-    if end not in (None, "", "all"):
+    if has_end:
         where.append("created_at<=?")
         values.append(int(end))
 
@@ -245,10 +265,55 @@ def search_logs(filters: Optional[dict] = None) -> dict:
         "WHERE model IS NOT NULL AND model!='' ORDER BY model LIMIT 200"
     ).fetchall()
     conn.close()
-    return {
+    result = {
         "items": [dict(r) for r in rows],
         "total": int(total or 0),
         "limit": limit,
         "offset": offset,
         "models": [r["model"] for r in model_rows],
     }
+    if window_applied:
+        result["window_applied"] = "7d"
+    return result
+
+
+# ============================================================
+# first_token_ms 聚合
+# ============================================================
+
+def p95_of(values: list) -> int:
+    """纯函数:最近邻秩法 P95。空样本返回 0。
+
+    rank = ceil(0.95 × n),取排序后第 rank 个(1-based);n=1 → 自身,
+    n=100 → 第 95 个。测试以此做纯函数断言。
+    """
+    if not values:
+        return 0
+    ordered = sorted(int(v) for v in values)
+    rank = max(1, math.ceil(0.95 * len(ordered)))
+    return int(ordered[min(len(ordered), rank) - 1])
+
+
+def stream_p95_by_provider(since_days: int = 7, max_samples: int = 5000) -> dict:
+    """近 N 天流式请求 first_token_ms 的分通道 P95(毫秒)。
+
+    样本 = stream=1 且 first_token_ms 非空的行,按 id 倒序最多取
+    max_samples 条(默认 5000,SQL LIMIT 防大表),Python 端分通道排序取 P95。
+    无样本返回 {}。
+    """
+    cutoff = int(time.time()) - max(1, int(since_days)) * 86400
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT provider, first_token_ms FROM logs "
+        "WHERE stream=1 AND first_token_ms IS NOT NULL AND created_at>=? "
+        "ORDER BY id DESC LIMIT ?",
+        (cutoff, max(1, int(max_samples))),
+    ).fetchall()
+    conn.close()
+    samples: dict[str, list[int]] = {}
+    for row in rows:
+        value = row["first_token_ms"]
+        if value is None:
+            continue
+        samples.setdefault(row["provider"] or "workbuddy", []).append(int(value))
+    return {provider: p95_of(bucket) for provider, bucket in samples.items()}

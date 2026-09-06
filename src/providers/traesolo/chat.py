@@ -637,26 +637,50 @@ def _handle_kind(aid: int, kind: str, reason: str = "") -> None:
             auth_manager.mark_account_failure(aid, 502)
 
 
-# expired 账号 refresh 失败的负缓存（模式同 _model_cache.last_fail_at）：
-# 60s 内不重试同一账号，避免上游不可达时每个请求都原样重放 refresh 请求。
-_refresh_fail_at: dict[int, float] = {}
+# expired 账号 refresh 失败的负缓存（自适应间隔，语义同 trae_shared）：
+# 结构 (连续失败次数, 下次可试时刻)，第 n 次连续失败后冷却 60×2^(n-1) 秒
+# （封顶 600s），刷新成功清零。期间不重试同一账号，避免上游不可达时
+# 每个请求都原样重放 refresh 请求。
+_refresh_fail_at: dict[int, tuple[int, float]] = {}
 _refresh_fail_lock = threading.Lock()
-_REFRESH_FAIL_TTL_S = 60.0
+_REFRESH_FAIL_BASE_S = 60.0
+_REFRESH_FAIL_MAX_S = 600.0
+
+
+def _monotonic_now() -> float:
+    """时钟注入点：测试用 fake clock 覆盖（monkeypatch 本函数）。"""
+    return time.monotonic()
+
+
+def _refresh_fail_interval(fail_count: int) -> float:
+    """第 n 次连续失败后的冷却间隔：60×2^(n-1) 秒，封顶 600 秒。"""
+    return min(
+        _REFRESH_FAIL_MAX_S,
+        _REFRESH_FAIL_BASE_S * (2 ** (max(1, int(fail_count)) - 1)),
+    )
 
 
 def _refresh_recently_failed(aid: int, now: float) -> bool:
     with _refresh_fail_lock:
-        last = _refresh_fail_at.get(aid, 0.0)
-        return bool(last) and (now - last) < _REFRESH_FAIL_TTL_S
+        entry = _refresh_fail_at.get(aid)
+        return entry is not None and now < entry[1]
 
 
 def _note_refresh_failure(aid: int) -> None:
-    now = time.monotonic()
+    now = _monotonic_now()
     with _refresh_fail_lock:
         # 顺手清掉已过期条目，dict 不随时间无界增长
-        for key in [k for k, v in _refresh_fail_at.items() if now - v >= _REFRESH_FAIL_TTL_S]:
+        for key in [k for k, v in _refresh_fail_at.items() if v[1] <= now]:
             _refresh_fail_at.pop(key, None)
-        _refresh_fail_at[aid] = now
+        count, _ = _refresh_fail_at.get(aid, (0, 0.0))
+        count += 1
+        _refresh_fail_at[aid] = (count, now + _refresh_fail_interval(count))
+
+
+def _note_refresh_success(aid: int) -> None:
+    """刷新成功：清除该账号的负缓存（连续失败计数清零）。"""
+    with _refresh_fail_lock:
+        _refresh_fail_at.pop(aid, None)
 
 
 def _reset_refresh_fail_cache() -> None:
@@ -681,7 +705,7 @@ async def _pick(tried: set[int]) -> dict | None:
         and int(row.get("id") or 0) not in tried
         and not pool.cooling(int(row.get("id") or 0))
     ]
-    now = time.monotonic()
+    now = _monotonic_now()
     for row in expired:
         aid = int(row.get("id") or 0)
         if _refresh_recently_failed(aid, now):
@@ -691,8 +715,7 @@ async def _pick(tried: set[int]) -> dict | None:
         except Exception:
             _note_refresh_failure(aid)
             continue
-        with _refresh_fail_lock:
-            _refresh_fail_at.pop(aid, None)
+        _note_refresh_success(aid)
         return fresh
     return None
 
@@ -960,6 +983,7 @@ async def _log(
     error: str,
     t0: float,
     usage: dict | None = None,
+    first_token_ms: int | None = None,
 ) -> None:
     prompt = completion = total = 0
     cache_read = cache_creation = 0
@@ -1026,6 +1050,9 @@ async def _log(
                 "increment_usage": True,
                 "client": (api_key_info or {}).get("_client_tag"),
                 "client_version": (api_key_info or {}).get("_client_version"),
+                # 请求起点秒级时间戳；流式首帧毫秒（非流式/错误行保持 None）
+                "created_at": int(t0),
+                "first_token_ms": first_token_ms,
             }
         )
     except Exception:
@@ -1125,6 +1152,9 @@ async def _run_stream(
     chunk_id = f"traesolo-{uuid.uuid4().hex[:12]}"
     tried: set[int] = set()
     last_error = "No available accounts"
+    # first_token_ms 基线取账号轮换循环之前（= 用户真实等待，含 pick/预刷新）
+    request_t0 = time.monotonic()
+    first_token_ms: int | None = None
     for _ in range(MAX_ROTATE):
         account = await _pick(tried)
         if account is None:
@@ -1172,6 +1202,8 @@ async def _run_stream(
             async for out in stream_to_openai(
                 response.aiter_lines(), chunk_id, client_model, on_error, usage_sink
             ):
+                if first_token_ms is None:
+                    first_token_ms = int((time.monotonic() - request_t0) * 1000)
                 if out.startswith("event: error"):
                     errored = True
                 yield out
@@ -1192,6 +1224,7 @@ async def _run_stream(
             "upstream stream error" if errored else "",
             t0,
             usage_sink.get("usage"),
+            first_token_ms=None if errored else first_token_ms,
         )
         return
 

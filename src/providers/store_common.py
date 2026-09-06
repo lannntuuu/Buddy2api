@@ -326,7 +326,9 @@ async def log_request(
     字段语义逐字对齐 qclaw 版（含 extract_cache_tokens 与 usage_json 截断）；
     credit = round(total_tokens / channel_credit_rate(channel), 6)。
     extra 透传 prompt_tokens / completion_tokens / total_tokens /
-    increment_usage 及其他 record_request 覆盖字段。
+    increment_usage 及其他 record_request 覆盖字段；first_token_ms
+    （流式首帧毫秒，非流式 None）与 created_at（请求起点秒级时间戳，
+    缺省落库时刻）同样经此透传。
     """
     from providers.model_config import channel_credit_rate
     from storage import database as db
@@ -357,6 +359,8 @@ async def log_request(
         "increment_usage": extra.pop("increment_usage", True),
         "client": (api_key_info or {}).get("_client_tag"),
         "client_version": (api_key_info or {}).get("_client_version"),
+        "first_token_ms": extra.pop("first_token_ms", None),
+        "created_at": extra.pop("created_at", None),
     }
     row.update(extra)
     try:

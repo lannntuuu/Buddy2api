@@ -268,6 +268,7 @@ class OpenAICompatProvider:
         error_msg: str = "",
         t0: float = 0.0,
         usage_payload: dict | None = None,
+        first_token_ms: int | None = None,
     ):
         """Fire-and-forget log write — mirrors upstream/proxy._log_request."""
         elapsed_ms = int((time.time() - t0) * 1000) if t0 else 0
@@ -311,6 +312,8 @@ class OpenAICompatProvider:
             "usage_json": json.dumps(usage_payload, ensure_ascii=False) if usage_payload else None,
             "credit_source": credit_source,
             "increment_usage": True,
+            # 流式首帧毫秒（非流式/错误行保持 None）
+            "first_token_ms": first_token_ms,
         }
         try:
             loop = asyncio.get_running_loop()
@@ -403,6 +406,8 @@ class OpenAICompatProvider:
         not synthesise a final usage chunk — the upstream emits its own (because we
         set stream_options.include_usage)."""
         t0 = time.time()
+        # first_token_ms 基线：进入读循环前（t0 处，含建连/发请求/上游排队）
+        ft_t0 = time.monotonic()
         body = {**payload, "stream": True, "stream_options": {"include_usage": True}}
         prompt_tokens = 0
         completion_tokens = 0
@@ -412,6 +417,7 @@ class OpenAICompatProvider:
         last_status = 200
         error_msg = ""
         emitted = False
+        first_token_ms: int | None = None
 
         try:
             client = self._get_client()
@@ -451,6 +457,8 @@ class OpenAICompatProvider:
                         # 廉价预过滤：只有携带 usage / finish_reason 的帧才值得
                         # json.loads，其余 data 行（绝大多数）直接透传。
                         data_part = text[5:].strip()
+                        if first_token_ms is None and data_part and data_part != "[DONE]":
+                            first_token_ms = int((time.monotonic() - ft_t0) * 1000)
                         if (
                             data_part
                             and data_part != "[DONE]"
@@ -497,6 +505,7 @@ class OpenAICompatProvider:
             api_key_info, account, model=model, stream=True, finish_reason=final_finish,
             status_code=last_status, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             total_tokens=total_tokens, t0=t0, usage_payload=usage_payload,
+            first_token_ms=first_token_ms,
         )
 
     # ────────────────────────── entry point ───────────────────────────

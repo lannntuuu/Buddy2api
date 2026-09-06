@@ -12,6 +12,7 @@ auth_manager.py — 多账号凭据管理
 import asyncio
 import json
 import os
+import random
 import sys
 import threading
 import time
@@ -922,6 +923,11 @@ def _route_weight(account: dict) -> int:
 
 
 def _route_sort_key(account: dict):
+    """调度排序键（不含 id 决胜）：优先级 > weight > total_requests/weight > total_requests。
+
+    完全并列（前四级全相等）的候选由 pick_account 从并列集加权随机取一，
+    避免旧实现用 id 决胜导致并列账号永远固定选同一个。
+    """
     weight = _route_weight(account)
     total_requests = _route_int(account.get("total_requests"), 0)
     return (
@@ -929,8 +935,26 @@ def _route_sort_key(account: dict):
         -weight,
         total_requests / weight,
         total_requests,
-        _route_int(account.get("id"), 0),
     )
+
+
+# 加权随机决胜的随机源：模块级可注入（测试注入固定 rng 保证可复现）。
+_route_rng: random.Random = random.Random()
+
+
+def _weighted_tie_pick(candidates: list[dict]) -> dict:
+    """从完全并列的候选集中按 weight 加权随机取一。"""
+    weights = [_route_weight(a) for a in candidates]
+    total = sum(weights)
+    if total <= 0:
+        return candidates[0]
+    threshold = _route_rng.random() * total
+    upto = 0.0
+    for account, weight in zip(candidates, weights):
+        upto += weight
+        if threshold < upto:
+            return account
+    return candidates[-1]
 
 
 def _set_sticky_account(aid: int, provider: str = "workbuddy"):
@@ -958,7 +982,10 @@ def pick_account(exclude_ids: set[int] = None, provider: str = "workbuddy") -> O
             if sticky:
                 return sticky
 
-        chosen = sorted(top_candidates, key=_route_sort_key)[0]
+        ranked = sorted(top_candidates, key=_route_sort_key)
+        best_key = _route_sort_key(ranked[0])
+        tied = [a for a in ranked if _route_sort_key(a) == best_key]
+        chosen = tied[0] if len(tied) == 1 else _weighted_tie_pick(tied)
         _sticky_account_id[provider] = chosen["id"]
         return chosen
 

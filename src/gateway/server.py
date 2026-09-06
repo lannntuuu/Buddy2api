@@ -113,6 +113,34 @@ def _schedule_traework_sync() -> None:
 
 
 # ============================================================
+# Logs retention sweep (24h)
+# ============================================================
+
+async def _log_prune_loop() -> None:
+    """每日一次调用 db.prune_logs()（保留窗口由 CB_GATEWAY_LOG_RETENTION_DAYS 控制）。
+
+    仿 _traework_sync_loop 模式：异常吞掉写 stderr，循环常驻。
+    """
+    await asyncio.sleep(60)  # delay the first run so startup stays snappy
+    while True:
+        try:
+            removed = await asyncio.to_thread(db.prune_logs)
+            if removed:
+                sys.stderr.write(f"[log-prune] removed {removed} expired rows\n")
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write(f"[log-prune] error: {exc!r}\n")
+        await asyncio.sleep(24 * 3600)
+
+
+def _schedule_log_prune() -> None:
+    try:
+        asyncio.get_running_loop().create_task(_log_prune_loop())
+    except RuntimeError:
+        # No running loop (e.g. in tests or non-asyncio contexts); skip.
+        pass
+
+
+# ============================================================
 # FastAPI app assembly
 # ============================================================
 
@@ -131,6 +159,7 @@ async def _lifespan(_app):
         _cc.seed_initial_definitions()
     except Exception as exc:  # noqa: BLE001
         sys.stderr.write(f"[startup] custom-channels seed migration failed: {exc}\n")
+    _schedule_log_prune()
     yield
 
 
@@ -147,9 +176,23 @@ app.add_middleware(
 )
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+
+class _CacheableStaticFiles(StaticFiles):
+    """给 /static 响应加一小时的 public 缓存（index 等动态路由不受影响）。"""
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        try:
+            response.headers["Cache-Control"] = "public, max-age=3600"
+        except Exception:  # noqa: BLE001 无 headers 的异常响应按原样抛出
+            pass
+        return response
+
+
 # Static assets (css/js/vendor modules); the index page itself is served by
-# the static router at GET /.
-app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+# the static router at GET / (kept no-cache there).
+app.mount("/static", _CacheableStaticFiles(directory=WEB_DIR), name="static")
 
 
 @app.middleware("http")
@@ -381,7 +424,13 @@ def main():
             sys.stderr.write("  Admin Token: configured (hidden)\n")
     sys.stderr.write(f"  ========================\n\n")
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level=args.log_level,
+        timeout_keep_alive=30,
+    )
 
 
 if __name__ == "__main__":

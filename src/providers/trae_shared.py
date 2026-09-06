@@ -45,23 +45,46 @@ def extra_of(account: dict) -> dict:
     return extra
 
 
-# --- refresh 失败负缓存（60s 内不重试同一账号）---
+# --- refresh 失败负缓存（自适应间隔）---
+# 结构为 (连续失败次数, 下次可试时刻)：第 n 次连续失败后冷却
+# 60×2^(n-1) 秒（封顶 600s），刷新成功清零。上游持续故障时指数
+# 退避，避免固定 60s 内每个请求都原样重放失败的刷新。
+_REFRESH_FAIL_BASE_SECONDS = 60.0
+_REFRESH_FAIL_MAX_SECONDS = 600.0
+_refresh_failed_at: dict[tuple[str, int], tuple[int, float]] = {}
 
-_REFRESH_FAIL_TTL_SECONDS = 60.0
-_refresh_failed_at: dict[tuple[str, int], float] = {}
+
+def _now() -> float:
+    """时钟注入点：测试用 fake clock 覆盖（monkeypatch trae_shared._now）。"""
+    return time.time()
+
+
+def _fail_interval(fail_count: int) -> float:
+    """第 n 次连续失败后的冷却间隔：60×2^(n-1) 秒，封顶 600 秒。"""
+    return min(
+        _REFRESH_FAIL_MAX_SECONDS,
+        _REFRESH_FAIL_BASE_SECONDS * (2 ** (max(1, int(fail_count)) - 1)),
+    )
 
 
 def _recently_failed(channel_id: str, account_id: int, now: float) -> bool:
-    fail_at = _refresh_failed_at.get((channel_id, account_id))
-    return fail_at is not None and (now - fail_at) < _REFRESH_FAIL_TTL_SECONDS
+    entry = _refresh_failed_at.get((channel_id, account_id))
+    return entry is not None and now < entry[1]
 
 
 def _mark_refresh_failure(channel_id: str, account_id: int, now: float) -> None:
-    _refresh_failed_at[(channel_id, account_id)] = now
+    count, _ = _refresh_failed_at.get((channel_id, account_id), (0, 0.0))
+    count += 1
+    _refresh_failed_at[(channel_id, account_id)] = (count, now + _fail_interval(count))
     # 顺手清掉同通道已过期的负缓存条目，避免长期运行下无界增长。
-    for key, fail_at in list(_refresh_failed_at.items()):
-        if key[0] == channel_id and now - fail_at >= _REFRESH_FAIL_TTL_SECONDS:
+    for key, (_n, next_try) in list(_refresh_failed_at.items()):
+        if key[0] == channel_id and next_try <= now:
             _refresh_failed_at.pop(key, None)
+
+
+def _mark_refresh_success(channel_id: str, account_id: int) -> None:
+    """刷新成功：清除该账号的负缓存（连续失败计数清零）。"""
+    _refresh_failed_at.pop((channel_id, account_id), None)
 
 
 def reset_refresh_failures() -> None:
@@ -78,7 +101,8 @@ async def pick_with_refresh_fallback(
 ) -> dict | None:
     """pick_account + expired 账号逐个 refresh 兜底（qwenwork / traework / qclaw 共用）。
 
-    refresh 失败的账号记 60s 负缓存：期间不再对同一账号重复发 refresh 请求，
+    refresh 失败的账号进自适应负缓存：第 n 次连续失败后 60×2^(n-1) 秒
+    （封顶 600s）内不再对同一账号重复发 refresh 请求，成功即清零，
     避免上游故障时每个请求都原样重放失败的刷新。
     refresh_errors 指定哪些异常按"刷新失败"处理（负缓存 + 尝试下一个），
     其余异常照常向上抛（qclaw 只把 JprxError 当刷新失败）。
@@ -87,7 +111,7 @@ async def pick_with_refresh_fallback(
     from storage import database as db
 
     exclude = exclude_ids or set()
-    now = time.time()
+    now = _now()
     account = auth_manager.pick_account(exclude, provider=channel_id)
     if account:
         if is_token_expired(account):
@@ -99,12 +123,15 @@ async def pick_with_refresh_fallback(
                 )
             else:
                 try:
-                    return await refresh_fn(account)
+                    result = await refresh_fn(account)
                 except refresh_errors:
                     logger.debug(
                         "refresh failed for %s account %s", channel_id, account_id, exc_info=True
                     )
-                    _mark_refresh_failure(channel_id, account_id, time.time())
+                    _mark_refresh_failure(channel_id, account_id, _now())
+                else:
+                    _mark_refresh_success(channel_id, account_id)
+                    return result
         else:
             return account
     expired = [
@@ -116,12 +143,14 @@ async def pick_with_refresh_fallback(
     ]
     for row in expired:
         try:
-            return await refresh_fn(row)
+            result = await refresh_fn(row)
         except refresh_errors:
             logger.debug(
                 "refresh failed for %s account %s",
                 channel_id, row.get("id"), exc_info=True,
             )
-            _mark_refresh_failure(channel_id, int(row.get("id") or 0), time.time())
+            _mark_refresh_failure(channel_id, int(row.get("id") or 0), _now())
             continue
+        _mark_refresh_success(channel_id, int(row.get("id") or 0))
+        return result
     return None
