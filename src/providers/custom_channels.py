@@ -209,16 +209,71 @@ def upsert_definition(definition: dict) -> dict:
 
 
 def delete_definition(channel_id: str) -> bool:
-    """Remove a definition and invalidate the cache. Returns False if not
-    present (after validation caller treats as 404/409)."""
+    """Remove a definition, purge every per-channel settings residual, and
+    invalidate the cache. Returns False if not present (caller → 404).
+
+    Purged residuals (so no page/dropdown keeps referencing a dead channel):
+      * <cid>.models / <cid>.aliases   — 模型配置页覆盖键
+      * <cid>.credit_rate / <cid>.reasoning — 同页倍率/思考档位
+      * unified_models entries mapping to this channel
+      * enabled_channels / channel_order membership
+    """
     cid = str(channel_id or "").strip()
     definitions = list_definitions()
     out = [d for d in definitions if str(d.get("id") or "").strip() != cid]
     if len(out) == len(definitions):
         return False
     save_definitions(out)
+    _purge_channel_settings(cid)
     invalidate_cache(cid)
     return True
+
+
+def _purge_channel_settings(cid: str) -> None:
+    """Delete every settings residual tied to a custom channel id (see
+    delete_definition). Best-effort per key: a missing key is not an error."""
+    cid = str(cid or "").strip()
+    if not cid:
+        return
+    # 1) per-channel overrides written by the 模型配置 page (workbuddy keeps
+    #    legacy key names, but workbuddy is a builtin and never hits this).
+    for key in (f"{cid}.models", f"{cid}.aliases", f"{cid}.credit_rate", f"{cid}.reasoning"):
+        try:
+            db.delete_setting(key)
+        except Exception:
+            pass
+    # 2) unified-model mappings referencing this channel: drop the channel
+    #    from each entry; remove entries left with no mapping at all.
+    try:
+        raw = db.get_setting("unified_models", None)
+        if isinstance(raw, list):
+            changed = False
+            cleaned: list = []
+            for entry in raw:
+                if not isinstance(entry, dict):
+                    cleaned.append(entry)
+                    continue
+                mappings = entry.get("mappings")
+                if isinstance(mappings, dict) and cid in mappings:
+                    entry["mappings"] = {k: v for k, v in mappings.items() if k != cid}
+                    changed = True
+                    if not entry["mappings"]:
+                        continue  # entry no longer maps anywhere → drop it
+                cleaned.append(entry)
+            if changed:
+                db.set_setting("unified_models", cleaned)
+    except Exception:
+        pass
+    # 3) enabled/order membership so the channel disappears from the UI order.
+    try:
+        enabled = db.get_setting("enabled_channels", None)
+        if isinstance(enabled, list) and cid in enabled:
+            db.set_setting("enabled_channels", [x for x in enabled if x != cid])
+        order = db.get_setting("channel_order", None)
+        if isinstance(order, list) and cid in order:
+            db.set_setting("channel_order", [x for x in order if x != cid])
+    except Exception:
+        pass
 
 
 def reserved_ids(exclude_id: str | None = None) -> set[str]:

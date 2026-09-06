@@ -228,6 +228,34 @@ def _apply_definition_with_key(
     return result
 
 
+def _sync_channel_overrides(definition: dict) -> None:
+    """Mirror a custom-channel definition's models/aliases into the
+    `<cid>.models` / `<cid>.aliases` override keys the 模型配置 page reads.
+
+    Two entry points used to write the same two fields (channel form →
+    definition, models page → override key) with the override key winning at
+    runtime — editing one silently diverged from the other. Writing BOTH on
+    every channel-form save keeps them the single same source of truth; the
+    models page keeps working unchanged (it overwrites the same keys).
+    """
+    cid = str(definition.get("id") or "").strip()
+    if not cid:
+        return
+    try:
+        models = definition.get("models")
+        if isinstance(models, list):
+            db.set_setting(f"{cid}.models", [str(m) for m in models if str(m).strip()])
+        aliases = definition.get("aliases")
+        if isinstance(aliases, dict):
+            db.set_setting(
+                f"{cid}.aliases",
+                {str(k).strip(): str(v).strip() for k, v in aliases.items()
+                 if str(k).strip() and str(v).strip()},
+            )
+    except Exception:
+        pass  # sync is best-effort; the definition itself remains authoritative
+
+
 @router_obj.get("/admin/channels/custom")
 async def admin_list_custom_channels(authorization: str | None = Header(default=None)):
     _check_admin(authorization)
@@ -310,6 +338,7 @@ async def admin_create_custom_channel(
         pass
 
     stored = custom_channels.upsert_definition(definition_to_save)
+    _sync_channel_overrides(stored)
     out = _public_definition(stored)
     out["status"] = "ok"
     out["account"] = {
@@ -394,6 +423,7 @@ async def admin_update_custom_channel(
         upsert_result = await run_in_threadpool(_apply_definition_with_key, merged, api_key)
 
     stored = custom_channels.upsert_definition(merged)
+    _sync_channel_overrides(stored)
     out = _public_definition(stored)
     out["status"] = "ok"
     if api_key_present and api_key:

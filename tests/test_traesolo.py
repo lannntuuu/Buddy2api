@@ -631,7 +631,7 @@ def test_manual_callback_without_pending(isolated_db):
     assert len(rows) == 1
 
 
-def test_login_cancel_and_ttl():
+def test_login_cancel_and_ttl(traesolo_enabled, isolated_db):
     provider = providers.get_provider(CHANNEL_ID)
     started = provider.start_login("http://127.0.0.1:8787")
     assert provider.cancel_login(started["pending_id"])["canceled"] is True
