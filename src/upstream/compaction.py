@@ -25,6 +25,12 @@ _COMPACTION_LOCK = threading.Lock()
 _ARMED_KEYS: set[tuple] = set()
 _COMPACTION_STATS = {"armed_triggers": 0, "compacted_messages": 0, "retried_11128": 0}
 _COMPACT_11128_MARKERS = ("11128", "Illegal API invocation")
+# 安全策略拦截语义：上游对未授权通道/客户端的 400，与请求体大小无关，
+# 精简 body 无效且会无谓改写请求体。这类 11128 不应走超长请求自愈。
+_COMPACT_11128_SECURITY_MARKERS = (
+    "unapproved channel",
+    "Illegal API invocation from an unapproved channel",
+)
 _COMPACT_ENABLED_CLIENTS = ("zcode",)
 
 
@@ -85,6 +91,9 @@ def _env_int(name: str, default: int) -> int:
 def _is_11128_error(status: int, payload, body: dict) -> bool:
     """True iff this upstream response is the 11128 oversized-request block.
     `payload` may be raw bytes, a dict, or a string.
+
+    安全策略拦截(未授权通道)虽带 11128 码，但与请求体大小无关，不应走
+    超长请求自愈精简——精简无效且会无谓改写请求体，故此处排除。
     """
     if status != 400:
         return False
@@ -95,6 +104,9 @@ def _is_11128_error(status: int, payload, body: dict) -> bool:
         text = str(payload)
     elif isinstance(payload, str):
         text = payload
+    # 安全语义(未授权通道/客户端)不走超长请求自愈：直接判为非 11128 超长触发。
+    if any(marker in text for marker in _COMPACT_11128_SECURITY_MARKERS):
+        return False
     if not any(marker in text for marker in _COMPACT_11128_MARKERS):
         return False
     # If we've already deep-compacted and still 11128'd, give up to avoid busy-looping.

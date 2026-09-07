@@ -37,6 +37,18 @@ def _invalidate_path(path_key: str) -> None:
     _all_cache.pop(path_key, None)
 
 
+def setting_exists(key: str) -> bool:
+    """该 key 是否在 settings 表中显式存在（与值是否为 null 无关）。
+
+    限额等场景需要区分「未设置（回退内置默认）」与「显式设为 null（表示
+    不限制）」，而 get_setting 对两者都返回 None，故单独提供存在性判断。
+    """
+    conn = get_conn()
+    row = conn.execute("SELECT 1 FROM settings WHERE key=?", (key,)).fetchone()
+    conn.close()
+    return row is not None
+
+
 def get_setting(key: str, default: Any = None) -> Any:
     path_key = _path_key()
     now = time.monotonic()

@@ -30,7 +30,7 @@ DEFAULT_MODELS = [
     {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro"},
     {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash"},
     {"id": "minimax-m3-pay", "name": "MiniMax M3"},
-    {"id": "hy3-preview-agent", "name": "HY3 Preview Agent"},
+    {"id": "hy3-x", "name": "HY3-X"},
     {"id": "auto", "name": "Auto (auto routing)"},
 ]
 
@@ -73,6 +73,8 @@ _BUILTIN_ALIASES = {
     # Moonshot
     "moonshot-v1-128k": "kimi-k2.7",
     "moonshot-v1-32k": "kimi-k2.6",
+    # 过时 id 保底映射：真实 id 为 hy3-x，老客户端仍可带 hy3-preview-agent 请求
+    "hy3-preview-agent": "hy3-x",
 }
 
 

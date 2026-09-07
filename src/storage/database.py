@@ -82,6 +82,7 @@ from storage.repos.settings import (
     get_all_settings,
     get_setting,
     set_setting,
+    setting_exists,
 )
 from storage.repos.stats import get_provider_model_usage, get_stats
 
@@ -130,6 +131,7 @@ __all__ = [
     "get_setting",
     "set_setting",
     "delete_setting",
+    "setting_exists",
     "get_all_settings",
 ]
 

@@ -37,6 +37,7 @@ from providers.qwenwork.constants import (
 )
 from providers.host_override import channel_host
 from providers.qwenwork.token import refresh_account
+from providers import model_limits
 
 
 # 与 qclaw / traework 的同名单行拷贝收敛：见 store_common.make_translator
@@ -117,7 +118,8 @@ def build_body(payload: dict) -> tuple[dict, str, str]:
         if key in payload and payload[key] is not None:
             parameters[key] = payload[key]
     if "max_tokens" not in parameters:
-        parameters["max_tokens"] = 32000
+        # 默认输出上限改读 model_limits（内置默认 32768，替代原硬编码 32000）
+        parameters["max_tokens"] = model_limits.get_default_max_output_tokens("qwenwork")
     body = {
         "request_id": request_id,
         "request_set_id": str(payload.get("request_set_id") or request_id),

@@ -18,6 +18,7 @@ import providers
 from accounts import auth_manager
 import providers.model_config as model_config
 from providers.model_config import _channel_keys, _ids_from_raw, is_customized, unified_models
+from providers import model_limits
 from providers.protocol import KNOWN_CHANNEL_SET  # noqa: F401  (kept for legacy callers)
 from providers.qclaw.constants import ALIASES as _QCLAW_DEFAULT_ALIASES
 from providers.qclaw.constants import STATIC_MODELS as _QCLAW_DEFAULT_MODELS
@@ -451,6 +452,8 @@ def channel_model_view(channel: str) -> dict:
         "reasoning_default": model_config.channel_reasoning(channel).get("__default__", ""),
         "reasoning_customized": db.get_setting(f"{channel}.reasoning") is not None,
         "reasoning_choices": list(model_config.REASONING_CHOICES),
+        # 模型上下文限额（DB settings，不进 JSON）：仅显式配置项 + 通道生效默认
+        **model_limits.get_channel_limits(channel),
     }
 
 
@@ -493,21 +496,33 @@ def set_channel_models(
     aliases=None,
     credit_rate=None,
     reasoning=None,
+    model_limits: dict | None = None,
+    default_max_input_tokens: int | None = None,
     set_models: bool = False,
     set_aliases: bool = False,
     set_rate: bool = False,
     set_reasoning: bool = False,
+    set_model_limits: bool = False,
+    set_default_max_input: bool = False,
 ) -> dict:
-    """设置或重置通道模型列表 / 别名 / credit 换算率 / 按模型思考档位。
-    None 表示重置为默认。返回最新视图。"""
+    """设置或重置通道模型列表 / 别名 / credit 换算率 / 按模型思考档位 / 模型上下文限额。
+    None 表示重置为默认。返回最新视图。
+
+    model_limits / default_max_input_tokens 写 DB settings（不进 JSON）；
+    null = 删除该级配置；模型 id 允许不在当前白名单（预填未来模型）。
+    """
     channel = str(channel or "").strip()
     if not providers.is_known_channel(channel):
         raise ValueError(f"Unknown channel '{channel}'")
     if providers.get_provider(channel) is None:
         raise ValueError(f"Channel '{channel}' is not enabled")
-    if not (set_models or set_aliases or set_rate or set_reasoning):
+    if not (
+        set_models or set_aliases or set_rate or set_reasoning
+        or set_model_limits or set_default_max_input
+    ):
         raise ValueError(
-            "Provide 'models' and/or 'aliases' and/or 'credit_rate' and/or 'reasoning' (null resets)"
+            "Provide 'models' and/or 'aliases' and/or 'credit_rate' and/or "
+            "'reasoning' and/or 'model_limits'/'default_max_input_tokens' (null resets)"
         )
 
     models_key, aliases_key = _channel_keys(channel)
@@ -543,12 +558,78 @@ def set_channel_models(
         else:
             validated = model_config._validate_reasoning(reasoning)
             db.set_setting(f"{channel}.reasoning", validated)
+    if set_model_limits or set_default_max_input:
+        _set_model_limits(
+            channel,
+            model_limits if set_model_limits else None,
+            default_max_input_tokens if set_default_max_input else None,
+            set_model_limits=set_model_limits,
+            set_default_max_input=set_default_max_input,
+        )
     _sync_models_page_to_definition(
         channel,
         set_models=set_models, models=models,
         set_aliases=set_aliases, aliases=aliases,
     )
     return channel_model_view(channel)
+
+
+def _validate_limit_value(value, what: str) -> int | None:
+    """限额值校验：正整数或 null（None）。非法一律 ValueError。"""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{what} must be a positive integer or null")
+    if value <= 0:
+        raise ValueError(f"{what} must be a positive integer or null")
+    return value
+
+
+def _set_model_limits(
+    channel: str,
+    model_limits_payload: dict | None,
+    default_max_input_tokens,
+    *,
+    set_model_limits: bool,
+    set_default_max_input: bool,
+) -> None:
+    """把模型上下文限额写入 DB settings（spec 20 / 19c：不再写 JSON channels 段）。
+
+    - model_limits: {"<id>": <int|null>}，整体替换语义（同 aliases）；null=该模型
+      显式不限制（保留为 null 条目）；id 允许不在白名单；{} = 清空该通道全部每模型配置
+    - default_max_input_tokens: <int|null>；null=删除通道级默认（回退内置默认）
+    - 删空后清理键：通道级删空且模型级为空 → 两键都删除，不留空壳
+    """
+    chan_key = f"{channel}.max_input_tokens"
+    by_model_key = f"{channel}.max_input_tokens_by_model"
+
+    if set_model_limits:
+        if not isinstance(model_limits_payload, dict):
+            raise ValueError("model_limits must be an object mapping model id -> int|null")
+        # 先整体验证再落盘：任何一条非法都不写入
+        validated: dict[str, int | None] = {}
+        for mid, value in model_limits_payload.items():
+            mid_s = str(mid).strip()
+            if not mid_s:
+                raise ValueError("model_limits keys must be non-empty model ids")
+            validated[mid_s] = _validate_limit_value(value, f"model_limits[{mid_s}]")
+        if validated:
+            db.set_setting(by_model_key, validated)
+        else:
+            db.delete_setting(by_model_key)
+
+    if set_default_max_input:
+        value = _validate_limit_value(
+            default_max_input_tokens, "default_max_input_tokens")
+        if value is None:
+            db.delete_setting(chan_key)
+        else:
+            db.set_setting(chan_key, value)
+
+    # 清理空壳：通道级删空且模型级为空 → 一并删除模型级键
+    if (not set_default_max_input or db.get_setting(chan_key, None) is None):
+        if db.get_setting(by_model_key, None) == {}:
+            db.delete_setting(by_model_key)
 
 
 def _sync_models_page_to_definition(
