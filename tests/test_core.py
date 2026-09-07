@@ -2567,3 +2567,31 @@ def test_stream_tool_stall_is_logged(monkeypatch, isolated_db):
     assert b"tool stall" not in raw
     logged_finishes = [entry[0][8] for entry in calls["logs"]]
     assert "tool_stall" in logged_finishes
+
+
+def test_is_11128_error_excludes_unapproved_channel_security_semantic():
+    """11128 安全语义(未授权通道)不应走超长请求自愈精简。
+
+    上游对 hy4-preview / zcode 客户端等返回
+    {"code":11128,"msg":"Illegal API invocation from an unapproved channel"} 是通道
+    授权拦截，与请求体大小无关——精简 content 无效且会无谓改写请求体。
+    因此 _is_11128_error 必须对这类 body 返回 False（对照真实的超长 11128）。
+    """
+    from upstream import compaction
+
+    security_body = {
+        "code": 11128,
+        "msg": "Illegal API invocation from an unapproved channel",
+    }
+    oversize_body = {
+        "code": 11128,
+        "msg": "Illegal API invocation: request too large, please reduce content",
+    }
+    assert compaction._is_11128_error(400, security_body, {}) is False
+    assert compaction._is_11128_error(400, json.dumps(security_body), {}) is False
+    # 真实超长语义仍应触发自愈（仅当未精简过）。
+    assert compaction._is_11128_error(400, oversize_body, {}) is True
+    # 已精简过的超长请求不再二次自愈，避免 busy-loop。
+    assert compaction._is_11128_error(400, oversize_body, {"_compacted_11128": True}) is False
+    # 非 400 不参与。
+    assert compaction._is_11128_error(502, oversize_body, {}) is False
