@@ -173,9 +173,14 @@ class ChatStreamObserver:
                         self.parser_error = "The upstream tool call stream had an invalid index."
                         return None
                     call_id = tool_delta.get("id")
-                    if call_id is not None and (not isinstance(call_id, str) or not call_id):
+                    if call_id is not None and not isinstance(call_id, str):
                         self.parser_error = "The upstream tool call stream had an invalid call id."
                         return None
+                    # 兼容：部分上游（hy4 系实测）会发 id="" 的 delta 帧
+                    # （id 稍后帧才带上，甚至整条流不带）。空 id 视作"未携带"：
+                    # 此处不报错也不记录，累积阶段 `if call_id:` 同样跳过；
+                    # eof 阶段仍要求最终 id 存在（缺失则合成占位），
+                    # 所以不会放过真正不完整的工具调用。
                     call_type = tool_delta.get("type")
                     if call_type is not None and call_type != "function":
                         self.parser_error = "The upstream tool call stream had an invalid call type."
@@ -274,11 +279,16 @@ class ChatStreamObserver:
             ]
             if not calls:
                 return "The upstream tool call stream ended before the tool call was identified."
-            for state in calls:
+            for tool_pos, state in enumerate(calls):
                 if self.finish_reasons.get(choice_index) in {"length", "content_filter"}:
                     continue
-                if not state["id"] or not state["name"]:
+                if not state["name"]:
                     return "The upstream tool call stream ended before the tool call was complete."
+                if not state["id"]:
+                    # 上游始终未携带 id（hy4 系偶发）：按位置合成占位 id。
+                    # 客户端回传 tool 结果依赖 id 匹配，空 id 会让协议无效；
+                    # 合成比让整个回合 502 更可用。
+                    state["id"] = f"call_{choice_index}_{tool_pos}"
                 repaired = _repair_json_arguments(state["arguments"])
                 try:
                     arguments = json.loads(repaired)
