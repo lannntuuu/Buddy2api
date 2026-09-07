@@ -123,10 +123,13 @@ async def admin_channel_models(
 async def admin_set_channel_models(
     channel: str, request: Request, authorization: str | None = Header(default=None)
 ):
-    """Set or reset a channel's model list / aliases / credit rate / per-model reasoning tier.
+    """Set or reset a channel's model list / aliases / credit rate / per-model reasoning tier
+    / model input-context limits (model_limits.json, not DB).
 
     Body: {"models": [...]|null, "aliases": {...}|null, "credit_rate": <num>|null,
-            "reasoning": {"model_id": "low", "__default__": ""}|null}
+            "reasoning": {"model_id": "low", "__default__": ""}|null,
+            "model_limits": {"<id>": <int|null>},
+            "default_max_input_tokens": <int|null>}
     Pass null to reset that field to the built-in default. At least one key
     must be present.
     """
@@ -136,6 +139,8 @@ async def admin_set_channel_models(
     set_aliases = "aliases" in data
     set_rate = "credit_rate" in data
     set_reasoning = "reasoning" in data
+    set_model_limits = "model_limits" in data
+    set_default_max_input = "default_max_input_tokens" in data
     try:
         result = await run_in_threadpool(
             control_plane.set_channel_models,
@@ -144,10 +149,16 @@ async def admin_set_channel_models(
             aliases=data.get("aliases") if set_aliases else None,
             credit_rate=data.get("credit_rate") if set_rate else None,
             reasoning=data.get("reasoning") if set_reasoning else None,
+            model_limits=data.get("model_limits") if set_model_limits else None,
+            default_max_input_tokens=(
+                data.get("default_max_input_tokens") if set_default_max_input else None
+            ),
             set_models=set_models,
             set_aliases=set_aliases,
             set_rate=set_rate,
             set_reasoning=set_reasoning,
+            set_model_limits=set_model_limits,
+            set_default_max_input=set_default_max_input,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

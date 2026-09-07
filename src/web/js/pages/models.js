@@ -17,7 +17,7 @@ export default {props:['token','toast'],setup(p){
     const have=new Set(models);
     c.modelRows=(c.modelRows||[]).filter(x=>have.has((x.id||'').trim()));
     const kept=new Set(c.modelRows.map(x=>(x.id||'').trim()));
-    models.forEach(id=>{if(!kept.has(id))c.modelRows.push({id,rate:null,display_name:'',official:false,reasoning:(r&&r.reasoning&&r.reasoning[id])||''})});
+    models.forEach(id=>{if(!kept.has(id))c.modelRows.push({id,rate:null,display_name:'',official:false,reasoning:(r&&r.reasoning&&r.reasoning[id])||'',maxInput:(r&&r.model_limits&&r.model_limits[id]!==undefined)?r.model_limits[id]:null})});
     if(r&&typeof r==='object'&&r.customized)c.customized=r.customized;
     return true;
   }
@@ -34,7 +34,7 @@ export default {props:['token','toast'],setup(p){
         try{
           const v=await api.get('/admin/channels/'+id+'/models',p.token);
           const rateById={};(v.model_details||[]).forEach(d=>{rateById[d.id]=d});
-          return {...v,kind:kindById[id]||'builtin',modelRows:(v.models||[]).map(mid=>{const d=rateById[mid]||{};return{id:mid,rate:d.rate,display_name:d.display_name,official:!!d.official,reasoning:(v.reasoning&&v.reasoning[mid])||''}}),aliasRows:Object.entries(v.aliases||{}).map(([k,val])=>({k,v:val})),reasoningDefault:v.reasoning_default||'',reasoningSupported:!!v.reasoning_supported,reasoningCustomized:!!v.reasoning_customized}
+          return {...v,kind:kindById[id]||'builtin',modelRows:(v.models||[]).map(mid=>{const d=rateById[mid]||{};return{id:mid,rate:d.rate,display_name:d.display_name,official:!!d.official,reasoning:(v.reasoning&&v.reasoning[mid])||'',maxInput:(v.model_limits&&v.model_limits[mid]!==undefined)?v.model_limits[mid]:null}}),aliasRows:Object.entries(v.aliases||{}).map(([k,val])=>({k,v:val})),reasoningDefault:v.reasoning_default||'',reasoningSupported:!!v.reasoning_supported,reasoningCustomized:!!v.reasoning_customized,defaultMaxInput:(v.default_max_input_tokens!==undefined&&v.default_max_input_tokens!==null)?v.default_max_input_tokens:'',modelLimitsCustomized:!!v.model_limits_customized}
         }catch(e){return{channel:id,kind:kindById[id]||'builtin',error:String(e.message),modelRows:[],aliasRows:[]}}
       }));
       if(!chs.value.some(c=>c.channel===activeCh.value))activeCh.value=chs.value.length?chs.value[0].channel:'';
@@ -48,7 +48,7 @@ export default {props:['token','toast'],setup(p){
   function chDefaultText(c){return (c.defaults&&c.defaults.models||[]).join(', ')||'无'}
   function addRow(c){c.aliasRows.push({k:'',v:''})}
   function rmRow(c,i){c.aliasRows.splice(i,1)}
-  function addModelRow(c){c.modelRows.push({id:''})}
+  function addModelRow(c){c.modelRows.push({id:'',maxInput:null})}
   function rmModelRow(c,i){c.modelRows.splice(i,1)}
 
   async function saveChActive(){
@@ -68,6 +68,12 @@ export default {props:['token','toast'],setup(p){
         if(rd)reasoning['__default__']=rd;
         body.reasoning=reasoning;
       }
+      // 模型上下文限额（model_limits.json）：仅提交显式填了数字的行；通道默认空串=不提交(null 删除)
+      const ml={};
+      (c.modelRows||[]).forEach(r=>{const id=(r.id||'').trim();const v=(r.maxInput===null||r.maxInput===undefined||r.maxInput==='')?null:parseInt(r.maxInput,10);if(id&&v!==null&&!Number.isNaN(v)&&v>0)ml[id]=v});
+      body.model_limits=ml;
+      const dmi=parseInt(c.defaultMaxInput,10);
+      body.default_max_input_tokens=(c.defaultMaxInput===''||c.defaultMaxInput===null||Number.isNaN(dmi)||dmi<=0)?null:dmi;
       const r=await api.put('/admin/channels/'+c.channel+'/models',body,p.token);
       // 契约 4/6:生效模型列表本地回写;形状不符回退整表 loadAll()
       if(patchChModels(c,r))p.toast(c.channel+' 已保存');
@@ -77,9 +83,9 @@ export default {props:['token','toast'],setup(p){
   }
   async function resetChActive(){
     const c=chOf();if(!c||chBusyOf(c))return;
-    if(!confirm('将 '+c.channel+' 的模型列表/别名/思考档位重置为内置默认？'))return;
+    if(!confirm('将 '+c.channel+' 的模型列表/别名/思考档位/上下文限额重置为内置默认？'))return;
     setChBusy(c,true);
-    try{await api.put('/admin/channels/'+c.channel+'/models',{models:null,aliases:null,credit_rate:null,reasoning:null},p.token);p.toast(c.channel+' 已重置为默认');await loadAll()}
+    try{await api.put('/admin/channels/'+c.channel+'/models',{models:null,aliases:null,credit_rate:null,reasoning:null,model_limits:{},default_max_input_tokens:null},p.token);p.toast(c.channel+' 已重置为默认');await loadAll()}
     catch(e){p.toast('重置失败：'+apiErr(e),'err')}
     setChBusy(c,false);
   }
@@ -168,7 +174,7 @@ export default {props:['token','toast'],setup(p){
       <div style="margin-bottom:14px"><label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">模型白名单（保存 = 按列表整体保存；空白名单保存 = 该平台所有模型请求 400；列表外的模型 400）<span v-if="canRefreshOfficial(chOf())&&chOf().channel==='traesolo'" style="margin-left:8px;color:var(--fg3)">· 倍率来自官方 consumption_rate（原值）</span><span v-else-if="canRefreshOfficial(chOf())" style="margin-left:8px;color:var(--fg3)">· 倍率来自上游 /v1/models</span><span v-else style="margin-left:8px;color:var(--fg3)">· 该通道上游不提供倍率，显示「-」</span></label>
         <div v-if="chOf().modelRows.length" class="table-scroll" style="margin-bottom:8px">
           <table style="font-size:12px">
-            <thead><tr><th style="text-align:left;padding:4px 8px">模型 ID</th><th style="text-align:left;padding:4px 8px;min-width:90px">展示名</th><th style="text-align:right;padding:4px 8px;min-width:90px">倍率</th><th v-if="chOf().reasoningSupported" style="text-align:left;padding:4px 8px;min-width:118px">思考档位</th><th style="width:56px"></th></tr></thead>
+            <thead><tr><th style="text-align:left;padding:4px 8px">模型 ID</th><th style="text-align:left;padding:4px 8px;min-width:90px">展示名</th><th style="text-align:right;padding:4px 8px;min-width:90px">倍率</th><th style="text-align:left;padding:4px 8px;min-width:130px">最大输入上下文</th><th v-if="chOf().reasoningSupported" style="text-align:left;padding:4px 8px;min-width:118px">思考档位</th><th style="width:56px"></th></tr></thead>
             <tbody>
               <tr v-for="(r,i) in chOf().modelRows" :key="i">
                 <td><input class="tcell" v-model="r.id" placeholder="模型 ID"/></td>
@@ -177,6 +183,9 @@ export default {props:['token','toast'],setup(p){
                   <span v-if="r.rate!==null&&r.rate!==undefined">{{r.rate}}</span>
                   <span v-else style="color:var(--fg3)">-</span>
                   <span v-if="r.official" title="官方接口提供" style="color:var(--ok);font-size:10px;margin-left:4px">●</span>
+                </td>
+                <td style="padding:3px 8px">
+                  <input class="tcell" v-model.number="r.maxInput" type="number" min="1" step="1" style="width:130px;text-align:right;font-family:var(--mono)" :placeholder="chOf().defaultMaxInput!==''?('默认 '+chOf().defaultMaxInput):''"/>
                 </td>
                 <td v-if="chOf().reasoningSupported" style="padding:3px 8px">
                   <select v-model="r.reasoning" class="selectctl" style="padding:4px 6px;font-size:12px">
@@ -199,15 +208,25 @@ export default {props:['token','toast'],setup(p){
         </div>
       </div>
       <div v-if="chOf().reasoningSupported" style="margin-top:14px;border-top:1px dashed var(--border);padding-top:12px">
-        <label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">思考档位（通道默认）</label>
+        <label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">思考档位（通道默认） · 最大输入上下文（通道默认）</label>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <select v-model="chOf().reasoningDefault" class="selectctl" style="padding:4px 6px;font-size:12px">
             <option value="">默认（不注入，跟随上游）</option>
             <option v-for="lv in ['none','minimal','low','medium','high','max']" :key="lv" :value="lv">{{lv}}</option>
           </select>
+          <input class="tcell" v-model.number="chOf().defaultMaxInput" type="number" min="1" step="1" style="width:150px;font-family:var(--mono)" placeholder="全局默认 1048576"/>
           <span v-if="chOf().reasoningCustomized" class="tag" style="margin-top:6px">已自定义思考档位</span>
+          <span v-if="chOf().modelLimitsCustomized" class="tag" style="margin-top:6px">已自定义上下文限额</span>
         </div>
-        <div style="font-size:11px;color:var(--fg3);margin-top:6px">客户端显式传 <code style="font:inherit">reasoning_effort</code> 始终优先；上方每模型下拉可单独覆盖。实测：deepseek/glm/auto 默认不思考、选档位=开启思考；kimi 默认轻思考、选 low 可减少；想要最快可给 DeepSeek 选 low 或留空。</div>
+        <div style="font-size:11px;color:var(--fg3);margin-top:6px">客户端显式传 <code style="font:inherit">reasoning_effort</code> 始终优先；上方每模型下拉可单独覆盖。实测：deepseek/glm/auto 默认不思考、选档位=开启思考；kimi 默认轻思考、选 low 可减少；想要最快可给 DeepSeek 选 low 或留空。上下文限额留空 = 跟随全局默认（1048576）；每模型列可单独覆盖，空 = 未配置（跟随通道/全局默认）；超限请求会被 400 拒绝。</div>
+      </div>
+      <div v-else style="margin-top:14px;border-top:1px dashed var(--border);padding-top:12px">
+        <label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">最大输入上下文（通道默认）</label>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input class="tcell" v-model.number="chOf().defaultMaxInput" type="number" min="1" step="1" style="width:150px;font-family:var(--mono)" placeholder="全局默认 1048576"/>
+          <span v-if="chOf().modelLimitsCustomized" class="tag" style="margin-top:6px">已自定义上下文限额</span>
+        </div>
+        <div style="font-size:11px;color:var(--fg3);margin-top:6px">留空 = 跟随全局默认（1048576）；每模型列可单独覆盖，空 = 未配置；超限请求会被 400 拒绝。</div>
       </div>
       <div><label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">别名（别名 → 模型 ID；保存 = 按列表整体保存；删空后保存 = 该平台无任何别名）</label>
         <div v-for="(r,i) in chOf().aliasRows" :key="i" style="display:flex;gap:8px;margin-bottom:6px;align-items:center">

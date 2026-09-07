@@ -65,11 +65,21 @@ from upstream.compaction import (  # noqa: E402,F401
 
 from storage import database as db
 from accounts import auth_manager
+from providers import model_limits
 from providers.store_common import (
     credit_source_of,
     enqueue_record_request,
     extract_cache_tokens,
 )
+
+
+class ModelLimitError(Exception):
+    """输入预检超限时由 _apply_model_limits 抛出，proxy 转换为 400 错误响应。"""
+
+    def __init__(self, status: int, detail: dict):
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
 
 BACKEND = "https://copilot.tencent.com"
 # 共享 retry.py 的瞬时错误集合;401/403 仅参与账号 failover 判定(_is_retryable_status),
@@ -155,6 +165,73 @@ _BACKEND_ROLE_ALIASES = {
 }
 
 
+def _apply_model_limits(body: dict, raw_model: str, payload: dict) -> None:
+    """模型上下文限额强制（spec §2.4）。
+
+    在 resolve_model_alias 之后、正式发往上游客户端之前调用：
+    1. 输入预检：估算输入 token > 生效 max_input → 抛 ModelLimitError（400）。
+    2. max_tokens 注入：客户端未传 → min(default_max_output, max_input-估算)
+       （<1 不注入）；客户端显式传 → 尊重，但超剩余空间则 clamp + warning。
+    3. enforce=false → 整体跳过。
+    """
+    if not model_limits.get_enforce():
+        return
+
+    resolved_model = body.get("model", raw_model)
+    # 请求链路按绑定通道解析：workbuddy 等走 proxy 的通道由调用方经 payload 标注；
+    # 这里用通用键（管理端统一前缀），缺省落 workbuddy（proxy 主链路）。
+    channel = payload.get("_bind_channel") or "workbuddy"
+
+    max_input = model_limits.resolve_max_input_tokens(channel, resolved_model)
+    if max_input is None:
+        # 显式不限制：跳过预检，仅按开关对待 max_tokens（不 clamp）
+        max_input = float("inf")
+
+    est = model_limits.estimate_input_tokens(body.get("messages"))
+
+    # 1. 输入预检
+    if est > max_input:
+        raise ModelLimitError(
+            400,
+            {
+                "error": {
+                    "message": (
+                        f"input exceeds {resolved_model} max input context "
+                        f"(≈{est} > {max_input})"
+                    ),
+                    "type": "invalid_request_error",
+                }
+            },
+        )
+
+    # 2. max_tokens 注入 / clamp
+    max_output = model_limits.get_default_max_output_tokens(channel)
+    remaining = max_input - est  # 超限已被上面拦截，这里 remaining >= 0
+    if "max_tokens" not in body or body.get("max_tokens") is None:
+        injected = min(max_output, remaining)
+        if injected >= 1:
+            body["max_tokens"] = int(injected)
+        # <1 不注入（避免注入 0/负数导致上游报错）
+        return
+
+    # 客户端显式传：尊重，但超剩余空间则 clamp + warning
+    client_max = body["max_tokens"]
+    try:
+        client_max = int(client_max)
+    except (TypeError, ValueError):
+        return
+    if client_max > remaining:
+        logger.warning(
+            "max_tokens=%s 超过 %s 剩余空间(估算输入=%s, max_input=%s)，"
+            "clamp 到 %s", client_max, resolved_model, est, max_input, int(remaining),
+        )
+        if remaining >= 1:
+            body["max_tokens"] = int(remaining)
+        else:
+            # 连 1 个输出 token 都不剩：移除该字段，交由上游决定如何处理
+            body.pop("max_tokens", None)
+
+
 def build_backend_body(payload: dict) -> dict:
     body = {k: payload[k] for k in PASSTHROUGH_BODY_KEYS if k in payload}
     messages = body.get("messages")
@@ -178,6 +255,9 @@ def build_backend_body(payload: dict) -> dict:
         default_reasoning = _configured_reasoning_default(body["model"])
         if default_reasoning:
             body["reasoning_effort"] = default_reasoning
+    # 模型上下文限额强制（§2.4）：输入预检超限→抛 400；未传 max_tokens 注入合理值；
+    # 显式值超剩余空间 clamp+warning。enforce=false 时整体跳过。
+    _apply_model_limits(body, raw_model, payload)
     body["stream"] = True
     if "stream_options" not in body:
         body["stream_options"] = {"include_usage": True}
@@ -323,7 +403,11 @@ async def proxy_chat_completions(
       - ("error", (status_code, detail))  错误
     """
     client_wants_stream = bool(payload.get("stream"))
-    body = build_backend_body(payload)
+    try:
+        body = build_backend_body(payload)
+    except ModelLimitError as err:
+        # 输入预检超限：直接以 400 错误响应（不进入账号选择 / 上游转发）
+        return ("error", (err.status, err.detail))
     # 实际发给上游的思考档位（客户端显式或按模型配置注入）：用于请求日志
     effective_reasoning = body.get("reasoning_effort")
     if log_model is None and isinstance(api_key_info, dict):
