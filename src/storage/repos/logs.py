@@ -181,6 +181,19 @@ def prune_logs(retention_days: int | None = None) -> int:
 # Log reads
 # ============================================================
 
+def count_errors_by_provider(seconds: int = 3600) -> dict[str, int]:
+    """近 N 秒各通道错误请求数(5xx 或 error 终态);channel-health 观测面用。"""
+    cutoff = int(time.time()) - max(1, int(seconds))
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT provider, COUNT(*) AS c FROM logs "
+        "WHERE created_at >= ? AND (status_code >= 500 OR finish_reason = 'error') "
+        "GROUP BY provider",
+        (cutoff,),
+    ).fetchall()
+    conn.close()
+    return {(r["provider"] or "workbuddy"): int(r["c"]) for r in rows}
+
 def list_logs(limit: int = 100, offset: int = 0) -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
