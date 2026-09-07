@@ -37,6 +37,11 @@ def _client_allows_compact(client_tag) -> bool:
     return client_tag in _COMPACT_ENABLED_CLIENTS
 
 
+def armed_channels() -> list[str]:
+    """11128 武装通道观测面(只读):去重后的 channel 列表。"""
+    with _COMPACTION_LOCK:
+        return sorted({channel for channel, _tag in _ARMED_KEYS})
+
 def _channel_armed(channel: Optional[str], client_tag) -> bool:
     if not _client_allows_compact(client_tag):
         return False

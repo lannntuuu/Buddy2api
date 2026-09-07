@@ -1,7 +1,8 @@
-import {api,apiErr,fmt,tok} from '../api.js';
+import {api,apiErr,fmt,tok,respRow,patchRowById,busyKeyOf,withBusy as withBusyR} from '../api.js';
+import {credit} from '../format.js';
 import {I} from '../icons.js';
 import LoginImport from './_login_import.js';
-const{ref,reactive,computed,onMounted,watch,nextTick}=Vue;
+const{ref,reactive,computed,onMounted,onUnmounted,watch,nextTick}=Vue;
 
 export default {props:['token','toast'],components:{'login-import':LoginImport},setup(p){
   // ────────── master list ──────────
@@ -22,11 +23,18 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
     toggling.value={...toggling.value,[id]:true};
     api.put('/admin/channels',{enabled:list.value.filter(x=>x.enabled).map(x=>x.id),order:list.value.map(x=>x.id)},p.token).then(r=>{
       list.value.forEach(c=>{c.enabled=(r.enabled||[]).includes(c.id)});
+      p.invalidateChannels();
     }).catch(e=>{p.toast(apiErr(e,'保存失败'),'err');loadList();}).finally(()=>{const o={...toggling.value};delete o[id];toggling.value=o});
   }
   const activeCh=computed(()=>list.value.find(c=>c.id===activeChannel.value));
   const loginChannels=computed(()=>list.value.filter(c=>c.kind!=='apikey'));
   const apikeyChannels=computed(()=>list.value.filter(c=>c.kind==='apikey'));
+  // 键盘可达(spec WS-3 §2):通道行 tabindex=0,Enter/Space 与 click 同义。
+  // 只在事件目标就是行本身时触发,避免行内按钮聚焦按 Enter 时二次触发。
+  function rowKey(e,fn){
+    if(e.target!==e.currentTarget)return;
+    if(e.key==='Enter'||e.key===' '){e.preventDefault();fn()}
+  }
 
   // ────────── unified add/edit modal ──────────
   const um=ref({open:false,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',draft:{},warning:null,busy:false,envTouched:false});
@@ -121,14 +129,17 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
     if(!confirm('删除自定义通道 '+c.id+' ？该通道账号行将全部置 inactive。'))return;
     try{
       await api.del('/admin/channels/custom/'+encodeURIComponent(c.id),p.token);
+      // 本地回写:直接从定义表/通道表移除,免整表重拉(spec WS-3 §3)
+      ccList.value=ccList.value.filter(x=>x.id!==c.id);
+      list.value=list.value.filter(x=>x.id!==c.id);
+      if(activeChannel.value===c.id)activeChannel.value=list.value.find(x=>x.enabled)?.id||list.value[0]?.id||'';
       p.toast('已删除 '+c.id);
-      await Promise.all([loadCC(),loadList()]);
     }catch(e){
       p.toast('删除失败：'+apiErr(e),'err');
     }
   }
 
-  // ────────── credential section: KEY_PANEL meta + discover/scan/solo ──────────
+  // ────────── credential section: KEY_PANEL meta + discover() 预热 ──────────
   // 合并自 accounts.js: KEY_PANEL_META = id → {name, base, env}，从 /admin/channels + /admin/channels/custom 推导
   const KEY_PANEL_META=ref({});
   // 模板用的是普通对象下标,这里给一个解包后的 computed,避免模板直接摸 .value
@@ -146,9 +157,8 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
   }
   const keyKey=ref(''),keyNick=ref(''),keyBase=ref(''),keyBusy=ref(false);
 
-  const disc=ref(null),dl=ref(false),scanning=ref(false),authPath=ref('');
-  const solo=reactive({pending:false,url:'',pendingId:'',callbackUrl:'',state:'',uid:'',error:'',manual:''}),soloBusy=ref(false);let soloTimer=null,soloGen=0;
-  const soloSelected=computed(()=>activeChannel.value==='traesolo');
+  const disc=ref(null),dl=ref(false);
+  // discover() 本机检测预热(33 号 §2-E:scan/solo 死码删除后,保留此调用链)
   async function discover(path=''){
     if(!activeChannel.value){p.toast('请先选中一个通道','err');return}
     dl.value=true;
@@ -161,79 +171,27 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
     }catch(e){p.toast(apiErr(e,'检测失败'),'err')}
     dl.value=false;
   }
-  async function scan(path=''){
-    if(scanning.value)return;
-    scanning.value=true;
-    try{
-      if(disc.value?.preview_token){
-        const body={channel:disc.value.channel||'workbuddy',preview_token:disc.value.preview_token};
-        if(path&&path.trim())body.auth_dir=path.trim();
-        const r=await api.post('/admin/accounts/import',body,p.token);
-        p.toast('导入 '+r.imported+' · 更新 '+r.updated+' · 跳过 '+r.skipped);
-      }else{
-        const body=path&&path.trim()?{auth_dir:path.trim()}:{};
-        const r=await api.post('/admin/accounts/scan',body,p.token);
-        p.toast('导入 '+r.imported+' · 更新 '+r.updated+' · 跳过 '+r.skipped);
-      }
-      await loadAccounts();await discover(path);
-    }catch(e){p.toast(apiErr(e,'扫描失败'),'err')}
-    scanning.value=false;
-  }
-  async function scanCustom(){const path=authPath.value.trim();if(!path){p.toast('请先填写目录或 .info 文件路径','err');return}await scan(path)}
-  function clearPath(){authPath.value='';discover('')}
   // (keyKey 粘贴逻辑已迁入统一浮窗 umSave;密钥型入口改为「添加/轮换密钥」按钮)
-  function stopSoloPoll(){if(soloTimer){clearTimeout(soloTimer);soloTimer=null}}
-  async function startSoloLogin(){
-    if(soloBusy.value)return;
-    stopSoloPoll();soloGen++;
-    const gen=soloGen;soloBusy.value=true;
-    try{
-      const r=await api.post('/admin/traesolo/login/start',{},p.token);
-      if(gen!==soloGen)return;
-      solo.pending=true;solo.url=r.login_url||'';solo.pendingId=r.pending_id||'';
-      solo.callbackUrl=r.callback_url||'';solo.state='pending';solo.uid='';solo.error='';
-      window.open(r.login_url,'_blank');pollSolo(gen);
-    }catch(e){if(gen===soloGen){solo.pending=false;solo.error=''}p.toast(apiErr(e,'发起 SOLO 登录失败'),'err')}
-    soloBusy.value=false;
-  }
-  async function pollSolo(gen){
-    if(gen!==soloGen)return;if(!solo.pendingId)return;
-    try{
-      const r=await api.get('/admin/traesolo/login/result?pending_id='+encodeURIComponent(solo.pendingId),p.token);
-      if(gen!==soloGen)return;
-      if(!r||r.found===false){stopSoloPoll();solo.pending=false;solo.state='expired';solo.error='登录会话已过期，可重新发起登录';return}
-      solo.state=r.state||'';
-      if(r.state==='success'){stopSoloPoll();solo.uid=r.uid||'';solo.pending=false;solo.error='';p.toast('SOLO 账号已添加'+(r.uid?'（'+r.uid+'）':''),'ok');await loadAccounts();await discover();return}
-      else if(r.state==='failed'){stopSoloPoll();solo.pending=false;solo.error=r.error||'登录失败';return}
-      else if(r.state==='canceled'){stopSoloPoll();solo.pending=false;solo.error='';return}
-      soloTimer=setTimeout(()=>pollSolo(gen),2500);
-    }catch(e){if(gen!==soloGen)return;stopSoloPoll();solo.pending=false;if(e.message==='404'){solo.state='expired';solo.error='登录会话已过期，可重新发起登录'}else{solo.error='登录状态查询失败：'+apiErr(e);p.toast(solo.error,'err')}}
-  }
-  async function cancelSolo(){if(!solo.pendingId)return;stopSoloPoll();soloGen++;try{await api.post('/admin/traesolo/login/cancel',{pending_id:solo.pendingId},p.token);solo.pending=false;solo.state='canceled';solo.error=''}catch(e){}}
-  async function completeSolo(){
-    const u=solo.manual.trim();if(!u){p.toast('请先粘贴完整回调 URL','err');return}
-    soloBusy.value=true;
-    try{
-      const r=await api.post('/admin/traesolo/login/complete',{callback:u},p.token);
-      if(r.ok){p.toast('SOLO 账号已添加'+(r.uid?'（'+r.uid+'）':''),'ok');solo.manual='';await loadAccounts();await discover()}
-      else{p.toast(r.error||'导入失败','err')}
-    }catch(e){p.toast(apiErr(e,'导入失败'),'err')}
-    soloBusy.value=false;
-  }
 
   // ────────── accounts list (full table from accounts.js) ──────────
   const accs=ref([]),accLd=ref(false),accBusy=ref({}),test=ref(null),tl=ref(0),filters=reactive({q:'',status:'all',sort:'priority',provider:'all'});
   function hydrate(a){return {...a,_weight:a.weight||1,_priority:a.priority||0,_creditSnapshot:a.credit_snapshot||a.credit_limit||0,_baseWeight:a.weight||1,_basePriority:a.priority||0,_baseCreditSnapshot:a.credit_snapshot||a.credit_limit||0}}
   function dirty(a){return Number(a._weight||1)!==Number(a._baseWeight||1)||Number(a._priority||0)!==Number(a._basePriority||0)||Number(a._creditSnapshot||0)!==Number(a._baseCreditSnapshot||0)}
-  function busyKey(id,k){return accBusy.value[id+'-'+k]}
+  const busyKey=(id,k)=>busyKeyOf(accBusy,id,k),withBusy=(a,k,fn)=>withBusyR(accBusy,a.id,k,fn);
+  // 通道健康观测面(35号 §2.5):P0 行徽标,数据来自 /admin/channel-health
+  const health=ref({});
+  async function loadHealth(){try{health.value=(await api.get('/admin/channel-health',p.token)).channels||{}}catch(_){health.value={}}}
+  function healthClass(provider){const h=health.value[provider];if(!h)return 'health-dot';
+    if((h.cooling_accounts||[]).length||(h.refresh_backoff||[]).length)return 'health-dot err';
+    if(h.armed_11128||h.errors_5xx_1h>0)return 'health-dot warn';return 'health-dot'}
+  function healthTitle(provider){const h=health.value[provider];if(!h)return '';
+    return `冷却${(h.cooling_accounts||[]).length} 负缓存${(h.refresh_backoff||[]).length} 5xx(1h)${h.errors_5xx_1h} 首字P95 ${h.first_token_p95_ms??'-'}`}
   async function loadAccounts(){
     accLd.value=true;
-    try{accs.value=(await api.get('/admin/accounts',p.token)).map(hydrate)}
+    try{accs.value=(await api.get('/admin/accounts',p.token)).map(hydrate);loadHealth()}
     catch(e){p.toast(apiErr(e),'err')}
     accLd.value=false;
   }
-  function size(v){v=Number(v||0);if(v>=1024*1024)return(v/1024/1024).toFixed(1)+' MB';if(v>=1024)return(v/1024).toFixed(1)+' KB';return v+' B'}
-  function credit(v){v=Number(v||0);return v.toLocaleString('zh-CN',{maximumFractionDigits:4})}
   function creditPct(a){return Math.max(0,Math.min(100,Number(a.credit_used_pct||0)))+'%'}
   function tokenLife(a){
     if(a.account_type==='api_key'||a.provider&&KEY_PANEL_META.value[a.provider])return '-';
@@ -257,12 +215,26 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
     });
     return rows;
   });
-  async function withBusy(a,k,fn){accBusy.value={...accBusy.value,[a.id+'-'+k]:true};try{return await fn()}finally{const o={...accBusy.value};delete o[a.id+'-'+k];accBusy.value=o}}
-  async function ref2(a){await withBusy(a,'refresh',async()=>{try{await api.post('/admin/accounts/'+a.id+'/refresh',{},p.token);p.toast('刷新成功');await loadAccounts()}catch(e){p.toast(apiErr(e,'刷新失败'),'err')}})}
-  async function saveMeta(a){await withBusy(a,'save',async()=>{try{const creditSnapshot=Math.max(0,Number(a._creditSnapshot)||0);const body={weight:parseInt(a._weight)||1,priority:parseInt(a._priority)||0};if(Number(a._creditSnapshot||0)!==Number(a._baseCreditSnapshot||0))body.credit_limit=creditSnapshot;await api.put('/admin/accounts/'+a.id,body,p.token);a._baseWeight=parseInt(a._weight)||1;a._basePriority=parseInt(a._priority)||0;a._baseCreditSnapshot=creditSnapshot;p.toast(body.credit_limit!==undefined?'已保存余额快照':'已保存');await loadAccounts()}catch(e){p.toast(apiErr(e,'保存失败'),'err')}})}
-  async function toggle(a){await withBusy(a,'toggle',async()=>{try{await api.put('/admin/accounts/'+a.id,{status:a.status==='active'?'inactive':'active'},p.token);p.toast(a.status==='active'?'已禁用':'已启用');await loadAccounts()}catch(e){p.toast(apiErr(e,'操作失败'),'err')}})}
-  async function testOne(a){tl.value=a.id;test.value=null;try{const r=await api.post('/admin/accounts/'+a.id+'/test',{model:'auto',prompt:'ping'},p.token);test.value={account:a.nickname||a.name,result:r};p.toast(r.ok?'测试成功':'测试失败',r.ok?'ok':'err');await loadAccounts()}catch(e){p.toast(apiErr(e,'测试失败'),'err');test.value={account:a.nickname||a.name,result:{ok:false,status_code:0,message:e.message}}}tl.value=0}
-  async function del(a){if(!confirm('删除账号 '+(a.nickname||a.name||a.id)+' ?'))return;await api.del('/admin/accounts/'+a.id,p.token);p.toast('已删除');await loadAccounts();await discover(authPath.value)}
+  async function ref2(a){await withBusy(a,'refresh',async()=>{try{await api.post('/admin/accounts/'+a.id+'/refresh',{},p.token,{timeoutMs:60000});p.toast('刷新成功');await loadAccounts()}catch(e){p.toast(apiErr(e,'刷新失败'),'err')}})}
+  async function saveMeta(a){await withBusy(a,'save',async()=>{try{const creditSnapshot=Math.max(0,Number(a._creditSnapshot)||0);const body={weight:parseInt(a._weight)||1,priority:parseInt(a._priority)||0};if(Number(a._creditSnapshot||0)!==Number(a._baseCreditSnapshot||0))body.credit_limit=creditSnapshot;
+    // 契约 3/6:PUT 返回 account 行对象 → 本地回写;缺行对象或形状不符 → 回退整表 loadAccounts()
+    const r=await api.put('/admin/accounts/'+a.id,body,p.token);
+    const row=respRow(r,'account',x=>x&&x.id!=null);
+    if(row&&patchRowById(accs.value,hydrate(row))){
+      const nu=accs.value.find(x=>Number(x.id)===Number(a.id));
+      if(nu){nu._baseWeight=body.weight;nu._basePriority=body.priority;if(body.credit_limit!==undefined)nu._baseCreditSnapshot=creditSnapshot}
+    }else{await loadAccounts()}
+    p.toast(body.credit_limit!==undefined?'已保存余额快照':'已保存');
+  }catch(e){p.toast(apiErr(e,'保存失败'),'err')}})}
+  async function toggle(a){await withBusy(a,'toggle',async()=>{try{
+    // 契约 3/6:行对象本地回写,失败/形状不符回退整表
+    const r=await api.put('/admin/accounts/'+a.id,{status:a.status==='active'?'inactive':'active'},p.token);
+    const row=respRow(r,'account',x=>x&&x.id!=null);
+    if(!(row&&patchRowById(accs.value,hydrate(row))))await loadAccounts();
+    p.toast(a.status==='active'?'已禁用':'已启用');
+  }catch(e){p.toast(apiErr(e,'操作失败'),'err')}})}
+  async function testOne(a){tl.value=a.id;test.value=null;try{const r=await api.post('/admin/accounts/'+a.id+'/test',{model:'auto',prompt:'ping'},p.token,{timeoutMs:180000});test.value={account:a.nickname||a.name,result:r};p.toast(r.ok?'测试成功':'测试失败',r.ok?'ok':'err');await loadAccounts()}catch(e){p.toast(apiErr(e,'测试失败'),'err');test.value={account:a.nickname||a.name,result:{ok:false,status_code:0,message:e.message}}}tl.value=0}
+  async function del(a){if(!confirm('删除账号 '+(a.nickname||a.name||a.id)+' ?'))return;await api.del('/admin/accounts/'+a.id,p.token);p.toast('已删除');await loadAccounts();await discover('')}
 
   // ────────── 高级手动添加 (modal) ──────────
   const sa=ref(false),ai=ref(''),nm=ref(''),adding=ref(false);
@@ -278,17 +250,25 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
     adding.value=true;
     try{
       const r=await api.post('/admin/accounts',{...d,name:nm.value,provider:d.provider||d.channel||activeChannel.value},p.token);
-      p.toast(r.updated?'账号已更新':'添加成功');sa.value=false;ai.value='';nm.value='';await loadAccounts();await discover(authPath.value);
+      p.toast(r.updated?'账号已更新':'添加成功');sa.value=false;ai.value='';nm.value='';await loadAccounts();await discover('');
     }catch(e){p.toast('失败:'+e.message,'err')}
     adding.value=false;
   }
 
+  function destroySortable(){
+    sortInst.forEach(s=>{try{s.destroy()}catch(_){}});
+    sortInst.length=0;
+  }
+  // 幂等守卫:先销毁旧实例再创建。tbody 会因 ld 翻转/二次进页重建,
+  // 旧实例绑定的是已脱离 DOM 的节点,不销毁会导致拖拽失效(spec WS-3 §4)。
   function initSortable(){
-    if(sortInst.length||typeof window.Sortable==='undefined')return;
+    if(typeof window.Sortable==='undefined')return;
+    destroySortable();
     const opt={handle:'.drag-handle',animation:120,onMove:e=>!e.related.classList.contains('grp-h')};
     if(loginTbody.value)sortInst.push(window.Sortable.create(loginTbody.value,{...opt,onEnd:onLoginEnd}));
     if(apikeyTbody.value)sortInst.push(window.Sortable.create(apikeyTbody.value,{...opt,onEnd:onApikeyEnd}));
   }
+  onUnmounted(destroySortable);
   onMounted(async()=>{
     await Promise.all([loadList(),loadCC(),loadAccounts()]);
     refreshKeyMeta();
@@ -300,9 +280,6 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
     if(!v)return;
     if(v===old)return;
     refreshKeyMeta();
-    // 切通道时清 solo 状态(密钥粘贴已迁入浮窗)
-    solo.pending=false;solo.url='';solo.pendingId='';solo.state='';solo.error='';solo.manual='';solo.uid='';
-    stopSoloPoll();
     // 选中后默认做一次本机检测（登录型）
     if(v!=='traesolo')await discover('');
   });
@@ -322,7 +299,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
   });
   function onEnvInput(){um.value.envTouched=true}
 
-  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,loginChannels,apikeyChannels,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccDelete,um,openKeyModal,umEditFromInfo,umClose,umSave,addAliasRow,rmAliasRow,onEnvInput,onModalImported,openInfo,disc,dl,scanning,authPath,discover,scan,scanCustom,clearPath,solo,soloBusy,soloSelected,startSoloLogin,cancelSolo,completeSolo,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,size,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I,keyPanelMetaById,loginTbody,apikeyTbody}
+  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,loginChannels,apikeyChannels,rowKey,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccDelete,um,openKeyModal,umEditFromInfo,umClose,umSave,addAliasRow,rmAliasRow,onEnvInput,onModalImported,openInfo,discover,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,health,healthClass,healthTitle,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I,keyPanelMetaById,loginTbody,apikeyTbody}
 },template:`
 <div>
   <div class="phead"><h1>通道管理</h1><p>定义通道 · 管理凭证 · 启用开关</p></div>
@@ -339,7 +316,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
         <tbody ref="loginTbody">
           <tr class="grp-h"><td colspan="5" style="background:var(--bg-sunken);font-weight:600;font-size:12px;color:var(--fg-2)">登录型平台<span class="hint" style="margin-left:8px;font-weight:400">硬编码配置模板 · 本机登录/网页登录导入 · 一个平台可挂多个凭证 · 行首 ≡ 拖拽排序</span></td></tr>
           <template v-for="c in loginChannels" :key="c.id">
-          <tr @click="activeChannel=c.id" :class="{on:activeChannel===c.id}" style="cursor:pointer" :data-id="c.id">
+          <tr @click="activeChannel=c.id" @keydown="rowKey($event,()=>{activeChannel=c.id})" tabindex="0" :class="{on:activeChannel===c.id}" style="cursor:pointer" :data-id="c.id">
             <td class="drag-handle" @click.stop style="width:18px;text-align:center;color:var(--fg-2);cursor:grab" title="拖拽排序">≡</td>
             <td>{{c.display_name||c.id}}</td>
             <td class="mono">{{c.id}}</td>
@@ -351,7 +328,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
         <tbody ref="apikeyTbody">
           <tr class="grp-h"><td colspan="5" style="background:var(--bg-sunken);font-weight:600;font-size:12px;color:var(--fg-2)">密钥型通道<span class="hint" style="margin-left:8px;font-weight:400">通用模板 · Base URL + API Key · 零代码新增 · 行首 ≡ 拖拽排序</span><button class="btn s pri" style="float:right;margin:2px 0" @click="openKeyModal()"><span v-html="I.plus"></span>新增</button></td></tr>
           <template v-for="c in apikeyChannels" :key="c.id">
-          <tr @click="activeChannel=c.id" :class="{on:activeChannel===c.id}" style="cursor:pointer" :data-id="c.id">
+          <tr @click="activeChannel=c.id" @keydown="rowKey($event,()=>{activeChannel=c.id})" tabindex="0" :class="{on:activeChannel===c.id}" style="cursor:pointer" :data-id="c.id">
             <td class="drag-handle" @click.stop style="width:18px;text-align:center;color:var(--fg-2);cursor:grab" title="拖拽排序">≡</td>
             <td>{{c.display_name||c.id}}</td>
             <td class="mono">{{c.id}}</td>
@@ -370,7 +347,7 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
   <div class="tbar"><button class="btn s" @click="loadAccounts" :disabled="accLd"><span v-html="I.refresh"></span>{{accLd?'刷新中':'刷新列表'}}</button><button class="btn s" @click="sa=true"><span v-html="I.plus"></span>高级手动添加</button><div class="spacer"></div><span class="tag" v-if="accs.length">{{visibleAccounts.length}}/{{accs.length}}个 · {{accs.filter(a=>a.status==='active').length}}活跃</span></div>
   <div v-if="accLd" class="load"><div class="spin"></div></div>
   <div class="card" v-else-if="accs.length"><div class="card-p" style="padding-bottom:0"><div class="control-row"><input class="searchbox" v-model="filters.q" placeholder="搜索账号 / UID / 域名"/><select class="selectctl" v-model="filters.status"><option value="all">全部状态</option><option value="active">active</option><option value="inactive">inactive</option><option value="expired">expired</option></select><select class="selectctl" v-model="filters.provider"><option value="all">全部通道</option><option v-for="c in list" :key="'fp-'+c.id" :value="c.id">{{c.display_name||c.id}}</option></select><select class="selectctl" v-model="filters.sort"><option value="priority">优先级 / 权重</option><option value="requests">请求数高到低</option><option value="used">累计已用高到低</option></select><div class="spacer"></div><span class="tag">当前 {{visibleAccounts.length}} 条</span></div></div><div class="table-scroll"><table><thead><tr><th>账号</th><th>通道</th><th>UID</th><th>状态</th><th>权重</th><th>优先级</th><th>余额快照</th><th>Token 有效期</th><th>请求</th><th>Token</th><th>累计已用</th><th></th></tr></thead><tbody>
-    <tr v-for="a in visibleAccounts" :key="a.id"><td style="font-weight:600">{{a.nickname||a.name}} <span class="tag warn" v-if="dirty(a)">未保存</span></td><td><span class="tag">{{a.provider||'workbuddy'}}</span></td><td class="mono">{{a.uid?.slice(0,8)}}…</td><td><span class="badge" :class="a.status">{{a.status}}</span></td><td><input class="numctl" v-model.number="a._weight" type="number" min="1" max="100"/></td><td><input class="numctl" v-model.number="a._priority" type="number" min="-100" max="100"/></td><td class="credit-cell"><input class="numctl credit" v-model.number="a._creditSnapshot" type="number" min="0" step="0.01" placeholder="0"/><div class="credit-meta" v-if="a.credit_snapshot>0">余 {{credit(a.credit_remaining)}} · 已用 {{creditPct(a)}}</div><div class="credit-meta" v-else-if="a.total_credits>0">累计消耗(估算) {{credit(a.total_credits)}}</div><div class="credit-meta" v-else>官方失败时可手动校准</div></td><td>{{tokenLife(a)}}</td><td>{{a.total_requests}}</td><td>{{tok(a.total_tokens)}}</td><td>{{credit(a.total_credits)}}</td><td><div class="ops"><button class="btn s" @click="saveMeta(a)" :disabled="!dirty(a)||busyKey(a.id,'save')">{{busyKey(a.id,'save')?'保存中':'保存'}}</button><button class="btn s plain" @click="toggle(a)" :disabled="busyKey(a.id,'toggle')">{{busyKey(a.id,'toggle')?'处理中':(a.status==='active'?'禁用':'启用')}}</button><button class="btn s" @click="testOne(a)" :disabled="tl===a.id">{{tl===a.id?'测试中':'测试'}}</button><button class="btn s" @click="ref2(a)" :disabled="busyKey(a.id,'refresh')">{{busyKey(a.id,'refresh')?'刷新中':'刷新'}}</button><button class="btn s danger" @click="del(a)">删除</button></div></td></tr>
+    <tr v-for="a in visibleAccounts" :key="a.id"><td style="font-weight:600"><span :class="healthClass(a.provider)" :title="healthTitle(a.provider)"></span> {{a.nickname||a.name}} <span class="tag warn" v-if="dirty(a)">未保存</span></td><td><span class="tag">{{a.provider||'workbuddy'}}</span></td><td class="mono">{{a.uid?.slice(0,8)}}…</td><td><span class="badge" :class="a.status">{{a.status}}</span></td><td><input class="numctl" v-model.number="a._weight" type="number" min="1" max="100"/></td><td><input class="numctl" v-model.number="a._priority" type="number" min="-100" max="100"/></td><td class="credit-cell"><input class="numctl credit" v-model.number="a._creditSnapshot" type="number" min="0" step="0.01" placeholder="0"/><div class="credit-meta" v-if="a.credit_snapshot>0">余 {{credit(a.credit_remaining)}} · 已用 {{creditPct(a)}}</div><div class="credit-meta" v-else-if="a.total_credits>0">累计消耗(估算) {{credit(a.total_credits)}}</div><div class="credit-meta" v-else>官方失败时可手动校准</div></td><td>{{tokenLife(a)}}</td><td>{{a.total_requests}}</td><td>{{tok(a.total_tokens)}}</td><td>{{credit(a.total_credits)}}</td><td><div class="ops"><button class="btn s" @click="saveMeta(a)" :disabled="!dirty(a)||busyKey(a.id,'save')">{{busyKey(a.id,'save')?'保存中':'保存'}}</button><button class="btn s plain" @click="toggle(a)" :disabled="busyKey(a.id,'toggle')">{{busyKey(a.id,'toggle')?'处理中':(a.status==='active'?'禁用':'启用')}}</button><button class="btn s" @click="testOne(a)" :disabled="tl===a.id">{{tl===a.id?'测试中':'测试'}}</button><button class="btn s" @click="ref2(a)" :disabled="busyKey(a.id,'refresh')">{{busyKey(a.id,'refresh')?'刷新中':'刷新'}}</button><button class="btn s danger" @click="del(a)">删除</button></div></td></tr>
     <tr v-if="!visibleAccounts.length"><td colspan="12" class="empty">没有匹配的账号</td></tr>
   </tbody></table></div></div>
   <div class="card card-p empty" v-else><div class="em">🔌</div><p>暂无账号 · 登录型平台在通道行内「详情」浮窗的凭证区检测导入;密钥型通道通过浮窗添加密钥</p></div>

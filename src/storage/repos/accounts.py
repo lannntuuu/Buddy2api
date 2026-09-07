@@ -1,19 +1,44 @@
 """Accounts repository: accounts table, resource_cache, checkin_cache, traework daily credit."""
 from __future__ import annotations
 
+import copy
 import json
 import sqlite3
+import threading
 import time
 from datetime import date
 from typing import Optional
 
 from storage import credential_crypto
+from storage.repos import _common
 from storage.repos._common import (
     CREDENTIAL_FIELDS,
     DB_PATH,
     _lock,
     get_conn,
 )
+
+# 调度热路径缓存:get_active_accounts 每请求至少被调两次(pick_account),
+# 每次都对全部账号做凭据解密(Fernet/DPAPI)。进程内 TTL 缓存:
+# - key 含 str(DB_PATH),测试切库不串;
+# - add/update/delete_account 写路径立即失效;
+# - 2s 窗口内的账号状态陈旧由调度的内存冷却机制兜底,管理端列表走未缓存的 list_accounts。
+_ACTIVE_TTL_SECONDS = 2.0
+_active_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
+_active_cache_guard = threading.Lock()
+
+
+def invalidate_accounts_cache() -> None:
+    """清空 get_active_accounts 缓存(账号变更、测试与凭据密钥变更场景用)。"""
+    with _active_cache_guard:
+        _active_cache.clear()
+
+
+def _invalidate_accounts_path() -> None:
+    path_key = str(_common.DB_PATH)
+    with _active_cache_guard:
+        for key in [k for k in _active_cache if k[0] == path_key]:
+            _active_cache.pop(key, None)
 
 
 def _protect_account_data(data: dict) -> dict:
@@ -210,6 +235,7 @@ def add_account(data: dict) -> int:
         aid = cur.lastrowid
         conn.commit()
         conn.close()
+        _invalidate_accounts_path()
         return aid
 
 
@@ -247,6 +273,7 @@ def update_account(aid: int, data: dict):
         conn.execute(f"UPDATE accounts SET {','.join(fields)} WHERE id=?", values)
         conn.commit()
         conn.close()
+    _invalidate_accounts_path()
 
 
 def delete_account(aid: int):
@@ -257,6 +284,7 @@ def delete_account(aid: int):
         conn.execute("DELETE FROM accounts WHERE id=?", (aid,))
         conn.commit()
         conn.close()
+    _invalidate_accounts_path()
 
 
 def get_account(aid: int) -> Optional[dict]:
@@ -279,9 +307,38 @@ def list_accounts(*, provider: Optional[str] = None) -> list[dict]:
     return [_account_dict(r) for r in rows]
 
 
+def list_accounts_summary() -> list[dict]:
+    """管理台账号列表专用:不做凭据解密。
+
+    状态摘要(get_account_status)只消费明文列(expires_at/credit 系/计数),
+    此前每次列表都全量解密三段凭据纯属浪费。与 list_accounts 的差异:
+    CREDENTIAL_FIELDS 不回传、extra 不解析,因此无法产出 credential_error。
+    """
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM accounts ORDER BY id").fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        account = dict(r)
+        for field in CREDENTIAL_FIELDS:
+            account.pop(field, None)
+        account["extra"] = {}
+        if not account.get("provider"):
+            account["provider"] = "workbuddy"
+        out.append(account)
+    return out
+
+
 def get_active_accounts(provider: str = "workbuddy") -> list[dict]:
     if not provider:
         raise ValueError("get_active_accounts requires provider")
+    path_key = str(_common.DB_PATH)
+    now = time.monotonic()
+    with _active_cache_guard:
+        hit = _active_cache.get((path_key, provider))
+        if hit is not None and now - hit[0] <= _ACTIVE_TTL_SECONDS:
+            # deepcopy 返回:调用方对账号 dict 的原地修改不得污染缓存
+            return copy.deepcopy(hit[1])
     conn = get_conn()
     rows = conn.execute(
         """
@@ -298,7 +355,10 @@ def get_active_accounts(provider: str = "workbuddy") -> list[dict]:
     accounts = [_account_dict(r) for r in rows]
     # 凭据解密失败的账号（credential_error）不能参与调度：拿空 token
     # 打上游只会白吃 401，还可能阻塞通道的可用性判定。
-    return [a for a in accounts if not a.get("credential_error")]
+    usable = [a for a in accounts if not a.get("credential_error")]
+    with _active_cache_guard:
+        _active_cache[(path_key, provider)] = (now, usable)
+    return copy.deepcopy(usable)
 
 
 def account_increment_usage(aid: int, tokens: int, credit: float):

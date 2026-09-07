@@ -1,4 +1,4 @@
-import {api,apiErr} from '../api.js';
+import {api,apiErr,respList} from '../api.js';
 import {I} from '../icons.js';
 const{ref,reactive,computed,onMounted}=Vue;
 
@@ -7,6 +7,20 @@ export default {props:['token','toast'],setup(p){
   const um=ref([]),umLd=ref(true),umBusy=ref(false),umErr=ref(''),channels=ref([]);
   // 各平台设置（可切换列表）
   const chs=ref([]),chLoaded=ref(false),chErr=ref(''),chBusy=ref({}),activeCh=ref('');
+
+  // 契约 4/6:PUT /admin/channels/{ch}/models 响应带生效模型 id 列表(models),
+  // 据此本地回写白名单行;缺 models 或形状不符返回 false → 调用方回退整表 loadAll()。
+  function patchChModels(c,r){
+    const models=respList(r,'models');
+    if(!models)return false;
+    c.models=models.slice();
+    const have=new Set(models);
+    c.modelRows=(c.modelRows||[]).filter(x=>have.has((x.id||'').trim()));
+    const kept=new Set(c.modelRows.map(x=>(x.id||'').trim()));
+    models.forEach(id=>{if(!kept.has(id))c.modelRows.push({id,rate:null,display_name:'',official:false,reasoning:(r&&r.reasoning&&r.reasoning[id])||''})});
+    if(r&&typeof r==='object'&&r.customized)c.customized=r.customized;
+    return true;
+  }
 
   async function loadAll(){
     umLd.value=true;chLoaded.value=false;umErr.value='';chErr.value='';
@@ -54,8 +68,10 @@ export default {props:['token','toast'],setup(p){
         if(rd)reasoning['__default__']=rd;
         body.reasoning=reasoning;
       }
-      await api.put('/admin/channels/'+c.channel+'/models',body,p.token);
-      p.toast(c.channel+' 已保存');await loadAll();
+      const r=await api.put('/admin/channels/'+c.channel+'/models',body,p.token);
+      // 契约 4/6:生效模型列表本地回写;形状不符回退整表 loadAll()
+      if(patchChModels(c,r))p.toast(c.channel+' 已保存');
+      else{p.toast(c.channel+' 已保存');await loadAll()}
     }catch(e){p.toast('保存失败：'+apiErr(e),'err')}
     setChBusy(c,false);
   }
@@ -72,7 +88,7 @@ export default {props:['token','toast'],setup(p){
     const c=chOf();if(!c||chBusyOf(c)||!canRefreshOfficial(c))return;
     setChBusy(c,true);
     try{
-      const r=await api.post('/admin/channels/'+c.channel+'/models/refresh',{},p.token);
+      const r=await api.post('/admin/channels/'+c.channel+'/models/refresh',{},p.token,{timeoutMs:60000});
       if(r&&r.refreshed){p.toast(c.channel+' 官方模型表已刷新')}
       else{p.toast((r&&r.note)||(c.channel+' 刷新未完成'),'info')}
       await loadAll();

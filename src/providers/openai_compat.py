@@ -35,16 +35,13 @@ import httpx
 
 from providers.host_override import channel_host
 from providers.model_config import channel_aliases, channel_model_ids
+from providers.store_common import credit_source_of, enqueue_record_request, extract_cache_tokens
 from storage import database as db
 
 logger = logging.getLogger("openai_compat")
 
 EP_MODELS = "/models"
 EP_CHAT = "/chat/completions"
-
-# Per-request client cap (one logical account = one API key for OpenAI-compat
-# platforms, so we never pool / rotate).
-SINGLE_ACCOUNT = True
 
 DEFAULT_MODELS_CACHE_TTL = 600.0
 
@@ -78,6 +75,12 @@ class OpenAICompatProvider:
         self._client: Optional[httpx.AsyncClient] = None
         self._client_loop: Optional[asyncio.AbstractEventLoop] = None
         self._models_cache: dict = {"fetched_at": 0.0, "ids": []}
+        # stale-while-revalidate 去重标志：TTL 过期后只允许一个后台刷新任务在跑
+        self._refreshing = False
+        # ensure_env_account 实例级 memo：key = (env 变量名, 归一化后的 env 值)。
+        # 命中时只做单行 get_account 校验，避免每次全表解密扫描；
+        # 行被禁用/删除时自动失效并回退全量引导（保留自愈语义）。
+        self._env_account_memo: dict = {"key": None, "row": None}
 
     # ── test transport escape hatch (parity with traesolo) ───────
     def set_transport(self, transport: Optional[httpx.AsyncBaseTransport]) -> None:
@@ -157,7 +160,13 @@ class OpenAICompatProvider:
         return list(self._models_cache["ids"])
 
     async def refresh_model_ids(self, force: bool = False) -> list[str]:
-        """Refresh the dynamic model id list from /v1/models. Cached MODELS_CACHE_TTL."""
+        """Refresh the dynamic model id list from /v1/models.
+
+        缓存 TTL 内直接命中；冷启动（缓存为空）仍同步拉取，保证首个请求
+        拿到真实模型表；TTL 过期但已有旧表时走 stale-while-revalidate：
+        请求立即用旧表返回，同时后台任务刷新（防并发），刷新失败旧表继续
+        兜底。force=True（管理页「刷新」按钮）保持同步强拉语义。
+        """
         now = time.time()
         if (
             not force
@@ -165,6 +174,40 @@ class OpenAICompatProvider:
             and (now - self._models_cache["fetched_at"]) < self._models_cache_ttl
         ):
             return list(self._models_cache["ids"])
+        if not force and self._models_cache["ids"] and self._kick_models_refresh():
+            # stale-while-revalidate：先返回旧表，后台刷新
+            return list(self._models_cache["ids"])
+        return await self._fetch_model_ids(now)
+
+    def _kick_models_refresh(self) -> bool:
+        """TTL 过期后的后台刷新去重。返回 False 表示无法后台刷新（调用方同步拉取）。"""
+        if self._refreshing:
+            return True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        self._refreshing = True
+        task = loop.create_task(self._refresh_model_ids_bg())
+
+        def _done(t: asyncio.Task) -> None:
+            self._refreshing = False
+            try:
+                t.exception()
+            except asyncio.CancelledError:
+                pass
+
+        task.add_done_callback(_done)
+        return True
+
+    async def _refresh_model_ids_bg(self) -> None:
+        try:
+            await self._fetch_model_ids(time.time())
+        except Exception:
+            logger.debug("%s background /v1/models refresh failed", self.id, exc_info=True)
+
+    async def _fetch_model_ids(self, now: float) -> list[str]:
+        """同步拉取 /v1/models 并更新缓存；任何失败回退静态表。"""
         accounts = db.get_active_accounts(self.id) or []
         account = accounts[0] if accounts else None
         if not account:
@@ -195,10 +238,6 @@ class OpenAICompatProvider:
         self._models_cache.update({"fetched_at": now, "ids": list(self._static_models)})
         return list(self._static_models)
 
-    def cached_model_ids(self) -> list[str]:
-        """Sync accessor used by list_models(): 当前生效白名单（自定义 > 动态 > 静态）。"""
-        return self.effective_model_ids()
-
     # ────────────────────────── account pick ──────────────────────────
 
     async def _pick_account(self, exclude_ids: set[int] | None = None):
@@ -226,26 +265,16 @@ class OpenAICompatProvider:
         error_msg: str = "",
         t0: float = 0.0,
         usage_payload: dict | None = None,
+        first_token_ms: int | None = None,
     ):
         """Fire-and-forget log write — mirrors upstream/proxy._log_request."""
         elapsed_ms = int((time.time() - t0) * 1000) if t0 else 0
         cache_read, cache_creation = 0, 0
         try:
-            from providers.store_common import extract_cache_tokens
-
             cache_read, cache_creation = extract_cache_tokens(usage_payload)
         except Exception:
             pass
-        _known_cache_keys = (
-            "cache_read_input_tokens",
-            "cache_creation_input_tokens",
-            "prompt_cache_hit_tokens",
-            "prompt_cache_miss_tokens",
-            "prompt_tokens_details",
-        )
-        credit_source = (
-            "live" if usage_payload and any(k in usage_payload for k in _known_cache_keys) else None
-        )
+        credit_source = credit_source_of(usage_payload)
         payload = {
             "api_key_id": (api_key_info or {}).get("id"),
             "api_key_name": (api_key_info or {}).get("name"),
@@ -269,17 +298,10 @@ class OpenAICompatProvider:
             "usage_json": json.dumps(usage_payload, ensure_ascii=False) if usage_payload else None,
             "credit_source": credit_source,
             "increment_usage": True,
+            # 流式首帧毫秒（非流式/错误行保持 None）
+            "first_token_ms": first_token_ms,
         }
-        try:
-            loop = asyncio.get_running_loop()
-            fut = loop.run_in_executor(None, db.record_request, payload)
-            fut.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
-        except RuntimeError:
-            # No running loop (test harness). Fall back to sync.
-            try:
-                db.record_request(payload)
-            except Exception:
-                pass
+        enqueue_record_request(payload)
 
     # ────────────────────────── non-streaming ─────────────────────────
 
@@ -361,6 +383,8 @@ class OpenAICompatProvider:
         not synthesise a final usage chunk — the upstream emits its own (because we
         set stream_options.include_usage)."""
         t0 = time.time()
+        # first_token_ms 基线：进入读循环前（t0 处，含建连/发请求/上游排队）
+        ft_t0 = time.monotonic()
         body = {**payload, "stream": True, "stream_options": {"include_usage": True}}
         prompt_tokens = 0
         completion_tokens = 0
@@ -370,6 +394,7 @@ class OpenAICompatProvider:
         last_status = 200
         error_msg = ""
         emitted = False
+        first_token_ms: int | None = None
 
         try:
             client = self._get_client()
@@ -394,16 +419,10 @@ class OpenAICompatProvider:
                     yield "data: [DONE]\n\n"
                     return
 
-                buffer = b""
                 async for line in r.aiter_lines():
                     if not line:
                         continue
-                    if isinstance(line, bytes):
-                        raw = line
-                        text = raw.decode("utf-8", "replace")
-                    else:
-                        text = line
-                        raw = text.encode("utf-8")
+                    text = line.decode("utf-8", "replace") if isinstance(line, bytes) else line
 
                     # Forward unchanged to client (the SSE line already includes its
                     # trailing \n\n via iter_lines when the upstream flushes them).
@@ -412,8 +431,16 @@ class OpenAICompatProvider:
                     if text.startswith("data:"):
                         emitted = True
                         # Try to grab usage off the last frame for logging.
+                        # 廉价预过滤：只有携带 usage / finish_reason 的帧才值得
+                        # json.loads，其余 data 行（绝大多数）直接透传。
                         data_part = text[5:].strip()
-                        if data_part and data_part != "[DONE]":
+                        if first_token_ms is None and data_part and data_part != "[DONE]":
+                            first_token_ms = int((time.monotonic() - ft_t0) * 1000)
+                        if (
+                            data_part
+                            and data_part != "[DONE]"
+                            and ('"usage"' in data_part or '"finish_reason"' in data_part)
+                        ):
                             try:
                                 parsed = json.loads(data_part)
                                 usage = parsed.get("usage") if isinstance(parsed, dict) else None
@@ -455,6 +482,7 @@ class OpenAICompatProvider:
             api_key_info, account, model=model, stream=True, finish_reason=final_finish,
             status_code=last_status, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             total_tokens=total_tokens, t0=t0, usage_payload=usage_payload,
+            first_token_ms=first_token_ms,
         )
 
     # ────────────────────────── entry point ───────────────────────────
@@ -599,10 +627,8 @@ class OpenAICompatProvider:
 
     def import_path(self, path: str) -> dict:
         """Import from a file path (txt or json)."""
-        import os as _os
-
-        target = _os.path.expanduser(path)
-        if not _os.path.isfile(target):
+        target = os.path.expanduser(path)
+        if not os.path.isfile(target):
             raise ValueError(f"path is not a file: {path}")
         with open(target, "r", encoding="utf-8") as fh:
             raw = fh.read()
@@ -651,6 +677,11 @@ class OpenAICompatProvider:
 
         Idempotent: returns the existing active row if present, otherwise inserts
         a fresh row keyed by the env value's last-8-chars and returns the full row.
+
+        结果按 (env 变量名, 归一化 env 值) 做实例级 memo：命中时仅做一次单行
+        get_account 校验（行仍在且 active 才复用），避免同请求内反复全表解密
+        扫描；行被禁用/删除时 memo 失效并回退全量引导。env 变更或测试需要
+        强制重扫时调用 `_reset_env_account_cache()`。
         """
         if not self._env_api_key:
             return None
@@ -660,9 +691,20 @@ class OpenAICompatProvider:
         norm = self._normalize_key(env_key)
         if not norm:
             return None
+        memo_key = (self._env_api_key, norm)
+        memo = self._env_account_memo
+        if memo["key"] == memo_key and memo["row"] is not None:
+            cached_id = int(memo["row"].get("id") or 0)
+            row = db.get_account(cached_id) if cached_id else None
+            if row is not None and row.get("status") == "active":
+                memo["row"] = row
+                return row
+            self._reset_env_account_cache()
         target_uid = f"{self.id}-{norm[-8:]}"
         for row in db.list_accounts(provider=self.id):
             if row.get("status") == "active":
+                memo["key"] = memo_key
+                memo["row"] = row
                 return row
         parsed = self.parse_credentials({"api_key": norm, "nickname": "env"})
         parsed["uid"] = target_uid
@@ -671,8 +713,15 @@ class OpenAICompatProvider:
         result = self.upsert_account(parsed)
         row = result.get("row")
         if isinstance(row, dict) and row.get("id") == result.get("id"):
+            memo["key"] = memo_key
+            memo["row"] = row
             return row
         return db.get_account(result["id"])
+
+    def _reset_env_account_cache(self) -> None:
+        """清空 ensure_env_account 的实例级 memo（测试 / env 变量变更时用）。"""
+        self._env_account_memo["key"] = None
+        self._env_account_memo["row"] = None
 
     # ────────────────────────── quota (unsupported) ──────────────────
 

@@ -1338,7 +1338,10 @@ def test_chat_proxy_stream_rejects_plain_text_without_terminal_at_eof(monkeypatc
 @pytest.mark.parametrize(
     "arguments",
     [
-        '{"command":"pwd"',
+        # {"command":"pwd" 这种纯尾部截断会被 _repair_json_arguments 自愈,
+        # 单独在 test_chat_proxy_stream_repairs_truncated_tool_arguments_at_eof 锁定;
+        # 这里只保留无法修复的截断/非法形态。
+        '{"command":"pwd",',
         '{"command":pwd}',
         '[]',
     ],
@@ -1380,6 +1383,43 @@ def test_chat_proxy_stream_rejects_invalid_tool_arguments_at_eof(
     assert len(errors) == 1
     assert errors[0]["message"]
     assert terminal_choices == []
+
+
+def test_chat_proxy_stream_repairs_truncated_tool_arguments_at_eof(monkeypatch):
+    """尾部截断的 arguments 由 _repair_json_arguments 自愈(hy3 长流偶发),
+    正常收尾为 tool_calls finish,不产生 error 事件。"""
+    raw = _collect_chat_proxy_stream([
+        _chat_sse({
+            "id": "chatcmpl-repair-tool",
+            "object": "chat.completion.chunk",
+            "created": 790,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_repair",
+                        "type": "function",
+                        "function": {"name": "shell", "arguments": '{"command":"pwd"'},
+                    }],
+                },
+                "finish_reason": None,
+            }],
+        }),
+    ], monkeypatch)
+
+    payloads, done_count = _parse_chat_proxy_sse(raw)
+    errors = [payload["error"] for payload in payloads if payload.get("error")]
+    terminal = [
+        choice
+        for payload in payloads
+        for choice in payload.get("choices") or []
+        if choice.get("finish_reason") is not None
+    ]
+    assert errors == []
+    assert done_count == 1
+    assert terminal and terminal[0]["finish_reason"] == "tool_calls"
     assert done_count == 1
 
 

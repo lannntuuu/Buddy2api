@@ -71,7 +71,7 @@ from storage.repos.api_keys import (
     update_api_key,
 )
 from storage.repos.logs import (
-    add_log,
+    count_errors_by_provider,
     list_logs,
     prune_logs,
     record_request,
@@ -118,7 +118,7 @@ __all__ = [
     "release_api_key_request",
     "api_key_increment_usage",
     # logs
-    "add_log",
+    "count_errors_by_provider",
     "record_request",
     "prune_logs",
     "list_logs",
@@ -132,6 +132,157 @@ __all__ = [
     "delete_setting",
     "get_all_settings",
 ]
+
+
+def _create_tables(conn):
+    """Baseline schema: WAL + 全部 CREATE TABLE/INDEX IF NOT EXISTS。"""
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS accounts (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            name            TEXT NOT NULL,
+            uid             TEXT,
+            nickname        TEXT,
+            phone           TEXT,
+            account_type    TEXT DEFAULT 'personal',
+            access_token    TEXT,
+            refresh_token   TEXT,
+            expires_at      INTEGER,
+            refresh_expires_at INTEGER,
+            domain          TEXT DEFAULT 'www.codebuddy.cn',
+            enterprise_id   TEXT,
+            session_state   TEXT,
+            status          TEXT DEFAULT 'active',
+            weight          INTEGER DEFAULT 1,
+            priority        INTEGER DEFAULT 0,
+            credit_limit    REAL DEFAULT 0,
+            credit_baseline REAL DEFAULT 0,
+            last_used_at    INTEGER,
+            total_requests  INTEGER DEFAULT 0,
+            total_tokens    INTEGER DEFAULT 0,
+            total_credits   REAL DEFAULT 0,
+            created_at      INTEGER,
+            updated_at      INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS api_keys (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            key_prefix      TEXT,
+            key_hash        TEXT UNIQUE,
+            key_secret      TEXT,
+            name            TEXT,
+            status          TEXT DEFAULT 'active',
+            allowed_models  TEXT,
+            daily_limit     INTEGER DEFAULT 0,
+            client_type     TEXT DEFAULT 'custom',
+            total_requests  INTEGER DEFAULT 0,
+            total_tokens    INTEGER DEFAULT 0,
+            created_at      INTEGER,
+            last_used_at    INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS logs (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            api_key_id      INTEGER,
+            api_key_name    TEXT,
+            account_id      INTEGER,
+            account_name    TEXT,
+            model           TEXT,
+            stream          INTEGER,
+            prompt_tokens   INTEGER DEFAULT 0,
+            completion_tokens INTEGER DEFAULT 0,
+            total_tokens    INTEGER DEFAULT 0,
+            credit          REAL DEFAULT 0,
+            finish_reason   TEXT,
+            duration_ms     INTEGER,
+            status_code     INTEGER,
+            error_msg       TEXT,
+            created_at      INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS account_resource_cache (
+            account_id INTEGER PRIMARY KEY,
+            payload    TEXT NOT NULL,
+            updated_at INTEGER,
+            FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS account_checkin_cache (
+            account_id   INTEGER PRIMARY KEY,
+            checkin_date TEXT,
+            payload      TEXT NOT NULL,
+            updated_at   INTEGER,
+            FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_resource_cache_updated
+            ON account_resource_cache(updated_at);
+        CREATE INDEX IF NOT EXISTS idx_checkin_cache_date
+            ON account_checkin_cache(checkin_date);
+
+        CREATE TABLE IF NOT EXISTS traework_daily_credit (
+            day          TEXT NOT NULL,
+            model_name  TEXT NOT NULL,
+            credits     REAL NOT NULL DEFAULT 0,
+            sessions    INTEGER NOT NULL DEFAULT 0,
+            updated_at  INTEGER NOT NULL,
+            PRIMARY KEY(day, model_name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_tw_daily_day
+            ON traework_daily_credit(day);
+        """
+    )
+
+
+def _run_migrations(conn):
+    """Per-repo schema migrations + today's daily-usage backfill.
+
+    Migrations are split per repo but executed here so init_db
+    remains a single transactional entry point.
+    """
+    from storage.repos import accounts as _accounts_repo
+    from storage.repos import api_keys as _api_keys_repo
+    from storage.repos import logs as _logs_repo
+
+    _accounts_repo.migrate(conn)
+    _api_keys_repo.migrate(conn)
+    _logs_repo.migrate_provider(conn)
+    _logs_repo.migrate_cache_tokens(conn)
+    _logs_repo.migrate_reasoning(conn)
+    _logs_repo.migrate_client(conn)
+    _logs_repo.migrate_first_token(conn)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS api_key_daily_usage (
+            api_key_id    INTEGER NOT NULL,
+            usage_date    TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(api_key_id, usage_date),
+            FOREIGN KEY(api_key_id) REFERENCES api_keys(id) ON DELETE CASCADE
+        )
+        """
+    )
+    _accounts_repo.migrate_credentials(conn)
+    _api_keys_repo.migrate_daily_usage(conn)
+    # Backfill today's daily usage from existing logs.
+    conn.execute(
+        """
+        INSERT INTO api_key_daily_usage (api_key_id, usage_date, request_count)
+        SELECT api_key_id, date(created_at, 'unixepoch', 'localtime'), COUNT(*)
+        FROM logs
+        WHERE api_key_id IS NOT NULL AND created_at >= ?
+        GROUP BY api_key_id, date(created_at, 'unixepoch', 'localtime')
+        ON CONFLICT(api_key_id, usage_date) DO UPDATE SET
+            request_count=MAX(api_key_daily_usage.request_count, excluded.request_count)
+        """,
+        (_today_start_ts(),),
+    )
 
 
 def init_db():
@@ -152,146 +303,8 @@ def init_db():
             )
     with _lock:
         conn = get_conn()
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS accounts (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                name            TEXT NOT NULL,
-                uid             TEXT,
-                nickname        TEXT,
-                phone           TEXT,
-                account_type    TEXT DEFAULT 'personal',
-                access_token    TEXT,
-                refresh_token   TEXT,
-                expires_at      INTEGER,
-                refresh_expires_at INTEGER,
-                domain          TEXT DEFAULT 'www.codebuddy.cn',
-                enterprise_id   TEXT,
-                session_state   TEXT,
-                status          TEXT DEFAULT 'active',
-                weight          INTEGER DEFAULT 1,
-                priority        INTEGER DEFAULT 0,
-                credit_limit    REAL DEFAULT 0,
-                credit_baseline REAL DEFAULT 0,
-                last_used_at    INTEGER,
-                total_requests  INTEGER DEFAULT 0,
-                total_tokens    INTEGER DEFAULT 0,
-                total_credits   REAL DEFAULT 0,
-                created_at      INTEGER,
-                updated_at      INTEGER
-            );
-
-            CREATE TABLE IF NOT EXISTS api_keys (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                key_prefix      TEXT,
-                key_hash        TEXT UNIQUE,
-                key_secret      TEXT,
-                name            TEXT,
-                status          TEXT DEFAULT 'active',
-                allowed_models  TEXT,
-                daily_limit     INTEGER DEFAULT 0,
-                client_type     TEXT DEFAULT 'custom',
-                total_requests  INTEGER DEFAULT 0,
-                total_tokens    INTEGER DEFAULT 0,
-                created_at      INTEGER,
-                last_used_at    INTEGER
-            );
-
-            CREATE TABLE IF NOT EXISTS logs (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                api_key_id      INTEGER,
-                api_key_name    TEXT,
-                account_id      INTEGER,
-                account_name    TEXT,
-                model           TEXT,
-                stream          INTEGER,
-                prompt_tokens   INTEGER DEFAULT 0,
-                completion_tokens INTEGER DEFAULT 0,
-                total_tokens    INTEGER DEFAULT 0,
-                credit          REAL DEFAULT 0,
-                finish_reason   TEXT,
-                duration_ms     INTEGER,
-                status_code     INTEGER,
-                error_msg       TEXT,
-                created_at      INTEGER
-            );
-
-            CREATE TABLE IF NOT EXISTS settings (
-                key   TEXT PRIMARY KEY,
-                value TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS account_resource_cache (
-                account_id INTEGER PRIMARY KEY,
-                payload    TEXT NOT NULL,
-                updated_at INTEGER,
-                FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS account_checkin_cache (
-                account_id   INTEGER PRIMARY KEY,
-                checkin_date TEXT,
-                payload      TEXT NOT NULL,
-                updated_at   INTEGER,
-                FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_resource_cache_updated
-                ON account_resource_cache(updated_at);
-            CREATE INDEX IF NOT EXISTS idx_checkin_cache_date
-                ON account_checkin_cache(checkin_date);
-
-            CREATE TABLE IF NOT EXISTS traework_daily_credit (
-                day          TEXT NOT NULL,
-                model_name  TEXT NOT NULL,
-                credits     REAL NOT NULL DEFAULT 0,
-                sessions    INTEGER NOT NULL DEFAULT 0,
-                updated_at  INTEGER NOT NULL,
-                PRIMARY KEY(day, model_name)
-            );
-            CREATE INDEX IF NOT EXISTS idx_tw_daily_day
-                ON traework_daily_credit(day);
-            """
-        )
-        # Migrations are split per repo but executed here so init_db
-        # remains a single transactional entry point.
-        from storage.repos import accounts as _accounts_repo
-        from storage.repos import api_keys as _api_keys_repo
-        from storage.repos import logs as _logs_repo
-
-        _accounts_repo.migrate(conn)
-        _api_keys_repo.migrate(conn)
-        _logs_repo.migrate_provider(conn)
-        _logs_repo.migrate_cache_tokens(conn)
-        _logs_repo.migrate_reasoning(conn)
-        _logs_repo.migrate_client(conn)
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS api_key_daily_usage (
-                api_key_id    INTEGER NOT NULL,
-                usage_date    TEXT NOT NULL,
-                request_count INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY(api_key_id, usage_date),
-                FOREIGN KEY(api_key_id) REFERENCES api_keys(id) ON DELETE CASCADE
-            )
-            """
-        )
-        _accounts_repo.migrate_credentials(conn)
-        _api_keys_repo.migrate_daily_usage(conn)
-        # Backfill today's daily usage from existing logs.
-        conn.execute(
-            """
-            INSERT INTO api_key_daily_usage (api_key_id, usage_date, request_count)
-            SELECT api_key_id, date(created_at, 'unixepoch', 'localtime'), COUNT(*)
-            FROM logs
-            WHERE api_key_id IS NOT NULL AND created_at >= ?
-            GROUP BY api_key_id, date(created_at, 'unixepoch', 'localtime')
-            ON CONFLICT(api_key_id, usage_date) DO UPDATE SET
-                request_count=MAX(api_key_daily_usage.request_count, excluded.request_count)
-            """,
-            (_today_start_ts(),),
-        )
+        _create_tables(conn)
+        _run_migrations(conn)
         _prune_logs(conn)
         conn.execute("PRAGMA optimize")
         conn.commit()

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import httpx
 
-from providers.store_common import checkin_row
+from providers.host_override import channel_host
+from providers.store_common import run_checkin
 from providers.protocol import QuotaSnapshot
 from providers.traesolo.constants import (
     CHANNEL_ID,
@@ -16,13 +17,13 @@ from providers.traesolo.constants import (
 from providers.traesolo.token import ug_headers
 
 
-def _checkin_row(account: dict, **kwargs) -> dict:
-    return checkin_row(account, CHANNEL_ID, **kwargs)
+def _ug_host(_account: dict) -> str:
+    return channel_host(CHANNEL_ID, "ug_host", UG_HOST)
 
 
 async def _post_json(account: dict, path: str, timeout: float = 30.0):
     """POST 空 JSON 到 ug 端点，返回 (status_code, data, error_message)。"""
-    url = f"{UG_HOST}{path}"
+    url = f"{channel_host(CHANNEL_ID, 'ug_host', UG_HOST)}{path}"
     try:
         client = _quota_client()
         response = await client.post(url, headers=ug_headers(account), json={}, timeout=timeout)
@@ -103,59 +104,24 @@ async def fetch_quota(account: dict) -> QuotaSnapshot:
     )
 
 
+def _checkin_kwargs() -> dict:
+    """run_checkin 的通道差异参数（无 code_error：只看 HTTP 状态）。"""
+    return {
+        "channel": CHANNEL_ID,
+        "host_of": _ug_host,
+        "headers_of": ug_headers,
+        "client_of": _quota_client,
+        "status_path": EP_CHECKIN_STATUS,
+        "claim_path": EP_CHECKIN_CLAIM,
+    }
+
+
 async def fetch_checkin(account: dict, force: bool = False) -> dict:
-    status_code, data, error = await _post_json(account, EP_CHECKIN_STATUS, timeout=20.0)
-    if error:
-        return _checkin_row(account, ok=False, message=error)
-    if status_code >= 400:
-        return _checkin_row(account, ok=False, status_code=status_code, message=f"HTTP {status_code}")
-    checked = bool(data.get("checked_in") or data.get("checkedIn"))
-    try:
-        credit = float(data.get("credits") or data.get("credit") or 0)
-    except (TypeError, ValueError):
-        credit = 0.0
-    return _checkin_row(
-        account,
-        ok=True,
-        status_code=status_code,
-        already_claimed=checked,
-        today_checked_in=checked,
-        credit=credit,
-        message=str(data.get("message") or "success"),
-        extra={"enable": bool(data.get("enable", True))},
-    )
+    return await run_checkin(account, **_checkin_kwargs())
 
 
 async def claim_checkin(account: dict) -> dict:
-    status = await fetch_checkin(account, force=True)
-    if not status.get("ok"):
-        return status
-    if status.get("already_claimed") or status.get("today_checked_in"):
-        status["already_claimed"] = True
-        status["message"] = "今日已领取"
-        return status
-    status_code, data, error = await _post_json(account, EP_CHECKIN_CLAIM, timeout=30.0)
-    if error:
-        return _checkin_row(account, ok=False, message=error)
-    if status_code >= 400:
-        return _checkin_row(
-            account,
-            ok=False,
-            status_code=status_code,
-            message=f"HTTP {status_code}",
-        )
-    try:
-        credit = float(data.get("credits") or data.get("credit") or status.get("credit") or 0)
-    except (TypeError, ValueError):
-        credit = 0.0
-    return _checkin_row(
-        account,
-        ok=True,
-        status_code=status_code,
-        claimed=True,
-        credit=credit,
-        message=str(data.get("message") or "success"),
-    )
+    return await run_checkin(account, claim=True, **_checkin_kwargs())
 
 
 # --- 账户级权益 / 过期积分（用于补全"历史总消耗"估算）---

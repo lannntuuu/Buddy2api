@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, quote, urlparse
 import httpx
 import pytest
 
+from providers.traesolo.pricing import trae_credit_from_usage
 from accounts import auth_manager
 from storage import database as db
 import providers
@@ -840,46 +841,55 @@ def test_test_chat_failure(isolated_db):
 # ---------------------------------------------------------------------------
 
 def test_log_estimates_credit_from_tokens(isolated_db):
+    """有 usage 时按官方 per-token 单价公式估算(pricing.trae_credit_from_usage)。"""
     use_mock()
     aid = add_solo_account()
     acc = db.get_account(aid)
-    # 默认换算率 1000 token / 1 credit
     usage = {"prompt_tokens": 100, "completion_tokens": 400, "total_tokens": 500}
-    tsc._log(None, acc, "glm-5.2", False, "stop", 200, "", time.time() - 0.1, usage)
+    asyncio.run(tsc._log(None, acc, "glm-5.2", False, "stop", 200, "", time.time() - 0.1, usage))
     logs = db.list_logs(5)
     row = next(r for r in logs if r.get("provider") == CHANNEL_ID)
     assert row["total_tokens"] == 500
-    assert abs(row["credit"] - 0.5) < 1e-6  # 500 / 1000
+    expected = trae_credit_from_usage(100, 400, cache_read_tokens=0, cache_creation_tokens=0, model="glm-5.2")
+    assert expected is not None
+    assert abs(row["credit"] - expected) < 1e-6
     # 累计到账号
     fresh = db.get_account(aid)
-    assert abs(fresh["total_credits"] - 0.5) < 1e-6
+    assert abs(fresh["total_credits"] - expected) < 1e-6
 
 
-def test_log_honors_credit_rate_setting(isolated_db):
+def test_credit_estimate_ignores_credit_rate_setting(isolated_db):
+    """现行契约:有 usage 时一律走官方单价公式,traesolo.credit_rate 设置不参与;
+    无 usage 数据时不做估算(credit=0)。"""
     use_mock()
     aid = add_solo_account()
     acc = db.get_account(aid)
-    # 改换算率到 200 token / 1 credit
-    db.set_setting("traesolo.credit_rate", 200.0)
     usage = {"prompt_tokens": 50, "completion_tokens": 150, "total_tokens": 200}
-    tsc._log(None, acc, "glm-5.2", False, "stop", 200, "", time.time() - 0.1, usage)
+    db.set_setting("traesolo.credit_rate", 200.0)
+    asyncio.run(tsc._log(None, acc, "glm-5.2", False, "stop", 200, "", time.time() - 0.1, usage))
+    expected = trae_credit_from_usage(50, 150, cache_read_tokens=0, cache_creation_tokens=0, model="glm-5.2")
+    assert expected is not None
     logs = db.list_logs(5)
     row = next(r for r in logs if r.get("provider") == CHANNEL_ID)
-    assert row["total_tokens"] == 200
-    assert abs(row["credit"] - 1.0) < 1e-6  # 200 / 200 = 1
+    assert abs(row["credit"] - expected) < 1e-6
+
+    # rate 设置变化不改变估算结果
+    db.set_setting("traesolo.credit_rate", 999.0)
+    asyncio.run(tsc._log(None, acc, "glm-5.2", False, "stop", 200, "", time.time() - 0.1, usage))
+    logs = db.list_logs(5)
+    row2 = next(r for r in logs if r.get("provider") == CHANNEL_ID and r["id"] != row["id"])
+    assert abs(row2["credit"] - expected) < 1e-6
 
 
-def test_log_zero_rate_no_estimate(isolated_db):
-    """换算率设为 0 → 不做估算（credit=0），保持原行为。"""
+def test_log_no_usage_no_estimate(isolated_db):
+    """无 usage 数据(如上游未回报)时不做估算:credit=0。"""
     use_mock()
     aid = add_solo_account()
     acc = db.get_account(aid)
-    db.set_setting("traesolo.credit_rate", 0)
-    usage = {"prompt_tokens": 100, "completion_tokens": 100, "total_tokens": 200}
-    tsc._log(None, acc, "glm-5.2", False, "stop", 200, "", time.time() - 0.1, usage)
+    asyncio.run(tsc._log(None, acc, "glm-5.2", False, "stop", 200, "", time.time() - 0.1, None))
     logs = db.list_logs(5)
     row = next(r for r in logs if r.get("provider") == CHANNEL_ID)
-    assert row["total_tokens"] == 200
+    assert row["total_tokens"] == 0
     assert row["credit"] == 0
 
 

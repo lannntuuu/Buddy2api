@@ -63,7 +63,9 @@ def test_unprefixed_auto_on_workbuddy_key():
     assert bound.original == "auto"
 
 
-def test_namespaced_workbuddy_strips_inner():
+def test_namespaced_workbuddy_strips_inner(isolated_db):
+    # isolated_db:不挂则会读仓库真实 data/codebuddy_gateway.db 的 models 白名单,
+    # 开发机自定义白名单会让该用例随环境漂移(已实证)。
     bound = router.bind({"model": "workbuddy/glm-5.2"}, {"default_channel": "workbuddy"})
     assert bound.channel == "workbuddy"
     assert bound.inner == "glm-5.2"

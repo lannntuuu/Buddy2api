@@ -12,6 +12,7 @@ auth_manager.py — 多账号凭据管理
 import asyncio
 import json
 import os
+import random
 import sys
 import threading
 import time
@@ -23,6 +24,7 @@ from typing import Optional
 import httpx
 
 from storage import database as db
+from providers.trae_shared import pick_with_refresh_fallback
 from storage import fingerprint
 from storage.http_pool import get_client
 
@@ -78,6 +80,17 @@ def mark_account_failure(aid: int, status_code: int = 0):
     if status_code in {401, 403}:
         db.update_account(aid, {"status": "expired"})
 
+
+def cooling_accounts() -> list[dict]:
+    """账号冷却观测面(35号 §2.5):只读,供 /admin/channel-health 聚合。"""
+    now = time.monotonic()
+    with _failure_lock:
+        out = []
+        for aid, (count, deadline) in _account_failures.items():
+            if deadline > now:
+                out.append({"account_id": aid, "failures": count,
+                            "remaining_seconds": int(deadline - now)})
+        return out
 
 def account_is_cooling_down(aid: int) -> bool:
     with _failure_lock:
@@ -298,22 +311,6 @@ def parse_auth_file(path: Path) -> Optional[dict]:
         "enterprise_id": account.get("enterpriseId", ""),
         "session_state": auth.get("sessionState", ""),
     }
-
-
-def import_auth_file(path: Path) -> Optional[int]:
-    """扫描并导入 auth 文件到数据库。如果 uid 已存在则更新。"""
-    parsed = parse_auth_file(path)
-    if not parsed:
-        return None
-
-    # 检查是否已存在（按 uid 去重）
-    existing = db.list_accounts()
-    for acc in existing:
-        if acc.get("uid") == parsed["uid"]:
-            db.update_account(acc["id"], parsed)
-            return acc["id"]
-
-    return db.add_account(parsed)
 
 
 def auto_scan_and_import(auth_dir: Optional[str] = None) -> dict:
@@ -922,6 +919,11 @@ def _route_weight(account: dict) -> int:
 
 
 def _route_sort_key(account: dict):
+    """调度排序键（不含 id 决胜）：优先级 > weight > total_requests/weight > total_requests。
+
+    完全并列（前四级全相等）的候选由 pick_account 从并列集加权随机取一，
+    避免旧实现用 id 决胜导致并列账号永远固定选同一个。
+    """
     weight = _route_weight(account)
     total_requests = _route_int(account.get("total_requests"), 0)
     return (
@@ -929,8 +931,26 @@ def _route_sort_key(account: dict):
         -weight,
         total_requests / weight,
         total_requests,
-        _route_int(account.get("id"), 0),
     )
+
+
+# 加权随机决胜的随机源：模块级可注入（测试注入固定 rng 保证可复现）。
+_route_rng: random.Random = random.Random()
+
+
+def _weighted_tie_pick(candidates: list[dict]) -> dict:
+    """从完全并列的候选集中按 weight 加权随机取一。"""
+    weights = [_route_weight(a) for a in candidates]
+    total = sum(weights)
+    if total <= 0:
+        return candidates[0]
+    threshold = _route_rng.random() * total
+    upto = 0.0
+    for account, weight in zip(candidates, weights):
+        upto += weight
+        if threshold < upto:
+            return account
+    return candidates[-1]
 
 
 def _set_sticky_account(aid: int, provider: str = "workbuddy"):
@@ -958,36 +978,44 @@ def pick_account(exclude_ids: set[int] = None, provider: str = "workbuddy") -> O
             if sticky:
                 return sticky
 
-        chosen = sorted(top_candidates, key=_route_sort_key)[0]
+        ranked = sorted(top_candidates, key=_route_sort_key)
+        best_key = _route_sort_key(ranked[0])
+        tied = [a for a in ranked if _route_sort_key(a) == best_key]
+        chosen = tied[0] if len(tied) == 1 else _weighted_tie_pick(tied)
         _sticky_account_id[provider] = chosen["id"]
         return chosen
+
+
+class _WorkbuddyRefreshError(Exception):
+    """refresh_token 返回 False 的内部信号(仅作共享 fallback 的异常域)。"""
 
 
 async def pick_account_with_fallback(
     exclude_ids: set[int] = None, provider: str = "workbuddy"
 ) -> Optional[dict]:
-    """选账号，如果全部过期则尝试刷新过期账号。只刷新同一 provider。"""
-    account = pick_account(exclude_ids, provider=provider)
-    if account:
-        return account
+    """选账号,如果全部过期则尝试刷新过期账号。只刷新同一 provider。
 
-    expired_accounts = sorted(
-        (
-            account
-            for account in db.list_accounts(provider=provider)
-            if account.get("status") == "expired"
-        ),
-        key=_route_sort_key,
+    35号收敛:共享实现见 providers.trae_shared.pick_with_refresh_fallback
+    (自适应负缓存 + 按调度排序键遍历 expired + sticky 语义)。
+    相比旧正典的两处既定统一:选中的过期账号先原地刷新(对齐 qwenwork/
+    traework facade 语义);refresh 连续失败进负缓存(对齐其余四家)。
+    """
+
+    async def _refresh(account: dict) -> dict:
+        if not await refresh_token(account):
+            raise _WorkbuddyRefreshError("token refresh failed")
+        fresh = db.get_account(account["id"])
+        if not fresh:
+            raise _WorkbuddyRefreshError("account disappeared after refresh")
+        return fresh
+
+    return await pick_with_refresh_fallback(
+        provider,
+        _refresh,
+        exclude_ids=exclude_ids,
+        refresh_errors=_WorkbuddyRefreshError,
+        sticky=True,
     )
-    for a in expired_accounts:
-        if a["id"] in (exclude_ids or set()):
-            continue
-        if await refresh_token(a):
-            fresh = db.get_account(a["id"])
-            if fresh:
-                _set_sticky_account(fresh["id"], provider)
-            return fresh
-    return None
 
 
 # ============================================================
@@ -1033,9 +1061,3 @@ def get_account_status(account: dict) -> dict:
         "credit_source": "local_snapshot" if credit_snapshot > 0 else "usage_only",
         "last_used_at": account.get("last_used_at"),
     }
-
-
-def check_all_accounts() -> list[dict]:
-    """检查所有账号状态。"""
-    accounts = db.list_accounts()
-    return [get_account_status(a) for a in accounts]

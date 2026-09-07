@@ -24,6 +24,7 @@ import httpx
 
 from accounts import auth_manager
 from storage import database as db
+from providers import trae_shared
 from providers.model_config import channel_aliases, channel_model_ids, channel_credit_rate
 from providers.traesolo.constants import (
     AGENT_HOST,
@@ -637,6 +638,48 @@ def _handle_kind(aid: int, kind: str, reason: str = "") -> None:
             auth_manager.mark_account_failure(aid, 502)
 
 
+# expired 账号 refresh 失败的负缓存（自适应间隔，语义同 trae_shared）：
+# 结构 (连续失败次数, 下次可试时刻)，第 n 次连续失败后冷却 60×2^(n-1) 秒
+# （封顶 600s；冷却间隔公式收敛在 trae_shared._fail_interval，防两份漂移），
+# 刷新成功清零。期间不重试同一账号，避免上游不可达时每个请求都原样
+# 重放 refresh 请求。状态与打点保留本模块实现（既有测试直接锚定该 dict）。
+_refresh_fail_at: dict[int, tuple[int, float]] = {}
+_refresh_fail_lock = threading.Lock()
+
+
+def _monotonic_now() -> float:
+    """时钟注入点：测试用 fake clock 覆盖（monkeypatch 本函数）。"""
+    return time.monotonic()
+
+
+def _refresh_recently_failed(aid: int, now: float) -> bool:
+    with _refresh_fail_lock:
+        entry = _refresh_fail_at.get(aid)
+        return entry is not None and now < entry[1]
+
+
+def _note_refresh_failure(aid: int) -> None:
+    now = _monotonic_now()
+    with _refresh_fail_lock:
+        # 顺手清掉已过期条目，dict 不随时间无界增长
+        for key in [k for k, v in _refresh_fail_at.items() if v[1] <= now]:
+            _refresh_fail_at.pop(key, None)
+        count, _ = _refresh_fail_at.get(aid, (0, 0.0))
+        count += 1
+        _refresh_fail_at[aid] = (count, now + trae_shared._fail_interval(count))
+
+
+def _note_refresh_success(aid: int) -> None:
+    """刷新成功：清除该账号的负缓存（连续失败计数清零）。"""
+    with _refresh_fail_lock:
+        _refresh_fail_at.pop(aid, None)
+
+
+def _reset_refresh_fail_cache() -> None:
+    with _refresh_fail_lock:
+        _refresh_fail_at.clear()
+
+
 async def _pick(tried: set[int]) -> dict | None:
     """选账号：项目路由 + SOLO 冷却过滤 + 过期账号刷新兜底。"""
     for _ in range(8):  # 上限保护，防无限循环
@@ -654,11 +697,18 @@ async def _pick(tried: set[int]) -> dict | None:
         and int(row.get("id") or 0) not in tried
         and not pool.cooling(int(row.get("id") or 0))
     ]
+    now = _monotonic_now()
     for row in expired:
-        try:
-            return await refresh_account(row)
-        except Exception:
+        aid = int(row.get("id") or 0)
+        if _refresh_recently_failed(aid, now):
             continue
+        try:
+            fresh = await refresh_account(row)
+        except Exception:
+            _note_refresh_failure(aid)
+            continue
+        _note_refresh_success(aid)
+        return fresh
     return None
 
 
@@ -731,7 +781,6 @@ async def fetch_model_details(account: dict) -> list[dict]:
     except ValueError as exc:
         raise TraeSoloAuthError("models returned non-JSON") from exc
     out: list[dict] = []
-    import json as _json
     for cfg in data.get("config_info_list") or []:
         if not isinstance(cfg, dict):
             continue
@@ -747,7 +796,7 @@ async def fetch_model_details(account: dict) -> list[dict]:
         raw_dc = cfg.get("display_contact_config")
         if isinstance(raw_dc, str) and raw_dc.strip():
             try:
-                dcj = _json.loads(raw_dc)
+                dcj = json.loads(raw_dc)
                 rate = dcj.get("consumption_rate", {}).get("data", {}).get("rate")
             except ValueError:
                 pass
@@ -762,11 +811,6 @@ async def fetch_model_details(account: dict) -> list[dict]:
     if not out:
         raise TraeSoloAuthError("models api returned empty list")
     return out
-
-
-async def fetch_models(account: dict) -> list[str]:
-    """兼容旧调用：仅返回 config_name 列表。"""
-    return [m["id"] for m in await fetch_model_details(account)]
 
 
 async def refresh_dynamic_models(force: bool = False) -> bool:
@@ -921,7 +965,7 @@ async def _close(client: httpx.AsyncClient, response: httpx.Response) -> None:
 # 日志
 # ---------------------------------------------------------------------------
 
-def _log(
+async def _log(
     api_key_info: dict | None,
     account: dict | None,
     model_name: str,
@@ -931,6 +975,7 @@ def _log(
     error: str,
     t0: float,
     usage: dict | None = None,
+    first_token_ms: int | None = None,
 ) -> None:
     prompt = completion = total = 0
     cache_read = cache_creation = 0
@@ -966,13 +1011,14 @@ def _log(
         factor = mr if mr is not None else 1.0
         credit = round(total / scale * factor, 6)
     try:
-        import json as _json
         # 存整个 usage 字典（未来再加字段也不丢）
         try:
-            usage_json = _json.dumps(usage, ensure_ascii=False) if usage else None
+            usage_json = json.dumps(usage, ensure_ascii=False) if usage else None
         except (TypeError, ValueError):
             usage_json = None
-        db.record_request(
+        # record_request 是 BEGIN IMMEDIATE 写事务，放到线程池执行，避免阻塞事件循环
+        await asyncio.to_thread(
+            db.record_request,
             {
                 "api_key_id": api_key_info["id"] if api_key_info else None,
                 "api_key_name": api_key_info["name"] if api_key_info else None,
@@ -996,10 +1042,66 @@ def _log(
                 "increment_usage": True,
                 "client": (api_key_info or {}).get("_client_tag"),
                 "client_version": (api_key_info or {}).get("_client_version"),
+                # 请求起点秒级时间戳；流式首帧毫秒（非流式/错误行保持 None）
+                "created_at": int(t0),
+                "first_token_ms": first_token_ms,
             }
         )
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# 轮换头部（_run_once / _run_stream 的同构前置段）
+# ---------------------------------------------------------------------------
+
+async def _rotate_open(
+    payload: dict,
+    *,
+    client_model: str,
+    api_key_info: dict | None,
+    tried: set[int],
+    stream: bool,
+):
+    """_pick → _pre_refresh → _open → ≥400 分类记账的同构头部。
+
+    成功（上游 2xx）返回 (account, t0, client, response)，由调用方继续各自的
+    聚合/流式产出体与成功打点时机；失败返回 (None, error_ctx)，error_ctx 为
+    已记账落库后的 last_error 文案，None 表示无可用账号（调用方应 break 而
+    非 continue）。stream 只决定 _log 的 stream 位；失败记账方式
+    （_handle_kind / pool.note_error）与拆分前逐行一致。
+    """
+    account = await _pick(tried)
+    if account is None:
+        return None, None
+    aid = int(account["id"])
+    tried.add(aid)
+    t0 = time.time()
+
+    _, rkind, rerr = await _pre_refresh(account)
+    if rerr is not None:
+        _handle_kind(aid, rkind, f"refresh: {rerr}")
+        await _log(api_key_info, account, client_model, stream, "error", 503, str(rerr)[:240], t0)
+        return None, str(rerr)
+
+    body = prepare_body(payload)
+    try:
+        client, response = await _open(account, body)
+    except httpx.HTTPError as exc:
+        pool.note_error(aid)
+        await _log(api_key_info, account, client_model, stream, "error", 502, str(exc)[:240], t0)
+        return None, str(exc)
+
+    if response.status_code >= 400:
+        raw = await response.aread()
+        await _close(client, response)
+        text = raw.decode("utf-8", "replace")
+        kind = classify(response.status_code, text)
+        _handle_kind(aid, kind)
+        await _log(api_key_info, account, client_model, stream, "error", response.status_code, text[:240], t0)
+        return None, f"upstream {response.status_code} ({kind})"
+
+    return account, t0, client, response
 
 
 # ---------------------------------------------------------------------------
@@ -1013,38 +1115,20 @@ async def _run_once(
     tried: set[int] = set()
     last_error = "No available accounts"
     for _ in range(MAX_ROTATE):
-        account = await _pick(tried)
-        if account is None:
-            break
+        rotated = await _rotate_open(
+            payload,
+            client_model=client_model,
+            api_key_info=api_key_info,
+            tried=tried,
+            stream=False,
+        )
+        if rotated[0] is None:
+            if rotated[1] is None:
+                break  # 无可用账号：保留 last_error 语义
+            last_error = rotated[1]
+            continue
+        account, t0, client, response = rotated
         aid = int(account["id"])
-        tried.add(aid)
-        t0 = time.time()
-
-        _, rkind, rerr = await _pre_refresh(account)
-        if rerr is not None:
-            _handle_kind(aid, rkind, f"refresh: {rerr}")
-            last_error = str(rerr)
-            _log(api_key_info, account, client_model, False, "error", 503, str(rerr)[:240], t0)
-            continue
-
-        body = prepare_body(payload)
-        try:
-            client, response = await _open(account, body)
-        except httpx.HTTPError as exc:
-            pool.note_error(aid)
-            last_error = str(exc)
-            _log(api_key_info, account, client_model, False, "error", 502, str(exc)[:240], t0)
-            continue
-
-        if response.status_code >= 400:
-            raw = await response.aread()
-            await _close(client, response)
-            text = raw.decode("utf-8", "replace")
-            kind = classify(response.status_code, text)
-            _handle_kind(aid, kind)
-            last_error = f"upstream {response.status_code} ({kind})"
-            _log(api_key_info, account, client_model, False, "error", response.status_code, text[:240], t0)
-            continue
 
         try:
             data, stream_err = await aggregate_lines(response.aiter_lines())
@@ -1053,20 +1137,20 @@ async def _run_once(
             await _close(client, response)
             pool.note_error(aid)
             last_error = str(exc)
-            _log(api_key_info, account, client_model, False, "error", 502, str(exc)[:240], t0)
+            await _log(api_key_info, account, client_model, False, "error", 502, str(exc)[:240], t0)
             continue
         await _close(client, response)
         if stream_err is not None:
             _handle_kind(aid, stream_err.kind())
             last_error = str(stream_err)
-            _log(api_key_info, account, client_model, False, "error", 502, str(stream_err)[:240], t0)
+            await _log(api_key_info, account, client_model, False, "error", 502, str(stream_err)[:240], t0)
             continue
 
         data["model"] = client_model
         finish = str((data.get("choices") or [{}])[0].get("finish_reason") or "stop")
         auth_manager.mark_account_success(aid)
         pool.note_success(aid)
-        _log(api_key_info, account, client_model, False, finish, 200, "", t0, data.get("usage"))
+        await _log(api_key_info, account, client_model, False, finish, 200, "", t0, data.get("usage"))
         return "json", data
 
     status, detail = _no_accounts_error(last_error)
@@ -1095,39 +1179,24 @@ async def _run_stream(
     chunk_id = f"traesolo-{uuid.uuid4().hex[:12]}"
     tried: set[int] = set()
     last_error = "No available accounts"
+    # first_token_ms 基线取账号轮换循环之前（= 用户真实等待，含 pick/预刷新）
+    request_t0 = time.monotonic()
+    first_token_ms: int | None = None
     for _ in range(MAX_ROTATE):
-        account = await _pick(tried)
-        if account is None:
-            break
+        rotated = await _rotate_open(
+            payload,
+            client_model=client_model,
+            api_key_info=api_key_info,
+            tried=tried,
+            stream=True,
+        )
+        if rotated[0] is None:
+            if rotated[1] is None:
+                break  # 无可用账号：保留 last_error 语义
+            last_error = rotated[1]
+            continue
+        account, t0, client, response = rotated
         aid = int(account["id"])
-        tried.add(aid)
-        t0 = time.time()
-
-        _, rkind, rerr = await _pre_refresh(account)
-        if rerr is not None:
-            _handle_kind(aid, rkind, f"refresh: {rerr}")
-            last_error = str(rerr)
-            _log(api_key_info, account, client_model, True, "error", 503, str(rerr)[:240], t0)
-            continue
-
-        body = prepare_body(payload)
-        try:
-            client, response = await _open(account, body)
-        except httpx.HTTPError as exc:
-            pool.note_error(aid)
-            last_error = str(exc)
-            _log(api_key_info, account, client_model, True, "error", 502, str(exc)[:240], t0)
-            continue
-
-        if response.status_code >= 400:
-            raw = await response.aread()
-            await _close(client, response)
-            text = raw.decode("utf-8", "replace")
-            kind = classify(response.status_code, text)
-            _handle_kind(aid, kind)
-            last_error = f"upstream {response.status_code} ({kind})"
-            _log(api_key_info, account, client_model, True, "error", response.status_code, text[:240], t0)
-            continue
 
         # 2xx → 锁定该账号，开始转换流
         auth_manager.mark_account_success(aid)
@@ -1142,6 +1211,8 @@ async def _run_stream(
             async for out in stream_to_openai(
                 response.aiter_lines(), chunk_id, client_model, on_error, usage_sink
             ):
+                if first_token_ms is None:
+                    first_token_ms = int((time.monotonic() - request_t0) * 1000)
                 if out.startswith("event: error"):
                     errored = True
                 yield out
@@ -1152,7 +1223,7 @@ async def _run_stream(
             yield "data: [DONE]\n\n"
         finally:
             await _close(client, response)
-        _log(
+        await _log(
             api_key_info,
             account,
             client_model,
@@ -1162,6 +1233,7 @@ async def _run_stream(
             "upstream stream error" if errored else "",
             t0,
             usage_sink.get("usage"),
+            first_token_ms=None if errored else first_token_ms,
         )
         return
 

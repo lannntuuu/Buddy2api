@@ -16,11 +16,21 @@
   })();
 </script>
 <link rel="stylesheet" href="/static/css/app.css">
+<!-- 首屏字体预加载:7 个 woff2 与 app.css @font-face 一一对应(font-display:swap 已在 CSS 声明) -->
+<link rel="preload" href="/static/fonts/Geist-Regular.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/Geist-Medium.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/Geist-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/Geist-Bold.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/GeistMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/GeistMono-Medium.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/GeistMono-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
 </head>
 <body>
 <div id="app"></div>
-<script src="/static/vendor/vue.global.prod.min.js"></script>
-<script src="/static/vendor/Sortable.min.js"></script>
+<!-- vendor 加 defer:不阻塞解析;defer 脚本与 module 脚本按文档顺序执行,
+     仍保证 Vue → Sortable → app.js(module) 的全局依赖顺序不破坏 -->
+<script defer src="/static/vendor/vue.global.prod.min.js"></script>
+<script defer src="/static/vendor/Sortable.min.js"></script>
 <script type="module" src="/static/js/app.js"></script>
 </body>
 </html>

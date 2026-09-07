@@ -9,17 +9,19 @@ from typing import AsyncGenerator
 import httpx
 
 from accounts import auth_manager
-from storage import database as db
-from providers.model_config import channel_aliases, channel_credit_rate
+from storage.http_pool import get_client
+from providers import store_common
+from providers.model_config import channel_aliases
 from providers.qclaw.constants import AIZONE_BASE, ALIASES, CHANNEL_ID, RETRYABLE_STATUS
 from providers.retry import retry_delay
 from providers.qclaw.sign import aizone_headers
 from providers.host_override import channel_host
 
 
-def translate_model(model: str) -> str:
-    inner = (model or "default").strip() or "default"
-    return channel_aliases(CHANNEL_ID, ALIASES).get(inner, inner)
+# 与 qwenwork / traework 的同名单行拷贝收敛：见 store_common.make_translator
+translate_model = store_common.make_translator(
+    lambda: channel_aliases(CHANNEL_ID, ALIASES), "default"
+)
 
 
 def _alt_text(value) -> str:
@@ -80,43 +82,19 @@ def _ids(account: dict) -> tuple[str, str, str, str]:
     return guid, user_id, jwt, api_key
 
 
-def _log(api_key_info, account, model_name, stream, prompt_t, completion_t, total_t,
-         finish_reason, status_code, error_msg, t0, increment_usage=True, usage=None):
-    # 缓存命中提取（三种风格取最大非零值，见 store_common.extract_cache_tokens）
-    try:
-        from providers.store_common import extract_cache_tokens
-        cache_read, cache_creation = extract_cache_tokens(usage if isinstance(usage, dict) else None)
-    except Exception:
-        cache_read, cache_creation = 0, 0
-    rate = channel_credit_rate(CHANNEL_ID)
-    credit = round(total_t / rate, 6) if rate else 0
-    try:
-        db.record_request(
-            {
-                "api_key_id": api_key_info["id"] if api_key_info else None,
-                "api_key_name": api_key_info["name"] if api_key_info else None,
-                "account_id": account["id"] if account else None,
-                "account_name": account.get("name") if account else None,
-                "provider": CHANNEL_ID,
-                "model": model_name,
-                "stream": 1 if stream else 0,
-                "prompt_tokens": prompt_t,
-                "completion_tokens": completion_t,
-                "total_tokens": total_t,
-                "cache_read_tokens": cache_read,
-                "cache_creation_tokens": cache_creation,
-                "credit": credit,
-                "finish_reason": finish_reason,
-                "duration_ms": int((time.time() - t0) * 1000),
-                "status_code": status_code,
-                "error_msg": error_msg,
-                "increment_usage": increment_usage,
-                "client": (api_key_info or {}).get("_client_tag"),
-                "client_version": (api_key_info or {}).get("_client_version"),
-            }
-        )
-    except Exception:
-        pass
+async def _log(api_key_info, account, model_name, stream, prompt_t, completion_t, total_t,
+               finish_reason, status_code, error_msg, t0, increment_usage=True, usage=None,
+               first_token_ms=None):
+    # 落库线程化 + 语义收敛：见 store_common.log_request（三家 _log 的一份实现）
+    await store_common.log_request(
+        api_key_info, account,
+        channel=CHANNEL_ID, model=model_name, stream=stream, usage=usage,
+        finish_reason=finish_reason, status_code=status_code,
+        duration_ms=int((time.time() - t0) * 1000), error_msg=error_msg,
+        prompt_tokens=prompt_t, completion_tokens=completion_t, total_tokens=total_t,
+        increment_usage=increment_usage,
+        created_at=int(t0), first_token_ms=first_token_ms,
+    )
 
 
 def _build_body(payload: dict) -> tuple[dict, str]:
@@ -152,12 +130,13 @@ async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
         t0 = time.time()
         try:
             headers = _headers_for(account)
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(
-                    f"{channel_host(CHANNEL_ID, 'aizone_base', AIZONE_BASE)}/chat/completions",
-                    headers=headers,
-                    content=raw,
-                )
+            client = get_client()
+            response = await client.post(
+                f"{channel_host(CHANNEL_ID, 'aizone_base', AIZONE_BASE)}/chat/completions",
+                headers=headers,
+                content=raw,
+                timeout=120.0,
+            )
         except httpx.HTTPError as exc:
             auth_manager.mark_account_failure(account["id"], 503)
             last_error = ("error", (503, {"error": {"message": str(exc)[:240], "type": "server_error"}}))
@@ -170,7 +149,7 @@ async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
             except ValueError:
                 data = {"id": "qclaw", "object": "chat.completion", "choices": []}
             usage = data.get("usage") or {}
-            _log(
+            await _log(
                 api_key_info, account, model_name, False,
                 int(usage.get("prompt_tokens") or 0),
                 int(usage.get("completion_tokens") or 0),
@@ -186,7 +165,7 @@ async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
             detail = {"error": {"message": response.text[:400], "type": "server_error"}}
         auth_manager.mark_account_failure(account["id"], status)
         last_error = ("error", (status, detail))
-        _log(
+        await _log(
             api_key_info, account, model_name, False,
             0, 0, 0, "retry" if status in RETRYABLE_STATUS and attempt < 2 else "error",
             status, str(detail)[:400], t0,
@@ -206,6 +185,9 @@ async def _stream(body: dict, raw: str, api_key_info, model_name: str) -> AsyncG
     last_error = b"data: {\"error\":{\"message\":\"No available accounts\"}}\n\n"
     last_status = 503
     t0 = time.time()
+    # first_token_ms 基线取账号轮换循环之前（= 用户真实等待，含 pick/退避）
+    ft_t0 = time.monotonic()
+    first_token_ms: int | None = None
     for attempt in range(3):
         account = auth_manager.pick_account(tried, provider=CHANNEL_ID)
         if not account:
@@ -216,58 +198,63 @@ async def _stream(body: dict, raw: str, api_key_info, model_name: str) -> AsyncG
         usage = None
         try:
             headers = _headers_for(account)
-            async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10.0, read=None)) as client:
-                async with client.stream(
-                    "POST",
-                    f"{channel_host(CHANNEL_ID, 'aizone_base', AIZONE_BASE)}/chat/completions",
-                    headers=headers,
-                    content=raw,
-                ) as response:
-                    last_status = response.status_code
-                    if response.status_code >= 400:
-                        text = (await response.aread()).decode("utf-8", errors="replace")[:400]
-                        auth_manager.mark_account_failure(account["id"], response.status_code)
-                        last_error = f"data: {json.dumps({'error': {'message': text}}, ensure_ascii=False)}\n\n".encode()
-                        if response.status_code not in RETRYABLE_STATUS:
-                            yield last_error
-                            _log(api_key_info, account, model_name, True, 0, 0, 0, "error", response.status_code, text, t0)
-                            return
-                        await retry_delay(attempt)
+            client = get_client()
+            async with client.stream(
+                "POST",
+                f"{channel_host(CHANNEL_ID, 'aizone_base', AIZONE_BASE)}/chat/completions",
+                headers=headers,
+                content=raw,
+                timeout=httpx.Timeout(None, connect=10.0, read=None),
+            ) as response:
+                last_status = response.status_code
+                if response.status_code >= 400:
+                    text = (await response.aread()).decode("utf-8", errors="replace")[:400]
+                    auth_manager.mark_account_failure(account["id"], response.status_code)
+                    last_error = f"data: {json.dumps({'error': {'message': text}}, ensure_ascii=False)}\n\n".encode()
+                    if response.status_code not in RETRYABLE_STATUS:
+                        yield last_error
+                        await _log(api_key_info, account, model_name, True, 0, 0, 0, "error", response.status_code, text, t0)
+                        return
+                    await retry_delay(attempt)
+                    continue
+                auth_manager.mark_account_success(account["id"])
+                async for line in response.aiter_lines():
+                    if not line:
                         continue
-                    auth_manager.mark_account_success(account["id"])
-                    async for line in response.aiter_lines():
-                        if not line:
-                            continue
-                        if not line.startswith("data:"):
-                            output_started = True
-                            yield (line + "\n").encode("utf-8")
-                            continue
-                        data = line[5:].strip()
-                        if data == "[DONE]":
-                            output_started = True
-                            yield b"data: [DONE]\n\n"
-                            continue
-                        try:
-                            parsed = _normalize_completion(json.loads(data))
-                            payload = json.dumps(parsed, ensure_ascii=False)
-                        except (json.JSONDecodeError, TypeError):
-                            parsed = None
-                            payload = data
-                        if isinstance(parsed, dict) and isinstance(parsed.get("usage"), dict):
-                            # 上游最后一个 chunk 常带 usage，用它回填统计
-                            usage = parsed["usage"]
+                    if first_token_ms is None:
+                        first_token_ms = int((time.monotonic() - ft_t0) * 1000)
+                    if not line.startswith("data:"):
                         output_started = True
-                        yield f"data: {payload}\n\n".encode("utf-8")
+                        yield (line + "\n").encode("utf-8")
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        output_started = True
+                        yield b"data: [DONE]\n\n"
+                        continue
+                    try:
+                        parsed = _normalize_completion(json.loads(data))
+                        payload = json.dumps(parsed, ensure_ascii=False)
+                    except (json.JSONDecodeError, TypeError):
+                        parsed = None
+                        payload = data
+                    if isinstance(parsed, dict) and isinstance(parsed.get("usage"), dict):
+                        # 上游最后一个 chunk 常带 usage，用它回填统计
+                        usage = parsed["usage"]
+                    output_started = True
+                    yield f"data: {payload}\n\n".encode("utf-8")
             if isinstance(usage, dict):
-                _log(
+                await _log(
                     api_key_info, account, model_name, True,
                     int(usage.get("prompt_tokens") or 0),
                     int(usage.get("completion_tokens") or 0),
                     int(usage.get("total_tokens") or (usage.get("prompt_tokens") or 0) + (usage.get("completion_tokens") or 0)),
                     "stop", 200, "", t0, usage=usage,
+                    first_token_ms=first_token_ms,
                 )
             else:
-                _log(api_key_info, account, model_name, True, 0, 0, 0, "stop", 200, "", t0)
+                await _log(api_key_info, account, model_name, True, 0, 0, 0, "stop", 200, "", t0,
+                           first_token_ms=first_token_ms)
             return
         except httpx.HTTPError as exc:
             if output_started:
@@ -278,19 +265,12 @@ async def _stream(body: dict, raw: str, api_key_info, model_name: str) -> AsyncG
             await retry_delay(attempt)
             continue
     yield last_error
-    _log(api_key_info, None, model_name, True, 0, 0, 0, "error", last_status, "stream failed", t0)
+    await _log(api_key_info, None, model_name, True, 0, 0, 0, "error", last_status, "stream failed", t0)
 
 
 async def test_chat(account: dict, model: str = "default", prompt: str = "ping") -> dict:
-    payload = {
-        "model": model or "default",
-        "messages": [{"role": "user", "content": prompt or "ping"}],
-        "stream": False,
-        "max_tokens": 64,
-    }
-    t0 = time.time()
-    body, raw = _build_body(payload)
-    try:
+    async def send(payload: dict) -> tuple:
+        body, raw = _build_body(payload)
         headers = _headers_for(account)
         async with httpx.AsyncClient(timeout=45.0) as client:
             response = await client.post(
@@ -298,27 +278,12 @@ async def test_chat(account: dict, model: str = "default", prompt: str = "ping")
                 headers=headers,
                 content=raw,
             )
-    except httpx.HTTPError as exc:
-        return {"ok": False, "status_code": 0, "duration_ms": int((time.time() - t0) * 1000), "message": str(exc)[:240]}
-    duration_ms = int((time.time() - t0) * 1000)
-    if response.status_code >= 400:
-        return {
-            "ok": False,
-            "status_code": response.status_code,
-            "duration_ms": duration_ms,
-            "message": response.text[:400],
-        }
-    try:
-        data = _normalize_completion(response.json())
-    except ValueError:
-        data = {}
-    message_obj = ((data.get("choices") or [{}])[0].get("message") or {})
-    message = message_obj.get("content") or message_obj.get("reasoning_content") or ""
-    return {
-        "ok": True,
-        "status_code": 200,
-        "duration_ms": duration_ms,
-        "model": data.get("model"),
-        "message": str(message)[:240],
-        "usage": data.get("usage") or {},
-    }
+        if response.status_code >= 400:
+            return response.status_code, response.text[:400], None
+        try:
+            data = _normalize_completion(response.json())
+        except ValueError:
+            data = {}
+        return response.status_code, None, data
+
+    return await store_common.run_test_chat(model or "default", prompt or "ping", send)

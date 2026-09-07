@@ -100,6 +100,12 @@ class QuotaSnapshot:
 
 @runtime_checkable
 class Provider(Protocol):
+    """五家 provider 的公共核(35号方案 §2.3:9 方法五家齐备)。
+
+    仅注解用:禁止在业务路径做 isinstance/运行时强制——各家的签名差异
+    (如 LoginCapable 两家形态不同)由能力 Protocol 与契约测试钉住。
+    """
+
     id: ChannelId
     display_name: str
     checkin_supported: bool
@@ -123,3 +129,82 @@ class Provider(Protocol):
     async def chat_completions(
         self, payload: dict, api_key_info: dict | None
     ) -> tuple: ...
+
+    def fetch_model_rates(self) -> list[dict]: ...
+
+
+@runtime_checkable
+class StoreCapable(Protocol):
+    """本地凭据目录发现/导入(workbuddy 除外,4/5 家)。"""
+
+    def discover(self) -> dict: ...
+
+    def import_path(self, path: str) -> dict: ...
+
+    def parse_credentials(self, body: dict) -> dict: ...
+
+
+@runtime_checkable
+class RefreshCapable(Protocol):
+    """账号级 token 刷新(qclaw/qwenwork/traework/traesolo)。"""
+
+    async def refresh(self, account: dict) -> dict: ...
+
+
+@runtime_checkable
+class TestChatCapable(Protocol):
+    """单账号探活(workbuddy 走 proxy.test_account_chat 模块函数,4/5 家)。"""
+
+    async def test_chat(self, account: dict, model: str = "auto", prompt: str = "ping") -> dict: ...
+
+
+@runtime_checkable
+class QuotaCapable(Protocol):
+    """官方额度查询(fetch_quota -> QuotaSnapshot;workbuddy 无独立额度 API)。"""
+
+    async def fetch_quota(self, account: dict) -> QuotaSnapshot: ...
+
+
+@runtime_checkable
+class UpsertCapable(Protocol):
+    """粘贴凭据直接建号(qwenwork/traework/traesolo;qclaw 走 import_path)。"""
+
+    def upsert_account(self, parsed: dict) -> dict: ...
+
+
+@runtime_checkable
+class CheckinCapable(Protocol):
+    """每日签到(traework/traesolo)。"""
+
+    async def fetch_checkin(self, account: dict) -> dict: ...
+
+    async def claim_checkin(self, account: dict) -> dict: ...
+
+
+@runtime_checkable
+class QclawLoginCapable(Protocol):
+    """qclaw 扫码登录流(异步双函数)。"""
+
+    async def start_login(self) -> dict: ...
+
+    async def complete_login(self, data: dict) -> dict: ...
+
+
+@runtime_checkable
+class SoloLoginCapable(Protocol):
+    """traesolo SOLO 登录流(同步三函数 + 异步回调)。"""
+
+    def start_login(self) -> dict: ...
+
+    def login_result(self) -> dict: ...
+
+    def cancel_login(self) -> dict: ...
+
+    async def complete_login_callback(self, request: dict) -> dict: ...
+
+
+@runtime_checkable
+class DynamicModelsCapable(Protocol):
+    """官方模型目录动态拉取(仅 traesolo)。"""
+
+    async def refresh_dynamic_models(self, force: bool = False) -> bool: ...

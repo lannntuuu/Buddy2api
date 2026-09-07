@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 
-import httpx
-
+from providers.trae_shared import is_token_expired
 from providers.qwenwork.constants import (
     BUILD,
     CHANNEL_ID,
@@ -18,6 +18,7 @@ from providers.qwenwork.constants import (
 )
 from providers.host_override import channel_host
 from providers.qwenwork.store import iso_to_ms, write_refreshed_auth
+from storage.http_pool import get_client
 
 
 class QwenWorkAuthError(RuntimeError):
@@ -39,13 +40,6 @@ def openapi_headers(request_id: str = "") -> dict[str, str]:
     }
 
 
-def is_token_expired(account: dict, skew_ms: int = 300_000) -> bool:
-    expires_at = int(account.get("expires_at") or 0)
-    if expires_at <= 0:
-        return False
-    return time.time() * 1000 >= expires_at - skew_ms
-
-
 async def refresh_account(account: dict) -> dict:
     from storage import database as db
 
@@ -57,8 +51,13 @@ async def refresh_account(account: dict) -> dict:
     if access:
         headers["Authorization"] = f"Bearer {access}"
     body = {"refresh_token": refresh, "target": "c"}
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(f"{channel_host(CHANNEL_ID, 'gateway', GATEWAY)}{REFRESH_PATH}", headers=headers, json=body)
+    client = get_client()
+    response = await client.post(
+        f"{channel_host(CHANNEL_ID, 'gateway', GATEWAY)}{REFRESH_PATH}",
+        headers=headers,
+        json=body,
+        timeout=30.0,
+    )
     if response.status_code >= 400:
         raise QwenWorkAuthError(f"deviceToken refresh failed: HTTP {response.status_code}")
     try:
@@ -87,7 +86,8 @@ async def refresh_account(account: dict) -> dict:
     auth_path = extra.get("auth_path")
     if auth_path:
         try:
-            write_refreshed_auth(Path(auth_path), patch)
+            # DPAPI 解密 + AES 加密落盘是同步磁盘 IO，放 worker 线程避免阻塞事件循环
+            await asyncio.to_thread(write_refreshed_auth, Path(auth_path), patch)
         except Exception:
             pass
     fresh = db.get_account(account["id"])

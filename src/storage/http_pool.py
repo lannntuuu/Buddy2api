@@ -29,8 +29,8 @@ def get_client() -> httpx.AsyncClient:
             if _client is None or _client.is_closed or (loop is not None and _client_loop is not loop):
                 _client = httpx.AsyncClient(
                     limits=httpx.Limits(
-                        max_connections=32,
-                        max_keepalive_connections=12,
+                        max_connections=64,
+                        max_keepalive_connections=32,
                         keepalive_expiry=60.0,
                     ),
                     # 每次请求仍可按需传入 timeout= 覆盖该默认上限

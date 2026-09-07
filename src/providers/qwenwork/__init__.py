@@ -7,7 +7,6 @@ from typing import Optional
 import httpx
 
 from accounts import auth_manager
-from storage import database as db
 from storage.http_pool import get_client
 from providers.model_config import channel_aliases, channel_model_ids
 from providers.protocol import ChannelId, QuotaSnapshot
@@ -20,7 +19,8 @@ from providers.qwenwork.constants import (
     GATEWAY,
     STATIC_MODELS,
 )
-from providers.qwenwork.token import QwenWorkAuthError, is_token_expired, openapi_headers, refresh_account
+from providers.qwenwork.token import QwenWorkAuthError, openapi_headers, refresh_account
+from providers.trae_shared import pick_with_refresh_fallback
 from providers.host_override import channel_host
 
 
@@ -58,27 +58,11 @@ class QwenWorkProvider:
     async def pick_account_with_fallback(
         self, exclude_ids: set[int] | None = None
     ) -> Optional[dict]:
-        exclude = exclude_ids or set()
-        account = self.pick_account(exclude)
-        if account:
-            if is_token_expired(account):
-                try:
-                    return await refresh_account(account)
-                except Exception:
-                    pass
-            else:
-                return account
-        expired = [
-            row
-            for row in db.list_accounts(provider=self.id)
-            if row.get("status") == "expired" and row.get("id") not in exclude
-        ]
-        for row in expired:
-            try:
-                return await refresh_account(row)
-            except Exception:
-                continue
-        return None
+        # 收敛到共享实现(负缓存/异常域见 trae_shared);
+        # proactive 语义:选中的过期账号先尝试原地刷新。
+        return await pick_with_refresh_fallback(
+            self.id, refresh_account, exclude_ids=exclude_ids,
+        )
 
     async def has_usable_account(self) -> bool:
         return await self.pick_account_with_fallback() is not None

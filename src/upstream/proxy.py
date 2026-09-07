@@ -21,9 +21,8 @@ import asyncio
 import json
 import logging
 import os
-import threading
 import time
-from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Optional
 
 import httpx
@@ -57,6 +56,7 @@ from upstream.compaction import (  # noqa: E402,F401
     _is_11128_error,
     _arm_channel,
     _channel_armed,
+    _record_11128_retry,
     _smart_compact_messages,
     _compact_text,
     _compact_tools,
@@ -65,17 +65,82 @@ from upstream.compaction import (  # noqa: E402,F401
 
 from storage import database as db
 from accounts import auth_manager
-from providers.store_common import extract_cache_tokens
+from providers.store_common import (
+    credit_source_of,
+    enqueue_record_request,
+    extract_cache_tokens,
+)
 
 BACKEND = "https://copilot.tencent.com"
-RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+# 共享 retry.py 的瞬时错误集合;401/403 仅参与账号 failover 判定(_is_retryable_status),
+# 不参与同账号重试。
+from providers.retry import RETRYABLE_STATUS, retry_delay as _retry_delay  # noqa: E402
+
+RETRYABLE_STATUS_CODES = RETRYABLE_STATUS | {401, 403}
 
 def _is_retryable_status(status: int) -> bool:
-    return status in RETRYABLE_STATUS_CODES or status in {401, 403}
+    return status in RETRYABLE_STATUS_CODES
 
 
-async def _retry_delay(attempt: int):
-    await asyncio.sleep(min(2.0, 0.25 * (2 ** attempt)))
+def _parse_retry_after(value) -> float | None:
+    """Retry-After 头的纯数字秒解析；缺失/非数字/非法值返回 None。
+
+    只接受纯数字秒（HTTP-date 不支持）；NaN/负数/inf 一律视为缺失。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+    except ValueError:
+        return None
+    if not (seconds >= 0) or seconds == float("inf"):
+        return None
+    return seconds
+
+# 进程级长寿命上游客户端(keep-alive 复用,降低每次转发的 TCP+TLS 建连成本)。
+# 与 openai_compat._get_client / storage.http_pool 同模式:按"当前事件循环"绑定,
+# 单 loop 生产环境全程复用;测试里每个 asyncio.run 是新 loop,自动重建,
+# 从而每条用例的 httpx.AsyncClient 全局 fake 都能被重新拾取,不跨用例串味。
+# 不直接复用 storage.http_pool:该池的 is_closed 探测对测试注入的无 is_closed
+# fake 会 AttributeError,且会把 fake 缓存进全局池。
+_upstream_client: httpx.AsyncClient | None = None
+_upstream_client_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _upstream_client, _upstream_client_loop
+    try:
+        loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if (
+        _upstream_client is None
+        or getattr(_upstream_client, "is_closed", False)
+        or (loop is not None and _upstream_client_loop is not loop)
+    ):
+        _upstream_client = httpx.AsyncClient(
+            limits=httpx.Limits(
+                max_connections=64,
+                max_keepalive_connections=32,
+                keepalive_expiry=60.0,
+            ),
+            # 每次请求经 client.stream(..., timeout=...) 传入具体超时
+            timeout=httpx.Timeout(60.0),
+        )
+        _upstream_client_loop = loop
+    return _upstream_client
+
+
+@asynccontextmanager
+async def _shared_client_cm():
+    """Yield the shared long-lived upstream client without closing it.
+
+    Replaces the old per-request `async with httpx.AsyncClient(...)` so
+    connections are reused across requests and retry attempts. Per-request
+    timeouts are passed at the `client.stream(...)` call sites instead.
+    """
+    yield _get_client()
 
 PASSTHROUGH_BODY_KEYS = {
     "model", "messages", "tools", "tool_choice", "temperature",
@@ -140,8 +205,6 @@ def _err_sse_event(raw: bytes, status: int) -> bytes:
     return event.encode("utf-8")
 
 
-def _json_sse_event(payload: dict) -> bytes:
-    return ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8")
 
 
 def _has_terminal_choice(payload: dict) -> bool:
@@ -154,404 +217,17 @@ def _has_terminal_choice(payload: dict) -> bool:
     )
 
 
-_MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024
+from upstream.sse import SSEDecoder, _MAX_EVENT_BYTES as _MAX_SSE_EVENT_BYTES  # noqa: E402
+from upstream.chat_grammar import (  # noqa: E402,F401
+    ChatStreamObserver as _ChatStreamObserver,
+    _json_sse_event,
+    _repair_json_arguments,
+)
 
 
-def _repair_json_arguments(raw: str) -> str:
-    """尝试修复上游截断的工具调用 arguments（hy3 长时间流式偶发）。
-
-    只做尾部补全：从后往前尝试补上缺失的 `}` / `]` / `"`，直到能解析成
-    JSON 对象。修不动就原样返回（调用方会按不完整报错）。
-    """
-    if not raw:
-        return raw
-    try:
-        parsed = json.loads(raw)
-        return raw if isinstance(parsed, dict) else raw
-    except (json.JSONDecodeError, RecursionError, TypeError):
-        pass
-    # 从尾部逐步补闭合符，最多尝试补 16 个（避免死循环/过度猜测）
-    for extra in range(1, 17):
-        candidate = raw + "}" * extra
-        try:
-            parsed = json.loads(candidate)
-        except (json.JSONDecodeError, RecursionError, TypeError):
-            continue
-        if isinstance(parsed, dict):
-            return candidate
-    # 再试补 ] 和 " 组合（嵌套数组/字符串未闭合的场景）
-    for tail in ("]", "]", "}", "\"}", "\"]", "}}", "]}", "\"}"):
-        candidate = raw + tail
-        try:
-            parsed = json.loads(candidate)
-        except (json.JSONDecodeError, RecursionError, TypeError):
-            continue
-        if isinstance(parsed, dict):
-            return candidate
-    return raw
 
 
-class _ChatStreamObserver:
-    """Track completion state while Chat Completions SSE is normalized."""
-
-    def __init__(self, fallback_model: str, expected_choices: int = 1):
-        self.fallback_model = fallback_model
-        if not isinstance(expected_choices, int) or isinstance(expected_choices, bool):
-            expected_choices = 1
-        self.expected_choice_indices = set(range(expected_choices if 1 <= expected_choices <= 128 else 1))
-        self.seen_done = False
-        self.saw_chat_chunk = False
-        self.upstream_error = False
-        self.upstream_error_event: dict | None = None
-        self.finish_reasons: dict[int, str | None] = {}
-        self.closed_choices: set[int] = set()
-        self.content_choices: set[int] = set()
-        self.tool_call_choices: set[int] = set()
-        self.tool_calls: dict[tuple[int, int], dict] = {}
-        self.malformed_data_event = False
-        self.parser_error: str | None = None
-        self.usage: dict = {}
-        self.content_parts: list[str] = []
-        self.metadata: dict = {}
-
-    def observe_event(self, data: bytes) -> dict | None:
-        if data.strip() == b"[DONE]":
-            self.seen_done = True
-            return None
-        if self.seen_done:
-            self.parser_error = "The upstream sent data after the [DONE] event."
-            return None
-        try:
-            obj = json.loads(data)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            self.malformed_data_event = True
-            return None
-        if not isinstance(obj, dict):
-            self.malformed_data_event = True
-            return None
-
-        if "error" in obj and obj["error"] is not None:
-            self.upstream_error = True
-            self.upstream_error_event = obj
-            return None
-
-        choices = obj.get("choices")
-        is_chat_chunk = obj.get("object") == "chat.completion.chunk" or "choices" in obj
-        if is_chat_chunk and not isinstance(choices, list):
-            self.parser_error = "The upstream Chat Completions chunk had an invalid choices field."
-            return None
-        if is_chat_chunk:
-            self.saw_chat_chunk = True
-            for key in ("id", "created", "model", "system_fingerprint", "service_tier"):
-                if key in obj:
-                    self.metadata[key] = obj[key]
-
-        event_usage = obj.get("usage")
-        if event_usage is not None and not isinstance(event_usage, dict):
-            self.parser_error = "The upstream Chat Completions chunk had invalid usage data."
-            return None
-        if isinstance(event_usage, dict):
-            self.usage.update(event_usage)
-        if not is_chat_chunk:
-            self.parser_error = "The upstream SSE event was not a Chat Completions chunk."
-            return None
-
-        validated_choices: list[tuple[int, dict, str | None]] = []
-        event_choice_indices: set[int] = set()
-        for choice in choices:
-            if not isinstance(choice, dict):
-                self.parser_error = "The upstream Chat Completions chunk contained an invalid choice."
-                return None
-            index = choice.get("index", 0)
-            if not isinstance(index, int) or isinstance(index, bool):
-                self.parser_error = "The upstream Chat Completions choice had an invalid index."
-                return None
-            if index not in self.expected_choice_indices:
-                self.parser_error = "The upstream Chat Completions choice index was not requested."
-                return None
-            if index in event_choice_indices:
-                self.parser_error = "The upstream Chat Completions chunk repeated a choice index."
-                return None
-            event_choice_indices.add(index)
-            if index in self.closed_choices:
-                self.parser_error = "The upstream sent another delta after a choice had finished."
-                return None
-            reason = choice.get("finish_reason")
-            if reason == "":
-                reason = None
-                choice["finish_reason"] = None
-            elif reason is not None and not isinstance(reason, str):
-                self.parser_error = "The upstream Chat Completions choice had an invalid finish reason."
-                return None
-            delta = choice.get("delta")
-            if not isinstance(delta, dict):
-                self.parser_error = "The upstream Chat Completions choice had an invalid delta."
-                return None
-            for content_field in ("content", "reasoning_content"):
-                content = delta.get(content_field)
-                if content is not None and not isinstance(content, str):
-                    self.parser_error = (
-                        f"The upstream Chat Completions choice had invalid {content_field}."
-                    )
-                    return None
-            tool_deltas = delta.get("tool_calls")
-            if tool_deltas is not None and not isinstance(tool_deltas, list):
-                self.parser_error = "The upstream Chat Completions choice had invalid tool calls."
-                return None
-            if isinstance(tool_deltas, list):
-                for position, tool_delta in enumerate(tool_deltas):
-                    if not isinstance(tool_delta, dict):
-                        self.parser_error = "The upstream tool call stream contained an invalid delta."
-                        return None
-                    tool_index = tool_delta.get("index", position)
-                    if (
-                        not isinstance(tool_index, int)
-                        or isinstance(tool_index, bool)
-                        or tool_index < 0
-                    ):
-                        self.parser_error = "The upstream tool call stream had an invalid index."
-                        return None
-                    call_id = tool_delta.get("id")
-                    if call_id is not None and (not isinstance(call_id, str) or not call_id):
-                        self.parser_error = "The upstream tool call stream had an invalid call id."
-                        return None
-                    call_type = tool_delta.get("type")
-                    if call_type is not None and call_type != "function":
-                        self.parser_error = "The upstream tool call stream had an invalid call type."
-                        return None
-                    function = tool_delta.get("function")
-                    if function is not None and not isinstance(function, dict):
-                        self.parser_error = "The upstream tool call stream had an invalid function."
-                        return None
-                    if isinstance(function, dict):
-                        name = function.get("name")
-                        if name == "":
-                            function.pop("name", None)
-                            name = None
-                        elif name is not None and not isinstance(name, str):
-                            self.parser_error = "The upstream tool call stream had an invalid function name."
-                            return None
-                        arguments = function.get("arguments")
-                        if arguments is not None and not isinstance(arguments, str):
-                            self.parser_error = "The upstream tool call stream had invalid arguments."
-                            return None
-            validated_choices.append((index, delta, reason))
-
-        for index, delta, reason in validated_choices:
-            self.finish_reasons.setdefault(index, None)
-            if reason:
-                self.finish_reasons[index] = reason
-                self.closed_choices.add(index)
-            content = delta.get("content")
-            if content:
-                self.content_parts.append(content)
-                self.content_choices.add(index)
-            tool_deltas = delta.get("tool_calls")
-            if tool_deltas is None:
-                continue
-            if tool_deltas:
-                self.tool_call_choices.add(index)
-            for position, tool_delta in enumerate(tool_deltas):
-                tool_index = tool_delta.get("index", position)
-                state = self.tool_calls.setdefault(
-                    (index, tool_index),
-                    {"id": None, "name": None, "arguments": ""},
-                )
-                call_id = tool_delta.get("id")
-                if call_id:
-                    if state["id"] not in (None, call_id):
-                        self.parser_error = "The upstream tool call stream changed a call id."
-                        return None
-                    state["id"] = call_id
-                function = tool_delta.get("function")
-                if function is None:
-                    continue
-                name = function.get("name")
-                if name:
-                    if state["name"] not in (None, name):
-                        self.parser_error = "The upstream tool call stream changed a function name."
-                        return None
-                    state["name"] = name
-                arguments = function.get("arguments")
-                if arguments is None:
-                    continue
-                state["arguments"] += arguments
-        return obj
-
-    def missing_finish_choices(self) -> list[int]:
-        return sorted(index for index, reason in self.finish_reasons.items() if not reason)
-
-    def eof_error(self) -> str | None:
-        if self.parser_error:
-            return self.parser_error
-        if self.malformed_data_event:
-            return "The upstream stream ended with a malformed SSE JSON event."
-        if self.upstream_error:
-            return "The upstream returned an error event in an HTTP 200 stream."
-        if not self.saw_chat_chunk:
-            return "The upstream stream ended without a Chat Completions chunk."
-        missing_choices = self.expected_choice_indices.difference(self.finish_reasons)
-        if missing_choices:
-            return "The upstream stream ended before all requested choices were received."
-        for choice_index, reason in self.finish_reasons.items():
-            if reason == "tool_calls" and choice_index not in self.tool_call_choices:
-                return "The upstream ended with tool_calls but did not provide a tool call."
-            if choice_index in self.tool_call_choices and reason not in {
-                None,
-                "tool_calls",
-                "length",
-                "content_filter",
-            }:
-                return "The upstream tool call stream ended with an inconsistent finish reason."
-            if not reason and choice_index not in self.tool_call_choices:
-                return "The upstream stream ended before the choice received a finish reason."
-        for choice_index in self.tool_call_choices:
-            calls = [
-                state
-                for (current_choice, _), state in self.tool_calls.items()
-                if current_choice == choice_index
-            ]
-            if not calls:
-                return "The upstream tool call stream ended before the tool call was identified."
-            for state in calls:
-                if self.finish_reasons.get(choice_index) in {"length", "content_filter"}:
-                    continue
-                if not state["id"] or not state["name"]:
-                    return "The upstream tool call stream ended before the tool call was complete."
-                repaired = _repair_json_arguments(state["arguments"])
-                try:
-                    arguments = json.loads(repaired)
-                except (json.JSONDecodeError, RecursionError, TypeError):
-                    return "The upstream tool call stream ended with incomplete JSON arguments."
-                if not isinstance(arguments, dict):
-                    return "The upstream tool call arguments were not a JSON object."
-                if repaired != state["arguments"]:
-                    # 上游把 arguments 尾部截断了（hy3 长时间流式偶发）：
-                    # 修复后按修复值透传，避免整个回合失败。
-                    state["arguments"] = repaired
-        for choice_index, reason in self.finish_reasons.items():
-            if (
-                reason not in {"length", "content_filter"}
-                and choice_index not in self.content_choices
-                and choice_index not in self.tool_call_choices
-            ):
-                return "The upstream choice ended without content or a tool call."
-        return None
-
-    def terminal_event(self, choice_indices: list[int]) -> bytes:
-        payload = {
-            "id": self.metadata.get("id") or "chatcmpl-" + os.urandom(12).hex(),
-            "object": "chat.completion.chunk",
-            "created": self.metadata.get("created") or int(time.time()),
-            "model": self.metadata.get("model") or self.fallback_model,
-            "choices": [
-                {
-                    "index": index,
-                    "delta": {},
-                    "finish_reason": "tool_calls" if index in self.tool_call_choices else "stop",
-                }
-                for index in choice_indices
-            ],
-        }
-        for key in ("system_fingerprint", "service_tier"):
-            if key in self.metadata:
-                payload[key] = self.metadata[key]
-        return _json_sse_event(payload)
-
-
-class _SSEEventDecoder:
-    """Decode complete SSE data fields from arbitrary byte chunks."""
-
-    def __init__(self):
-        self.parser_error: str | None = None
-        self._buffer = b""
-        self._data_lines: list[bytes] = []
-        self._event_bytes = 0
-
-    def feed(self, chunk: bytes) -> list[bytes]:
-        if self.parser_error:
-            return []
-        self._buffer += chunk
-        events: list[bytes] = []
-        while True:
-            line = self._take_line()
-            if line is None:
-                break
-            event = self._consume_line(line)
-            if event is not None:
-                events.append(event)
-            if self.parser_error:
-                break
-        if not self.parser_error and len(self._buffer) > _MAX_SSE_EVENT_BYTES:
-            self._fail("The upstream SSE line exceeded the 8 MiB limit.")
-        return events
-
-    def finish(self) -> list[bytes]:
-        if self.parser_error:
-            return []
-        events: list[bytes] = []
-        while True:
-            line = self._take_line(final=True)
-            if line is None:
-                break
-            event = self._consume_line(line)
-            if event is not None:
-                events.append(event)
-            if self.parser_error:
-                return events
-        if self._data_lines:
-            events.append(b"\n".join(self._data_lines))
-            self._data_lines = []
-            self._event_bytes = 0
-        return events
-
-    def _take_line(self, *, final: bool = False) -> bytes | None:
-        for index, value in enumerate(self._buffer):
-            if value == 0x0A:
-                line = self._buffer[:index]
-                self._buffer = self._buffer[index + 1:]
-                return line[:-1] if line.endswith(b"\r") else line
-            if value == 0x0D:
-                if index + 1 == len(self._buffer) and not final:
-                    return None
-                end = index + 2 if self._buffer[index + 1:index + 2] == b"\n" else index + 1
-                line = self._buffer[:index]
-                self._buffer = self._buffer[end:]
-                return line
-        if final and self._buffer:
-            line = self._buffer
-            self._buffer = b""
-            return line
-        return None
-
-    def _consume_line(self, line: bytes) -> bytes | None:
-        if len(line) > _MAX_SSE_EVENT_BYTES:
-            self._fail("The upstream SSE line exceeded the 8 MiB limit.")
-            return None
-        if not line:
-            if not self._data_lines:
-                return None
-            event = b"\n".join(self._data_lines)
-            self._data_lines = []
-            self._event_bytes = 0
-            return event
-        if not line.startswith(b"data:"):
-            return None
-        data = line[5:]
-        if data.startswith(b" "):
-            data = data[1:]
-        self._event_bytes += len(data) + 1
-        if self._event_bytes > _MAX_SSE_EVENT_BYTES:
-            self._fail("The upstream SSE event exceeded the 8 MiB limit.")
-            return None
-        self._data_lines.append(data)
-        return None
-
-    def _fail(self, message: str) -> None:
-        self.parser_error = message
-        self._buffer = b""
-        self._data_lines = []
-        self._event_bytes = 0
+_SSEEventDecoder = SSEDecoder
 
 
 _extract_cache_tokens = extract_cache_tokens
@@ -575,7 +251,8 @@ def _log_request(api_key_info, account, model_name, stream,
                   finish_reason, status_code, error_msg, t0,
                   increment_usage: bool = True,
                   usage: dict | None = None,
-                  reasoning_effort: str | None = None):
+                  reasoning_effort: str | None = None,
+                  first_token_ms: int | None = None):
     elapsed_ms = int((time.time() - t0) * 1000)
     if not reasoning_effort:
         reasoning_effort = _UPSTREAM_DEFAULT_REASONING.get(model_name, "upstream")
@@ -601,6 +278,10 @@ def _log_request(api_key_info, account, model_name, stream,
         "increment_usage": increment_usage,
         "client": (api_key_info or {}).get("_client_tag"),
         "client_version": (api_key_info or {}).get("_client_version"),
+        # 请求起点秒级时间戳(入队时携带,落库层缺省用当前时刻)
+        "created_at": int(t0),
+        # 流式首个内容帧毫秒数;retry / eof / 错误行由调用方保持缺省 None
+        "first_token_ms": first_token_ms,
     }
     # Cache 命中追踪：兼容三种字段风格，整包 dump 留证据。
     cache_read, cache_creation = _extract_cache_tokens(usage)
@@ -622,23 +303,10 @@ def _log_request(api_key_info, account, model_name, stream,
         usage_json = serialized
     log_data["usage_json"] = usage_json
     # credit_source='live' 门槛：usage 含任意已知 cache 键即标 live（实测语义，与 dashboard accurate 对齐）。
-    _known_cache_keys = (
-        "cache_read_input_tokens", "cache_creation_input_tokens",
-        "prompt_cache_hit_tokens", "prompt_cache_miss_tokens",
-        "prompt_tokens_details",
-    )
-    log_data["credit_source"] = (
-        "live" if usage is not None and any(k in usage for k in _known_cache_keys) else None
-    )
-    try:
-        # 写日志（含 BEGIN IMMEDIATE 事务 + fsync）不占事件循环：
-        # 放进默认线程池 fire-and-forget，日志失败只静默丢弃。
-        loop = asyncio.get_running_loop()
-        fut = loop.run_in_executor(None, db.record_request, log_data)
-        # fire-and-forget：吞掉 executor 内抛出的异常，避免“异常从未被读取”告警
-        fut.add_done_callback(lambda f: f.exception() if f.cancelled() is False else None)
-    except Exception:
-        pass
+    log_data["credit_source"] = credit_source_of(usage)
+    # 写日志（含 BEGIN IMMEDIATE 事务 + fsync）不占事件循环：
+    # 放进默认线程池 fire-and-forget，日志失败只静默丢弃。
+    enqueue_record_request(log_data)
 
 
 async def proxy_chat_completions(
@@ -721,8 +389,7 @@ async def proxy_chat_completions(
             _arm_channel(channel, client)
             _smart_compact_messages(body, channel=channel, client_tag=client)
             body["_compacted_11128"] = True
-            with _COMPACTION_LOCK:
-                _COMPACTION_STATS["retried_11128"] += 1
+            _record_11128_retry()
             retry_t0 = time.time()
             retry_result = await _collect_stream(
                 url, headers, body, account, api_key_info, model_name, retry_t0
@@ -815,6 +482,33 @@ async def test_account_chat(account: dict, model: str = "auto", prompt: str = "p
     }
 
 
+class _RetryLog:
+    """流式重试的延迟落库载体（_stream_upstream 私有）。
+
+    收敛 4 处 pending_retry_log 字面量构造，字段与原字面量逐键一致：
+    在下一次账号轮换前（或循环收尾）才写 "retry"/"error" 日志行。
+    """
+
+    __slots__ = (
+        "account", "prompt_tokens", "completion_tokens", "total_tokens",
+        "credit", "status", "message", "started", "attempt", "retry_after",
+    )
+
+    def __init__(self, account, status, message, started,
+                 attempt=None, retry_after=None,
+                 prompt_tokens=0, completion_tokens=0, total_tokens=0, credit=0):
+        self.account = account
+        self.status = status
+        self.message = message
+        self.started = started
+        self.attempt = attempt
+        self.retry_after = retry_after
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+        self.total_tokens = total_tokens
+        self.credit = credit
+
+
 async def _stream_upstream(
     body: dict,
     api_key_info: Optional[dict],
@@ -830,6 +524,10 @@ async def _stream_upstream(
     last_account = None
     last_started = time.time()
     pending_retry_log: dict | None = None
+    # first_token_ms 基线取账号轮换/重试循环之前（= 用户真实等待，含 pick/
+    # refresh/退避）；重试或换号不重置起点。
+    request_t0 = time.monotonic()
+    first_token_ms: int | None = None
 
     for attempt in range(3):
         account = await auth_manager.pick_account_with_fallback(tried_ids)
@@ -839,21 +537,26 @@ async def _stream_upstream(
         if pending_retry_log is not None:
             _log_request(
                 api_key_info,
-                pending_retry_log["account"],
+                pending_retry_log.account,
                 model_name,
                 True,
-                pending_retry_log["prompt_tokens"],
-                pending_retry_log["completion_tokens"],
-                pending_retry_log["total_tokens"],
-                pending_retry_log["credit"],
+                pending_retry_log.prompt_tokens,
+                pending_retry_log.completion_tokens,
+                pending_retry_log.total_tokens,
+                pending_retry_log.credit,
                 "retry",
-                pending_retry_log["status"],
-                pending_retry_log["message"],
-                pending_retry_log["started"],
+                pending_retry_log.status,
+                pending_retry_log.message,
+                pending_retry_log.started,
                 increment_usage=False,
                 reasoning_effort=effective_reasoning,
             )
-            await _retry_delay(pending_retry_log["attempt"])
+            if pending_retry_log.retry_after is not None:
+                await _retry_delay(
+                    pending_retry_log.attempt, retry_after=pending_retry_log.retry_after
+                )
+            else:
+                await _retry_delay(pending_retry_log.attempt)
             pending_retry_log = None
         last_account = account
         tried_ids.add(account["id"])
@@ -875,6 +578,28 @@ async def _stream_upstream(
         pending_terminal_bytes = 0
         stop_reading = False
 
+        # feed / finish 共用的同构事件泵：处理 SSE 事件、缓存 terminal 帧
+        # 延后下发、产出非 terminal 帧。output_started / first_token_ms 打点
+        # 位置与拆分前逐行一致（出流前才翻转，首个内容帧记一次基线差）。
+        async def _pump(events):
+            nonlocal output_started, pending_terminal_bytes, first_token_ms
+            for data in events:
+                obj = observer.observe_event(data)
+                if obj is not None and not obj.get("error"):
+                    encoded = _json_sse_event(obj)
+                    if pending_terminal_events or _has_terminal_choice(obj):
+                        pending_terminal_events.append(encoded)
+                        pending_terminal_bytes += len(encoded)
+                        if pending_terminal_bytes > _MAX_SSE_EVENT_BYTES:
+                            observer.parser_error = (
+                                "The upstream terminal SSE events exceeded the 8 MiB limit."
+                            )
+                    else:
+                        output_started = True
+                        if first_token_ms is None:
+                            first_token_ms = int((time.monotonic() - request_t0) * 1000)
+                        yield encoded
+
         try:
             timeout = httpx.Timeout(
                 connect=10,
@@ -882,8 +607,8 @@ async def _stream_upstream(
                 write=30,
                 pool=10,
             )
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream("POST", url, headers=headers, json=body) as response:
+            async with _shared_client_cm() as client:
+                async with client.stream("POST", url, headers=headers, json=body, timeout=timeout) as response:
                     if response.status_code != 200:
                         raw_error = await response.aread()
                         # 11128 大内容拦截：武装通道 + 激进精简后原地重试（自愈）。
@@ -894,8 +619,7 @@ async def _stream_upstream(
                                 client_tag=(api_key_info or {}).get("_client_tag"),
                             )
                             body["_compacted_11128"] = True
-                            with _COMPACTION_LOCK:
-                                _COMPACTION_STATS["retried_11128"] += 1
+                            _record_11128_retry()
                             # 同一账号重发一次：从 tried 移除以免单账号通道被误判为无可用账号
                             tried_ids.discard(account["id"])
                             attempt -= 1
@@ -916,17 +640,18 @@ async def _stream_upstream(
                             )
                         auth_manager.mark_account_failure(account["id"], response.status_code)
                         if _is_retryable_status(response.status_code) and attempt < 2:
-                            pending_retry_log = {
-                                "account": account,
-                                "prompt_tokens": 0,
-                                "completion_tokens": 0,
-                                "total_tokens": 0,
-                                "credit": 0,
-                                "status": response.status_code,
-                                "message": raw_error.decode("utf-8", "replace")[:500],
-                                "started": t0,
-                                "attempt": attempt,
-                            }
+                            pending_retry_log = _RetryLog(
+                                account=account,
+                                status=response.status_code,
+                                message=raw_error.decode("utf-8", "replace")[:500],
+                                started=t0,
+                                attempt=attempt,
+                                # 429 等响应可能带 Retry-After(纯数字秒):
+                                # 存入 pending_retry_log,在重试前透传给 retry_delay
+                                retry_after=_parse_retry_after(
+                                    response.headers.get("retry-after")
+                                ),
+                            )
                             continue
                         _log_request(
                             api_key_info, account, model_name, True,
@@ -940,28 +665,16 @@ async def _stream_upstream(
                     async for chunk in response.aiter_bytes():
                         if not chunk:
                             continue
-                        for data in decoder.feed(chunk):
-                            obj = observer.observe_event(data)
-                            if obj is not None and not obj.get("error"):
-                                encoded = _json_sse_event(obj)
-                                if pending_terminal_events or _has_terminal_choice(obj):
-                                    pending_terminal_events.append(encoded)
-                                    pending_terminal_bytes += len(encoded)
-                                    if pending_terminal_bytes > _MAX_SSE_EVENT_BYTES:
-                                        observer.parser_error = (
-                                            "The upstream terminal SSE events exceeded the 8 MiB limit."
-                                        )
-                                else:
-                                    output_started = True
-                                    yield encoded
-                            if (
-                                observer.seen_done
-                                or observer.parser_error
-                                or observer.malformed_data_event
-                                or observer.upstream_error
-                            ):
-                                stop_reading = True
-                                break
+                        async for encoded in _pump(decoder.feed(chunk)):
+                            yield encoded
+                        if (
+                            observer.seen_done
+                            or observer.parser_error
+                            or observer.malformed_data_event
+                            or observer.upstream_error
+                        ):
+                            stop_reading = True
+                            break
                         if decoder.parser_error and not observer.seen_done:
                             observer.parser_error = decoder.parser_error
                             stop_reading = True
@@ -973,17 +686,13 @@ async def _stream_upstream(
             last_status = 502
             auth_manager.mark_account_failure(account["id"], 502)
             if not output_started and attempt < 2:
-                pending_retry_log = {
-                    "account": account,
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                    "credit": 0,
-                    "status": 502,
-                    "message": str(exc)[:500],
-                    "started": t0,
-                    "attempt": attempt,
-                }
+                pending_retry_log = _RetryLog(
+                    account=account,
+                    status=502,
+                    message=str(exc)[:500],
+                    started=t0,
+                    attempt=attempt,
+                )
                 continue
             _log_request(
                 api_key_info, account, model_name, True,
@@ -994,20 +703,8 @@ async def _stream_upstream(
             return
 
         if not stop_reading:
-            for data in decoder.finish():
-                obj = observer.observe_event(data)
-                if obj is not None and not obj.get("error"):
-                    encoded = _json_sse_event(obj)
-                    if pending_terminal_events or _has_terminal_choice(obj):
-                        pending_terminal_events.append(encoded)
-                        pending_terminal_bytes += len(encoded)
-                        if pending_terminal_bytes > _MAX_SSE_EVENT_BYTES:
-                            observer.parser_error = (
-                                "The upstream terminal SSE events exceeded the 8 MiB limit."
-                            )
-                    else:
-                        output_started = True
-                        yield encoded
+            async for encoded in _pump(decoder.finish()):
+                yield encoded
         if decoder.parser_error and not observer.seen_done:
             observer.parser_error = decoder.parser_error
 
@@ -1020,20 +717,24 @@ async def _stream_upstream(
             )
             last_error_event = observer.upstream_error_event
             last_status = 502
-            auth_manager.mark_account_failure(account["id"], 502)
-            if not output_started and attempt < 2:
-                pending_retry_log = {
-                    "account": account,
-                    "prompt_tokens": observer.usage.get("prompt_tokens", 0),
-                    "completion_tokens": observer.usage.get("completion_tokens", 0),
-                    "total_tokens": observer.usage.get("total_tokens", 0),
-                    "credit": observer.usage.get("credit", 0),
-                    "status": 502,
-                    "message": eof_error,
-                    "started": t0,
-                    "attempt": attempt,
-                }
-                continue
+            # eof 分类（WS-1 §1.2）：已经向客户端出流后的 eof 不再降分、不再
+            # 跨账号重试（换号也无法撤回已发出的增量），按现状记 error 日志并
+            # 把已收内容/错误事件透传收尾；未出流的 eof 维持 mark + 重试。
+            if not output_started:
+                auth_manager.mark_account_failure(account["id"], 502)
+                if attempt < 2:
+                    pending_retry_log = _RetryLog(
+                        account=account,
+                        status=502,
+                        message=eof_error,
+                        started=t0,
+                        attempt=attempt,
+                        prompt_tokens=observer.usage.get("prompt_tokens", 0),
+                        completion_tokens=observer.usage.get("completion_tokens", 0),
+                        total_tokens=observer.usage.get("total_tokens", 0),
+                        credit=observer.usage.get("credit", 0),
+                    )
+                    continue
             _log_request(
                 api_key_info, account, model_name, True,
                 observer.usage.get("prompt_tokens", 0),
@@ -1080,6 +781,7 @@ async def _stream_upstream(
             log_finish, 200, log_error, t0,
             usage=observer.usage,
             reasoning_effort=effective_reasoning,
+            first_token_ms=first_token_ms,
         )
         if tool_stall and TOOL_STALL_FAIL_STREAM:
             # 流式已发出文本增量，无法回退重试；把本回合标记为失败，
@@ -1100,24 +802,20 @@ async def _stream_upstream(
         yield b"data: [DONE]\n\n"
         return
 
-    final_failure = pending_retry_log or {
-        "account": last_account,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_tokens": 0,
-        "credit": 0,
-        "status": last_status,
-        "message": last_error.decode("utf-8", "replace")[:500],
-        "started": last_started,
-    }
+    final_failure = pending_retry_log or _RetryLog(
+        account=last_account,
+        status=last_status,
+        message=last_error.decode("utf-8", "replace")[:500],
+        started=last_started,
+    )
     _log_request(
-        api_key_info, final_failure["account"], model_name, True,
-        final_failure["prompt_tokens"],
-        final_failure["completion_tokens"],
-        final_failure["total_tokens"],
-        final_failure["credit"],
-        "error", final_failure["status"],
-        final_failure["message"], final_failure["started"],
+        api_key_info, final_failure.account, model_name, True,
+        final_failure.prompt_tokens,
+        final_failure.completion_tokens,
+        final_failure.total_tokens,
+        final_failure.credit,
+        "error", final_failure.status,
+        final_failure.message, final_failure.started,
         reasoning_effort=effective_reasoning,
     )
     if last_error_event is not None:
@@ -1141,8 +839,8 @@ async def _collect_stream(
     usage: dict | None = None
 
     try:
-        async with httpx.AsyncClient(timeout=auth_manager.request_timeout(300)) as c:
-            async with c.stream("POST", url, headers=headers, json=body) as r:
+        async with _shared_client_cm() as c:
+            async with c.stream("POST", url, headers=headers, json=body, timeout=auth_manager.request_timeout(300)) as r:
                 if r.status_code != 200:
                     raw = await r.aread()
                     detail = _safe_err(raw, r.status_code)

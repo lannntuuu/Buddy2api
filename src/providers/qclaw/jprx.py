@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-import httpx
+import json
+
+from storage import database as db
+from storage.http_pool import get_client
 
 from providers.qclaw.constants import (
     CHANNEL_ID,
     CMD_CREATE_API_KEY,
-    CMD_MODEL_LIST,
     CMD_REFRESH_CHANNEL,
     CMD_TIME_SYNC,
-    CMD_TODAY_TOKENS,
     CMD_USER_INFO,
     CMD_WX_LOGIN,
     CMD_WX_LOGIN_STATE,
     JPRX_GATEWAY,
-    STATIC_MODELS,
     WEB_VERSION,
 )
 from providers.host_override import channel_host
@@ -90,14 +90,12 @@ async def post_cmd(
     *,
     timeout: float = 30.0,
 ) -> tuple[dict, str | None]:
-    import json as json_lib
-
     payload = business_body(extra)
-    body = json_lib.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     url = f"{channel_host(CHANNEL_ID, 'jprx_gateway', JPRX_GATEWAY)}/data/{cmd}/forward"
     headers = build_headers(account, body)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(url, headers=headers, content=body)
+    client = get_client()
+    response = await client.post(url, headers=headers, content=body, timeout=timeout)
     new_token = response.headers.get("X-New-Token")
     try:
         parsed = response.json()
@@ -111,7 +109,6 @@ async def post_cmd(
 def apply_new_token(account: dict, new_token: str | None) -> dict:
     if not new_token:
         return account
-    from storage import database as db
 
     aid = account.get("id")
     if aid:
@@ -124,40 +121,6 @@ def apply_new_token(account: dict, new_token: str | None) -> dict:
     return updated
 
 
-async def time_sync(account: dict) -> str:
-    data, token = await post_cmd(CMD_TIME_SYNC, account)
-    apply_new_token(account, token)
-    server_time = data.get("server_time")
-    return str(server_time or "")
-
-
-async def list_remote_models(account: dict) -> list[dict]:
-    data, token = await post_cmd(CMD_MODEL_LIST, account)
-    apply_new_token(account, token)
-    rows = data.get("model_status_list") or data.get("models") or []
-    models = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        mid = str(row.get("id") or "").strip()
-        if not mid:
-            continue
-        models.append(
-            {
-                "id": mid,
-                "name": row.get("name") or row.get("display_id") or mid,
-                "description": row.get("description") or "",
-            }
-        )
-    return models or [{"id": item, "name": item} for item in STATIC_MODELS]
-
-
-async def today_tokens(account: dict) -> dict:
-    data, token = await post_cmd(CMD_TODAY_TOKENS, account)
-    apply_new_token(account, token)
-    return data
-
-
 async def refresh_channel(account: dict) -> dict:
     data, token = await post_cmd(CMD_REFRESH_CHANNEL, account)
     account = apply_new_token(account, token)
@@ -167,8 +130,6 @@ async def refresh_channel(account: dict) -> dict:
         extra["openclaw_channel_token"] = channel_token
         aid = account.get("id")
         if aid:
-            from storage import database as db
-
             db.update_account(int(aid), {"extra": extra})
     return data
 

@@ -30,7 +30,12 @@ WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web"
 
 @router_obj.get("/")
 async def index():
-    return FileResponse(str(WEB_DIR / "index.html"))
+    # index 永远 no-cache：管理页是单文件入口,改动必须即时生效
+    # (/static 下的资源走 _CacheableStaticFiles 的 1h 缓存)。
+    return FileResponse(
+        str(WEB_DIR / "index.html"),
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @router_obj.post("/admin/login")

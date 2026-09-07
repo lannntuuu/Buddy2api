@@ -217,6 +217,48 @@ def get_api_key_by_key(key: str) -> Optional[dict]:
     return d
 
 
+def get_api_key_by_id(kid: int) -> Optional[dict]:
+    """管理端单行读取:行形状与 list_api_keys 一致(无明文,含 today_requests)。"""
+    conn = get_conn()
+    row = conn.execute(
+        """
+        SELECT k.*, COALESCE(u.request_count, 0) AS today_requests
+        FROM api_keys AS k
+        LEFT JOIN api_key_daily_usage AS u
+          ON u.api_key_id=k.id AND u.usage_date=?
+        WHERE k.id=?
+        """,
+        (date.today().isoformat(), kid),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    d.pop("key_hash", None)
+    d.pop("key_secret", None)
+    d.pop("key", None)
+    d["allowed_models"] = load_allowed_models(d.get("allowed_models"))
+    return d
+
+
+def get_api_key_secret(kid: int) -> Optional[str]:
+    """返回 Key 明文,仅 reveal 端点使用;行不存在/无密文/解密失败返回 None。
+
+    早期版本的 Key 只存哈希,密文为空属预期(前端已有「旧 Key 不可恢复」态)。
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT key_secret FROM api_keys WHERE id=?", (kid,)
+    ).fetchone()
+    conn.close()
+    if not row or not row["key_secret"]:
+        return None
+    try:
+        return credential_crypto.decrypt_secret(row["key_secret"], DB_PATH)
+    except credential_crypto.CredentialCryptoError:
+        return None
+
+
 def list_api_keys(*, include_secret: bool = False) -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
