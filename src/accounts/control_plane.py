@@ -452,7 +452,7 @@ def channel_model_view(channel: str) -> dict:
         "reasoning_default": model_config.channel_reasoning(channel).get("__default__", ""),
         "reasoning_customized": db.get_setting(f"{channel}.reasoning") is not None,
         "reasoning_choices": list(model_config.REASONING_CHOICES),
-        # 模型上下文限额（model_limits.json，不进 DB）：仅显式配置项 + 通道生效默认
+        # 模型上下文限额（DB settings，不进 JSON）：仅显式配置项 + 通道生效默认
         **model_limits.get_channel_limits(channel),
     }
 
@@ -508,7 +508,7 @@ def set_channel_models(
     """设置或重置通道模型列表 / 别名 / credit 换算率 / 按模型思考档位 / 模型上下文限额。
     None 表示重置为默认。返回最新视图。
 
-    model_limits / default_max_input_tokens 写 model_limits.json（不进 DB）；
+    model_limits / default_max_input_tokens 写 DB settings（不进 JSON）；
     null = 删除该级配置；模型 id 允许不在当前白名单（预填未来模型）。
     """
     channel = str(channel or "").strip()
@@ -593,21 +593,15 @@ def _set_model_limits(
     set_model_limits: bool,
     set_default_max_input: bool,
 ) -> None:
-    """把模型上下文限额写进 model_limits.json（不进 DB；坏文件当 {} 重写修复）。
+    """把模型上下文限额写入 DB settings（spec 20 / 19c：不再写 JSON channels 段）。
 
-    - model_limits: {"<id>": <int|null>}，整体替换语义（同 aliases）；null=删除该
-      模型条目；id 允许不在白名单；{} = 清空该通道全部每模型配置
-    - default_max_input_tokens: <int|null>；null=删除通道级默认
-    - 删空后收敛通道节点，避免留空壳
+    - model_limits: {"<id>": <int|null>}，整体替换语义（同 aliases）；null=该模型
+      显式不限制（保留为 null 条目）；id 允许不在白名单；{} = 清空该通道全部每模型配置
+    - default_max_input_tokens: <int|null>；null=删除通道级默认（回退内置默认）
+    - 删空后清理键：通道级删空且模型级为空 → 两键都删除，不留空壳
     """
-    try:
-        data = dict(model_limits._load_raw())  # 坏文件时为 {}，重写即修复
-    except Exception:  # noqa: BLE001
-        data = {}
-    data = dict(data)
-    channels = dict(data.get("channels") or {})
-    chan = dict(channels.get(channel) or {})
-    models = dict(chan.get("models") or {})
+    chan_key = f"{channel}.max_input_tokens"
+    by_model_key = f"{channel}.max_input_tokens_by_model"
 
     if set_model_limits:
         if not isinstance(model_limits_payload, dict):
@@ -619,38 +613,23 @@ def _set_model_limits(
             if not mid_s:
                 raise ValueError("model_limits keys must be non-empty model ids")
             validated[mid_s] = _validate_limit_value(value, f"model_limits[{mid_s}]")
-        # 整体替换：只保留本次提交的条目（保留条目沿用原 entry 对象，不丢兄弟键）
-        new_models: dict[str, dict] = {}
-        for mid_s, value in validated.items():
-            if value is None:
-                continue  # null = 删除该模型条目
-            entry = models.get(mid_s)
-            entry = dict(entry) if isinstance(entry, dict) else {}
-            entry["max_input_tokens"] = value
-            new_models[mid_s] = entry
-        models = new_models
-        if models:
-            chan["models"] = models
+        if validated:
+            db.set_setting(by_model_key, validated)
         else:
-            chan.pop("models", None)
+            db.delete_setting(by_model_key)
 
     if set_default_max_input:
         value = _validate_limit_value(
             default_max_input_tokens, "default_max_input_tokens")
         if value is None:
-            chan.pop("default_max_input_tokens", None)
+            db.delete_setting(chan_key)
         else:
-            chan["default_max_input_tokens"] = value
+            db.set_setting(chan_key, value)
 
-    if chan:
-        channels[channel] = chan
-    else:
-        channels.pop(channel, None)  # 通道级删空 → 收敛节点
-    if channels:
-        data["channels"] = channels
-    else:
-        data.pop("channels", None)
-    model_limits.write_limits(data)
+    # 清理空壳：通道级删空且模型级为空 → 一并删除模型级键
+    if (not set_default_max_input or db.get_setting(chan_key, None) is None):
+        if db.get_setting(by_model_key, None) == {}:
+            db.delete_setting(by_model_key)
 
 
 def _sync_models_page_to_definition(

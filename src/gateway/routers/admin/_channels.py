@@ -124,7 +124,7 @@ async def admin_set_channel_models(
     channel: str, request: Request, authorization: str | None = Header(default=None)
 ):
     """Set or reset a channel's model list / aliases / credit rate / per-model reasoning tier
-    / model input-context limits (model_limits.json, not DB).
+    / model input-context limits (DB settings, not JSON file).
 
     Body: {"models": [...]|null, "aliases": {...}|null, "credit_rate": <num>|null,
             "reasoning": {"model_id": "low", "__default__": ""}|null,

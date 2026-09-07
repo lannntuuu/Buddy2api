@@ -54,7 +54,8 @@ config.*.toml
 buddy2api.db
 codebuddy_gateway.db
 
-# 模型上下文限额配置（JSON 文件，不进 DB，提交示例 model_limits.example.json）
+# 全局通用配置容器（JSON 文件，不进 DB，提交示例 gateway_settings.example.json）
+gateway_settings.json
 model_limits.json
 data/**/*.db
 data/**/*.key
