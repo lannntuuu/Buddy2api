@@ -12,6 +12,39 @@ from __future__ import annotations
 import json
 
 
+# 单字符连击退化阈值：连续输出同一非空白字符超过该数即判模型跑飞。
+# 实测 hy4 系会偶发整段重复同一字符（如 "!!!!..."）直到烧满输出预算；
+# 256 个连续同字符已不可能是有意义的正文。
+_REPEAT_RUN_LIMIT = 256
+
+
+class RepeatRunDetector:
+    """单字符连击检测：连续 feed 的同一非空白字符超过阈值判退化。
+
+    空白符（含换行/缩进）不重置也不累计——代码块缩进、段落分隔是正常输出；
+    其余任意字符切换都会重置连击计数。
+    """
+
+    def __init__(self, limit: int = _REPEAT_RUN_LIMIT):
+        self._limit = limit
+        self._char = ""
+        self._length = 0
+
+    def feed(self, text: str) -> bool:
+        """喂入一段输出文本。返回 True = 已超过阈值（模型输出退化）。"""
+        for ch in text:
+            if ch.isspace():
+                continue
+            if ch == self._char:
+                self._length += 1
+            else:
+                self._char = ch
+                self._length = 1
+            if self._length >= self._limit:
+                return True
+        return False
+
+
 def _json_sse_event(payload: dict) -> bytes:
     return ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8")
 
@@ -74,6 +107,8 @@ class ChatStreamObserver:
         self.usage: dict = {}
         self.content_parts: list[str] = []
         self.metadata: dict = {}
+        # 单字符连击退化检测（hy4 系偶发输出跑飞，如整段 "!!!!"）
+        self.repeat_run = RepeatRunDetector()
 
     def observe_event(self, data: bytes) -> dict | None:
         if data.strip() == b"[DONE]":
@@ -212,6 +247,11 @@ class ChatStreamObserver:
             if content:
                 self.content_parts.append(content)
                 self.content_choices.add(index)
+                if self.repeat_run.feed(content):
+                    self.parser_error = (
+                        "The upstream output degenerated into a repeated character run."
+                    )
+                    return None
             tool_deltas = delta.get("tool_calls")
             if tool_deltas is None:
                 continue
