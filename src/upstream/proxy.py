@@ -300,6 +300,7 @@ def _has_terminal_choice(payload: dict) -> bool:
 from upstream.sse import SSEDecoder, _MAX_EVENT_BYTES as _MAX_SSE_EVENT_BYTES  # noqa: E402
 from upstream.chat_grammar import (  # noqa: E402,F401
     ChatStreamObserver as _ChatStreamObserver,
+    RepeatRunDetector as _RepeatRunDetector,
     _json_sse_event,
     _repair_json_arguments,
 )
@@ -921,6 +922,9 @@ async def _collect_stream(
     model: str | None = None
     finish_reason: str | None = None
     usage: dict | None = None
+    # 单字符连击退化检测（hy4 系偶发输出跑飞）；超限即中止读取。
+    repeat_run = _RepeatRunDetector()
+    repeat_degenerated = False
 
     try:
         async with _shared_client_cm() as c:
@@ -950,6 +954,9 @@ async def _collect_stream(
                         delta = choice.get("delta") or {}
                         if delta.get("content"):
                             content_parts.append(delta["content"])
+                            if not repeat_degenerated and repeat_run.feed(delta["content"]):
+                                repeat_degenerated = True
+                                break
                         if delta.get("reasoning_content"):
                             reasoning_parts.append(delta["reasoning_content"])
                         for tc in delta.get("tool_calls") or []:
@@ -962,8 +969,28 @@ async def _collect_stream(
                                 slot["name"] = fn["name"]
                             if fn.get("arguments"):
                                 slot["arguments"] += fn["arguments"]
+                        if repeat_degenerated:
+                            # 输出已退化为单字符连击，继续读只是烧预算，中止。
+                            logger.warning(
+                                "upstream repeat-run degeneration aborted collect: model=%s",
+                                model_name,
+                            )
+                            break
+                    if repeat_degenerated:
+                        break
     except httpx.HTTPError as e:
         return ("error", (502, {"error": {"message": f"upstream error: {e}", "type": "upstream_error"}}))
+
+    if repeat_degenerated:
+        return (
+            "error",
+            (502, {
+                "error": {
+                    "message": "The upstream output degenerated into a repeated character run.",
+                    "type": "upstream_error",
+                },
+            }),
+        )
 
     tcs = None
     if tool_calls:
