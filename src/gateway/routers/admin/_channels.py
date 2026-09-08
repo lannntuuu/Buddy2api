@@ -18,6 +18,8 @@ import providers
 from providers import trae_shared
 from upstream import compaction
 from storage import database as db
+from storage.repos.accounts import list_accounts_summary
+from storage.repos.logs import stream_p95_by_provider
 from providers import custom_channels
 from gateway.deps import _check_admin, _read_json_object
 
@@ -192,7 +194,10 @@ async def admin_refresh_channel_models(
 async def admin_channel_health(authorization: str | None = Header(default=None)):
     """每通道故障状态一屏可见:冷却/负缓存/11128 武装/近 1h 5xx/首字 P95。"""
     _check_admin(authorization)
-    accounts = await run_in_threadpool(db.list_accounts_summary)
+    # 注意：list_accounts_summary / stream_p95_by_provider 走 repos 直导——
+    # storage.database 门面未转出这两个名字（repos 拆分遗留），此前在
+    # 运行时 AttributeError。
+    accounts = await run_in_threadpool(list_accounts_summary)
     provider_by_aid = {
         a["id"]: (a.get("provider") or "workbuddy") for a in accounts
     }
@@ -200,7 +205,7 @@ async def admin_channel_health(authorization: str | None = Header(default=None))
     backoff = trae_shared.refresh_backoff_view()
     armed = compaction.armed_channels()
     errors = await run_in_threadpool(db.count_errors_by_provider)
-    p95 = await run_in_threadpool(db.stream_p95_by_provider)
+    p95 = await run_in_threadpool(stream_p95_by_provider)
 
     channels: dict = {}
 
