@@ -5,14 +5,16 @@ const RATIO_TIP='缓存命中 Token ÷ 输入 Token(prompt_tokens) — 命中部
 const AVG_TIP='总耗时 ÷ 请求数 — 全部请求的平均值,含失败';
 const CACHE_INC_TIP='已包含在输入 Token(prompt_tokens)中,非额外增量';
 
-export default {props:['token','toast'],setup(p){
+// ensureChannels 由 app.js 作为 prop 传入(父 setup 的函数不会出现在子 setup 的
+// props 上,遗漏会导致平台下拉为空 + 加载失败)。
+export default {props:['token','toast','ensureChannels'],setup(p){
   const data=ref(null),ld=ref(false),err=ref('');
   const f=reactive({range:'1',days:1,start:'',end:'',provider:'',model:''});
   const channels=ref([]);
   const channelModels=ref({});
   function rangePreset(k){f.range=k;if(k!=='custom'){f.days=Number(k);f.start='';f.end=''}else{f.days=null}load()}
   function onProviderChange(){f.model='';load()}
-  async function loadChannels(){await p.ensureChannels(p.token);channels.value=p.sharedChannels.value||[]}
+  async function loadChannels(){if(!p.ensureChannels)return;channels.value=(await p.ensureChannels(p.token))||[]}
   async function loadProviderModels(channel){if(!channel)return;try{const r=await api.get('/admin/channels/'+channel+'/models',p.token);channelModels.value={...channelModels.value,[channel]:r.models||[]}}catch(e){channelModels.value={...channelModels.value,[channel]:[]}}}
   function qs(){const u=new URLSearchParams();if(f.provider)u.set('provider',f.provider);if(f.model)u.set('model',f.model);if(f.range==='custom'){if(f.start)u.set('start_date',f.start);if(f.end)u.set('end_date',f.end)}else u.set('days',f.days!=null?f.days:Number(f.range)||7);return u.toString()}
   async function load(){ld.value=true;err.value='';try{if(f.provider&&!channelModels.value[f.provider])await loadProviderModels(f.provider);data.value=await api.get('/admin/provider-model-usage?'+qs(),p.token)}catch(e){let msg=apiErr(e,'用量加载失败');try{const r=await fetch('/admin/provider-model-usage?'+qs(),{headers:p.token?{Authorization:'Bearer '+p.token}:{},credentials:'same-origin'});if(r.status===400){const j=await r.json();msg=j.detail||msg}}catch(_){}err.value=msg;data.value=null}ld.value=false}

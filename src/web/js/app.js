@@ -45,13 +45,19 @@ createApp({
       setTimeout(()=>dismiss(id),err?TOAST_ERR_MS:TOAST_OK_MS);
     }
     function toastGo(x){if(!x||!x.action)return;dismiss(x.id);go(x.action.page)}
-    // 跨页共享的通道下拉数据:各页形状不同,拉取与缓存统一在这里(INFLIGHT 去重)
+    // 跨页共享的通道下拉数据:各页形状不同,拉取与缓存统一在这里(INFLIGHT 去重)。
+    // 返回值即通道数组(失败返回 []),调用方只管 await,不读 sharedChannels ref。
     const sharedChannels=ref(null);
     let sharedChannelsInflight=null;
     async function ensureChannels(token){
       if(sharedChannels.value)return sharedChannels.value;
       if(!sharedChannelsInflight){
-        sharedChannelsInflight=(async()=>{try{const ch=await api.get('/admin/channels',token);sharedChannels.value=ch.channels||[]}catch(_){sharedChannels.value=[]}finally{sharedChannelsInflight=null}return sharedChannels.value})();
+        sharedChannelsInflight=(async()=>{
+          try{const ch=await api.get('/admin/channels',token);sharedChannels.value=ch.channels||[]}
+          catch(_){sharedChannels.value=[]}
+          finally{sharedChannelsInflight=null}
+          return sharedChannels.value;
+        })();
       }
       return sharedChannelsInflight;
     }
@@ -102,11 +108,11 @@ createApp({
       </div>
       <main class="main">
         <div class="content" v-if="page==='dashboard'"><dash :token="token" :toast="tf"/></div>
-        <div class="content" v-if="page==='channels'"><chns :token="token" :toast="tf"/></div>
+        <div class="content" v-if="page==='channels'"><chns :token="token" :toast="tf" :invalidate-channels="invalidateChannels"/></div>
         <div class="content" v-if="page==='models'"><mdls :token="token" :toast="tf"/></div>
         <div class="content" v-if="page==='quota'"><quota :token="token" :toast="tf"/></div>
-        <div class="content" v-if="page==='keys'"><keys :token="token" :toast="tf"/></div>
-        <div class="content" v-if="page==='usage'"><usg :token="token" :toast="tf"/></div>
+        <div class="content" v-if="page==='keys'"><keys :token="token" :toast="tf" :ensure-channels="ensureChannels"/></div>
+        <div class="content" v-if="page==='usage'"><usg :token="token" :toast="tf" :ensure-channels="ensureChannels"/></div>
         <div class="content" v-if="page==='logs'"><lgs :token="token"/></div>
         <div class="content" v-if="page==='setup'"><setup :token="token" :toast="tf"/></div>
         <div class="content" v-if="page==='settings'"><stgs :token="token" :toast="tf" :save-token="saveToken"/></div>
