@@ -3,7 +3,9 @@ import {copyText} from '../format.js';
 import {I} from '../icons.js';
 const{ref,reactive,computed,onMounted}=Vue;
 
-export default {props:['token','toast'],setup(p){
+// ensureChannels 由 app.js 作为 prop 传入:父 setup 里的函数不能直接从
+// 子 setup(props) 上取到,遗漏时页面加载即中断(通道下拉空 + toast「加载失败」)。
+export default {props:['token','toast','ensureChannels'],setup(p){
   const l=ref([]),ld=ref(true),sa=ref(false),f=reactive({name:'',models:'',limit:null,preset:'custom',channel:'workbuddy'}),res=ref(''),saving=ref(false),copied=ref(false),busy=ref({}),shown=ref({}),revealed=ref({}),channels=ref([]);
   const clientTypes=[
     {k:'custom',name:'默认',icon:'⚙'},
@@ -18,8 +20,13 @@ export default {props:['token','toast'],setup(p){
     ld.value=true;
     try{
       l.value=await api.get('/admin/api-keys',p.token);
-      // 通道下拉数据只在首次拉取,避免每次刷新列表都连带请求(spec WS-3 §3)
-      if(!channels.value.length){await p.ensureChannels(p.token);channels.value=(p.sharedChannels.value||[]).filter(c=>c.enabled)}
+      // 通道下拉数据只在首次拉取,避免每次刷新列表都连带请求(spec WS-3 §3)。
+      // 缓存形状在 app.js(sharedChannels),ensureChannels 直接返回数组;
+      // 失败时吞掉,不能让下拉数据拖垮 Key 列表的渲染。
+      if(!channels.value.length&&p.ensureChannels){
+        const all=(await p.ensureChannels(p.token))||[];
+        channels.value=all.filter(c=>c.enabled);
+      }
     }catch(e){p.toast(apiErr(e,'加载失败'),'err')}
     ld.value=false
   }

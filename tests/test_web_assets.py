@@ -332,3 +332,62 @@ def test_shared_channels_store():
     channels_js = _read(Path("src/web/js/pages") / "channels.js")
     assert "/admin/channel-health" in channels_js
     assert "healthClass" in channels_js and "health-dot" in channels_js
+
+
+# ---------------------------------------------------------------------------
+# 父子组件 props 契约(回归护栏)
+# 事故:app.js 只在根 setup 的 return 里挂了 ensureChannels,模板没传,子页
+# props 也没声明 → `p.ensureChannels is not a function` 让 keys 页 load()
+# 抛错(列表空 + toast「加载失败」)、usage 页平台下拉空。下面两条断言把
+# 「子 setup 里 p.X 的每个 X 都必须在 props 里声明」和「模板必须传」钉死。
+# ---------------------------------------------------------------------------
+
+# 根模板里每个页面组件的挂载点,以及需要由父级注入的 props(kebab 形式)
+_PAGE_FILES = {
+    "dash": WEB_JS / "pages" / "dashboard.js",
+    "chns": WEB_JS / "pages" / "channels.js",
+    "mdls": WEB_JS / "pages" / "models.js",
+    "quota": WEB_JS / "pages" / "quota.js",
+    "keys": WEB_JS / "pages" / "keys.js",
+    "usg": WEB_JS / "pages" / "usage.js",
+    "lgs": WEB_JS / "pages" / "logs.js",
+    "setup": WEB_JS / "pages" / "setup.js",
+    "stgs": WEB_JS / "pages" / "settings.js",
+}
+_PAGE_PROP_CONTRACT = {
+    "dash": {},
+    "chns": {"invalidate-channels"},
+    "mdls": {},
+    "quota": {},
+    "keys": {"ensure-channels"},
+    "usg": {"ensure-channels"},
+    "lgs": {},
+    "setup": {},
+    "stgs": {},
+}
+
+
+def _camel(kebab: str) -> str:
+    head, *rest = kebab.split("-")
+    return head + "".join(part.title() for part in rest)
+
+
+def test_page_components_declare_injected_props() -> None:
+    """子 setup 里 p.X 的每个 X 必须在该组件的 props 数组中声明。"""
+    for tag, injected in _PAGE_PROP_CONTRACT.items():
+        src = _read(_PAGE_FILES[tag])
+        declared = set(re.search(r"props:\[([^\]]*)\]", src).group(1).replace("'", "").replace('"', "").replace(" ", "").split(",")) - {""}
+        for kebab in injected:
+            assert _camel(kebab) in declared, (
+                f"{tag} uses p.{_camel(kebab)} but does not declare it in props: {sorted(declared)}"
+            )
+
+
+def test_root_template_passes_injected_props() -> None:
+    """根模板必须显式绑定每个由父级注入的 prop(挂在 return 里不算)。"""
+    app_js = _read(_APP_JS)
+    for tag, injected in _PAGE_PROP_CONTRACT.items():
+        mount = re.search(r"<" + tag + r"\b[^>]*>", app_js)
+        assert mount, f"root template missing mount point for <{tag}>"
+        for kebab in injected:
+            assert f":{kebab}=" in mount.group(0), f"<{tag}> must bind :{kebab}="

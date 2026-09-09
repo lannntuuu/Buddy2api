@@ -4,7 +4,7 @@ import {I} from '../icons.js';
 import LoginImport from './_login_import.js';
 const{ref,reactive,computed,onMounted,onUnmounted,watch,nextTick}=Vue;
 
-export default {props:['token','toast'],components:{'login-import':LoginImport},setup(p){
+export default {props:['token','toast','invalidateChannels'],components:{'login-import':LoginImport},setup(p){
   // ────────── master list ──────────
   const list=ref([]),ld=ref(true),err=ref(''),envLocked=ref(false),activeChannel=ref(''),toggling=ref({});
   async function loadList(){
@@ -23,7 +23,8 @@ export default {props:['token','toast'],components:{'login-import':LoginImport},
     toggling.value={...toggling.value,[id]:true};
     api.put('/admin/channels',{enabled:list.value.filter(x=>x.enabled).map(x=>x.id),order:list.value.map(x=>x.id)},p.token).then(r=>{
       list.value.forEach(c=>{c.enabled=(r.enabled||[]).includes(c.id)});
-      p.invalidateChannels();
+      // 通道启用态变了 → 让 keys/usage 两页的共享下拉缓存失效
+      if(p.invalidateChannels)p.invalidateChannels();
     }).catch(e=>{p.toast(apiErr(e,'保存失败'),'err');loadList();}).finally(()=>{const o={...toggling.value};delete o[id];toggling.value=o});
   }
   const activeCh=computed(()=>list.value.find(c=>c.id===activeChannel.value));
