@@ -108,6 +108,34 @@ def test_usage_filters_by_provider_model_and_time(isolated_db):
     assert total_rows == 3  # 40 天前的被排除
 
 
+def test_usage_tps_daily_and_summary(isolated_db):
+    today = date.today()
+    # 100 tok / 1s = 100 t/s; 100 tok / 2s = 50 t/s → 逐请求平均 75 t/s
+    _add_log("qclaw", "m1", _ts(today), prompt=50, completion=50, duration_ms=1000)
+    _add_log("qclaw", "m1", _ts(today), prompt=50, completion=50, duration_ms=2000)
+    # 0 Token 的请求不计入速度(不稀释平均)
+    _add_log("qclaw", "m1", _ts(today), prompt=0, completion=0, duration_ms=1000)
+    result = db.get_provider_model_usage({})
+    m1 = result["providers"]["qclaw"]["models"]["m1"]
+    today_row = [d for d in m1["daily"] if d["date"] == today.isoformat()][0]
+    assert today_row["tps"] == 75.0
+    assert m1["summary"]["tps"] == 75.0
+    assert result["providers"]["qclaw"]["summary"]["tps"] == 75.0
+    assert result["totals"]["tps"] == 75.0
+
+
+def test_usage_tps_none_without_valid_samples(isolated_db):
+    today = date.today()
+    # duration_ms=0 → 无有效速度样本(尽管 total_tokens>0)
+    _add_log("qclaw", "m1", _ts(today), duration_ms=0)
+    result = db.get_provider_model_usage({})
+    m1 = result["providers"]["qclaw"]["models"]["m1"]
+    assert m1["daily"][0]["tps"] is None
+    assert m1["summary"]["tps"] is None
+    assert result["providers"]["qclaw"]["summary"]["tps"] is None
+    assert result["totals"]["tps"] is None
+
+
 # ---------- server 层：参数校验 / 白名单 / 鉴权 / 限流 ----------
 
 def test_usage_days_and_start_date_conflict(isolated_db, admin_env):
