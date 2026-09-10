@@ -46,6 +46,14 @@ _sticky_account_id: dict[str, int] = {}
 _failure_lock = threading.Lock()
 _account_failures: dict[int, tuple[int, float]] = {}
 
+# 每通道手动指定账号(pin):替代自动 sticky 成为权威选择器(见 pick_account)。
+# 存于 gateway_settings.json(进程内 mtime+size 缓存,写即重读),避免污染账号行。
+# 值为 account id;None/缺失/"auto" 表示不锁定、由调度按权重/优先级决定。
+# 语义:仅当 pinned 账号为 active 且未冷却时才生效;否则退回常规选择(不抛错)。
+import storage.gateway_settings as _gws
+
+_MANUAL_PIN_KEY = "manual_account_pin"
+
 
 def _get_token_lock(aid: int) -> asyncio.Lock:
     with _token_locks_guard:
@@ -399,6 +407,14 @@ async def refresh_token(account: dict) -> bool:
             "status": next_status,
         }
         db.update_account(aid, update_data)
+        # 刷新成功后回写固化副本（若有），使副本始终保持最新、可被重装/迁移复用。
+        try:
+            from accounts import workbuddy_snapshot as _snap
+
+            if str(account.get("provider") or "workbuddy") == "workbuddy":
+                _snap.write_refreshed_auth(str(account.get("uid") or ""), update_data)
+        except Exception:  # noqa: BLE001
+            pass
         return True
 
 
@@ -958,8 +974,68 @@ def _set_sticky_account(aid: int, provider: str = "workbuddy"):
         _sticky_account_id[provider] = aid
 
 
+# ============================================================
+# 每通道手动指定账号(pin)
+# ============================================================
+
+def get_manual_pin(provider: str) -> Optional[int]:
+    """返回某通道手动锁定的账号 id;未设置/无效返回 None。
+
+    仅在 pin 的账号确实 active 且未冷却时才有意义(见 pick_account)。
+    """
+    pins = _gws.get(_MANUAL_PIN_KEY)
+    if not isinstance(pins, dict):
+        return None
+    val = pins.get(provider)
+    if val in (None, "", "auto"):
+        return None
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def set_manual_pin(provider: str, account_id: Optional[int]) -> dict:
+    """设置/清除某通道的手动锁定账号。account_id=None 或 "auto" 表示取消锁定。
+
+    返回最新全量 pin 映射(供前端回写)。
+    """
+    pins = _gws.get(_MANUAL_PIN_KEY)
+    if not isinstance(pins, dict):
+        pins = {}
+    if account_id is None or account_id == "auto":
+        pins.pop(provider, None)
+    else:
+        pins[provider] = int(account_id)
+    _gws.set(_MANUAL_PIN_KEY, pins)
+    return pins
+
+
+def all_manual_pins() -> dict:
+    """返回全量 pin 映射 {provider: account_id}(无效值过滤)。"""
+    pins = _gws.get(_MANUAL_PIN_KEY)
+    if not isinstance(pins, dict):
+        return {}
+    out = {}
+    for k, v in pins.items():
+        if v in (None, "", "auto"):
+            continue
+        try:
+            out[k] = int(v)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def pick_account(exclude_ids: set[int] = None, provider: str = "workbuddy") -> Optional[dict]:
-    """选择一个可用账号。优先级越高越先用，同优先级尽量粘住当前账号。"""
+    """选择一个可用账号。
+
+    优先级(权威 → 兜底):
+      1. 手动锁定(pin)且仍 active、未冷却、不在 exclude 中 → 直接命中;
+      2. 否则按优先级/权重/粘住语义常规选择。
+    pin 仅在它确实可用时生效;一旦被禁用/冷却/过期,自动退回常规调度,
+    保证「手动切换」不会把请求卡死在不可用账号上。
+    """
     exclude_ids = exclude_ids or set()
     accounts = db.get_active_accounts(provider)
     candidates = [
@@ -968,6 +1044,13 @@ def pick_account(exclude_ids: set[int] = None, provider: str = "workbuddy") -> O
     ]
     if not candidates:
         return None
+
+    # 1) 手动锁定优先
+    pinned = get_manual_pin(provider)
+    if pinned is not None:
+        hit = next((a for a in candidates if a["id"] == pinned), None)
+        if hit:
+            return hit
 
     highest_priority = max(_route_priority(a) for a in candidates)
     top_candidates = [a for a in candidates if _route_priority(a) == highest_priority]

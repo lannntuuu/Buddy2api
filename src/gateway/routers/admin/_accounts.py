@@ -51,6 +51,51 @@ async def admin_list_accounts(authorization: str | None = Header(default=None)):
     return [_account_row(a) for a in accounts]
 
 
+@router.get("/admin/accounts/pin")
+async def admin_get_pins(authorization: str | None = Header(default=None)):
+    """返回全量手动锁定映射 {provider: account_id}。"""
+    _check_admin(authorization)
+    return {"pins": auth_manager.all_manual_pins()}
+
+
+@router.post("/admin/accounts/pin")
+async def admin_set_pin(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """设置/清除某通道手动锁定账号。
+
+    body: {"provider": "workbuddy", "account_id": <int|null|"auto">}。
+    account_id 为 null/"auto" 表示取消锁定,改回按权重/优先级调度。
+    """
+    _check_admin(authorization)
+    data = await _read_json_object(request)
+    provider = str(data.get("provider") or "").strip()
+    if not provider:
+        raise HTTPException(status_code=400, detail="provider is required")
+    if provider != "workbuddy" and providers.get_provider(provider) is None:
+        raise HTTPException(status_code=400, detail=f"Channel '{provider}' is not enabled")
+    aid = data.get("account_id")
+    if aid is not None and aid != "auto":
+        try:
+            aid = int(aid)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="account_id must be an integer")
+        account = db.get_account(aid)
+        if not account:
+            raise HTTPException(status_code=404, detail="Account not found")
+        if str(account.get("provider") or "workbuddy") != provider:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Account {aid} belongs to channel '{account.get('provider')}', not '{provider}'",
+            )
+    try:
+        pins = auth_manager.set_manual_pin(provider, aid)
+    except Exception as exc:  # 防御:gateway_settings 写入异常不应 500 成明文
+        raise HTTPException(status_code=500, detail=str(exc)[:240]) from exc
+    return {"status": "ok", "pins": pins}
+
+
 @router.get("/admin/accounts/discover")
 async def admin_discover_accounts(
     auth_dir: str | None = None,
@@ -160,6 +205,18 @@ async def admin_add_account(
     }
     if not parsed["access_token"]:
         raise HTTPException(status_code=400, detail="No accessToken found in auth data")
+    # WorkBuddy 手动粘贴时同样固化成 <uid>.info 副本，避免只进 DB、与快照固化导入行为不一致。
+    if provider_id == "workbuddy":
+        try:
+            from accounts import workbuddy_snapshot as _snap
+
+            stored = _snap.write_pasted(str(parsed.get("uid") or ""), parsed)
+            parsed.setdefault("extra", {})
+            if isinstance(parsed["extra"], dict):
+                parsed["extra"]["auth_path"] = str(stored)
+                parsed["extra"]["snapshot"] = True
+        except Exception:  # noqa: BLE001
+            pass
     aid = db.add_account(parsed)
     row = await run_in_threadpool(lambda: _account_row(db.get_account(aid)))
     return {"id": aid, "status": "ok", "ok": True, "account": row}
@@ -173,10 +230,17 @@ async def admin_update_account(
 ):
     _check_admin(authorization)
     data = await _read_json_object(request)
-    allowed = {"name", "status", "weight", "priority", "credit_limit", "credit_baseline"}
+    allowed = {"name", "nickname", "phone", "status", "weight", "priority", "credit_limit", "credit_baseline"}
     update_data = {k: data[k] for k in allowed if k in data}
     if "status" in update_data and update_data["status"] not in {"active", "inactive", "expired"}:
         raise HTTPException(status_code=400, detail="Invalid account status")
+    # 昵称/姓名/电话为纯展示字段,做长度与类型约束,防止脏数据
+    for f in ("name", "nickname", "phone"):
+        if f in update_data and update_data[f] is not None:
+            update_data[f] = str(update_data[f]).strip()[:64]
+    if "nickname" in update_data and update_data["nickname"] and "name" not in update_data:
+        # 只改昵称时同步 name,使请求日志/分组头展示保持一致
+        update_data["name"] = update_data["nickname"]
     if "credit_limit" in update_data and "credit_baseline" not in update_data:
         account = db.get_account(aid)
         if not account:

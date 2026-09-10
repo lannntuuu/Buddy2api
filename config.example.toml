@@ -32,3 +32,10 @@ no_auth = false
 
 [logging]
 level = "warning"  # debug | info | warning | error
+
+[workbuddy]
+# 账号快照固化目录：导入/刷新 WorkBuddy 账号时，把 .info 内容复制到该目录
+# （<uid>.info），之后只依赖此副本，不再读取桌面端会被切换登录覆盖的
+# workbuddy-desktop.info。留空则用 data/workbuddy_snapshots。
+# 也可用环境变量 CB_WORKBUDDY_SNAPSHOT_DIR 覆盖。
+# snapshot_dir = "C:/path/to/checkout/data/workbuddy_snapshots"

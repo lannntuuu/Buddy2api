@@ -450,6 +450,9 @@ tr:hover td{background:var(--accent-soft)}
   border-radius:var(--r-m);font:inherit;font-size:var(--fs-b);background:var(--bg-elevated);
   transition:border-color var(--dur-fast) var(--ease),box-shadow var(--dur-fast) var(--ease)}
 .numctl.credit{width:80px}
+.textctl{width:140px;padding:5px 7px;border:1px solid var(--border-strong);
+  border-radius:var(--r-m);font:inherit;font-size:var(--fs-b);background:var(--bg-elevated);
+  transition:border-color var(--dur-fast) var(--ease),box-shadow var(--dur-fast) var(--ease)}
 .numctl:focus{outline:none;border-color:var(--accent);
   box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
 .seg{display:inline-flex;border:1px solid var(--border-strong);border-radius:var(--r-m);
