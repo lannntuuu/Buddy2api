@@ -34,7 +34,9 @@ DEFAULT_MODELS = ("DeepSeek-V4-Flash",)
 # Definition validation ------------------------------------------------------
 
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
-_ENV_NAME_RE = re.compile(r"^CB_[A-Z0-9_]+$")
+# 与通道 id 的 slug 字符集对齐：id 允许 [a-z0-9_-]，自动填充 "CB_"+id.upper()
+# 可能含连字符，此处必须同样放行（spec 23 §1.2）。Windows 环境变量名含 '-' 合法。
+_ENV_NAME_RE = re.compile(r"^CB_[A-Z0-9_-]+$")
 
 
 def validate_definition(
@@ -123,7 +125,7 @@ def validate_definition(
         env_api_key = str(env_api_key).strip()
         if env_api_key and not _ENV_NAME_RE.match(env_api_key):
             raise ValueError(
-                "env_api_key must match ^CB_[A-Z0-9_]+$ (e.g. CB_MY_KEY)"
+                "env_api_key must match ^CB_[A-Z0-9_-]+$ (e.g. CB_MY_KEY)"
             )
 
 

@@ -124,14 +124,13 @@ def test_validate_rejects_alias_pointing_to_missing_model():
     [
         "MY_KEY",            # missing CB_ prefix
         "CB_lower",          # lowercase
-        "CB-WRONG-DASH",     # hyphen
         "cb_upper",          # lowercase prefix
         "CB_",               # empty suffix
-        "CB_X-DASH",         # hyphen inside
+        "CB_X!",             # illegal character
     ],
 )
 def test_validate_rejects_bad_env_name(env_name):
-    """Spec §3.1: env_api_key 必须匹配 ^CB_[A-Z0-9_]+$."""
+    """Spec §3.1: env_api_key 必须匹配 ^CB_[A-Z0-9_-]+$（连字符与通道 id 对齐）。"""
     with pytest.raises(ValueError, match="env_api_key"):
         cc.validate_definition(
             {
@@ -147,10 +146,11 @@ def test_validate_rejects_bad_env_name(env_name):
 
 @pytest.mark.parametrize(
     "env_name",
-    ["CB_X", "CB_BAILIAN_API_KEY", "CB_MY_KEY_2"],
+    ["CB_X", "CB_BAILIAN_API_KEY", "CB_MY_KEY_2", "CB_QWEN-27B", "CB_GMI-KEY"],
 )
 def test_validate_accepts_well_formed_env_name(env_name):
-    """合法 env_api_key（含 CB_ + 大写字母数字下划线 1+ 字符）放行。"""
+    """合法 env_api_key（CB_ + 大写字母/数字/下划线/连字符 1+ 字符）放行；
+    含自动填充产物 CB_+id.upper()（id 允许连字符，spec 23 §1.2）。"""
     cc.validate_definition(
         {
             "id": "ok",

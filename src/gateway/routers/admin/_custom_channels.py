@@ -175,7 +175,7 @@ async def admin_create_custom_channel(
         api_key       : optional. When present, written to accounts (uid=id-{tail});
                         used to probe GET {base}/models. Probe failure → HTTP 200
                         + `warning` block; definition is still saved (D7).
-        env_api_key   : optional, must match ^CB_[A-Z0-9_]+$
+        env_api_key   : optional, must match ^CB_[A-Z0-9_-]+$（与通道 id 字符集对齐）
     """
     _check_admin(authorization)
     data = await _read_json_object(request)
