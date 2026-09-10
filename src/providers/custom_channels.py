@@ -34,27 +34,9 @@ DEFAULT_MODELS = ("DeepSeek-V4-Flash",)
 # Definition validation ------------------------------------------------------
 
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
-_ENV_NAME_RE = re.compile(r"^CB_[A-Z0-9_]+$")
-
-_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
-
-
-def _is_https(url: str) -> bool:
-    return url.startswith("https://")
-
-
-def _is_loopback_http(url: str) -> bool:
-    """True iff url is http://127.0.0.1[:port] or http://localhost[:port] (D7
-    allows plaintext only for loopback debugging)."""
-    if not url.startswith("http://"):
-        return False
-    rest = url[len("http://"):]
-    # Strip path/query.
-    host_part = rest.split("/", 1)[0]
-    # Strip credentials (not supported, but be defensive).
-    host_part = host_part.split("@", 1)[-1]
-    host = host_part.split(":", 1)[0].lower()
-    return host in _LOOPBACK_HOSTS
+# 与通道 id 的 slug 字符集对齐：id 允许 [a-z0-9_-]，自动填充 "CB_"+id.upper()
+# 可能含连字符，此处必须同样放行（spec 23 §1.2）。Windows 环境变量名含 '-' 合法。
+_ENV_NAME_RE = re.compile(r"^CB_[A-Z0-9_-]+$")
 
 
 def validate_definition(
@@ -70,33 +52,34 @@ def validate_definition(
     definitions). When editing an existing definition, pass its id in
     `exclude_id` so the self-collision is ignored.
     """
+    # 文案约定:校验错误直接面向用户(前端第一道拦截后这里是兜底,API 调用方
+    # 也会看到),一律中文人话,不暴露裸正则。
     if not isinstance(definition, dict):
-        raise ValueError("definition must be a JSON object")
+        raise ValueError("通道定义必须是 JSON 对象")
 
     cid = str(definition.get("id") or "").strip()
     if not cid:
-        raise ValueError("id is required")
+        raise ValueError("通道 ID 必填")
     if not _SLUG_RE.match(cid):
         raise ValueError(
-            "id must match ^[a-z][a-z0-9_-]{0,31}$ "
-            "(start with letter; lowercase alnum / '-' / '_'; max 32 chars)"
+            "通道 ID 需以小写字母开头,只含小写字母/数字/下划线/连字符,最长 32 字符"
         )
     if cid != exclude_id and cid in reserved_ids:
-        raise ValueError(f"channel id '{cid}' is already in use")
+        raise ValueError(f"通道 ID「{cid}」已被占用,请换一个")
 
     display_name = str(definition.get("display_name") or "").strip()
     if not display_name:
-        raise ValueError("display_name is required")
+        raise ValueError("显示名称必填")
     if len(display_name) > 40:
-        raise ValueError("display_name must be ≤ 40 characters")
+        raise ValueError("显示名称不得超过 40 字符")
 
     base_url = str(definition.get("base_url") or "").strip()
     if not base_url:
-        raise ValueError("base_url is required")
-    if not (_is_https(base_url) or _is_loopback_http(base_url)):
-        raise ValueError(
-            "base_url must be https:// or http://127.0.0.1[:port]/http://localhost[:port]"
-        )
+        raise ValueError("Base URL 必填")
+    # 放行任意 http:// / https://（含内网 http）：API key 走明文有泄密风险，
+    # 前端在输入框下方给出「仅建议内网」警告，由管理员自行权衡。
+    if not (base_url.startswith("http://") or base_url.startswith("https://")):
+        raise ValueError("Base URL 需以 http:// 或 https:// 开头")
 
     models = definition.get("models")
     # `models` is OPTIONAL. Omitted / None / empty list all mean "use the
@@ -106,20 +89,20 @@ def validate_definition(
     cleaned_models: list[str] = []
     if models:
         if not isinstance(models, list):
-            raise ValueError("models must be an array of model id strings")
+            raise ValueError("模型白名单必须是模型 ID 的字符串列表")
         for m in models:
             if not isinstance(m, str):
-                raise ValueError("models must be an array of strings")
+                raise ValueError("模型白名单必须是字符串列表")
             text = m.strip()
             if not text:
-                raise ValueError("models must be an array of non-empty strings")
+                raise ValueError("模型白名单不能包含空字符串")
             cleaned_models.append(text)
 
     aliases = definition.get("aliases")
     if aliases is None:
         aliases = {}
     if not isinstance(aliases, dict):
-        raise ValueError("aliases must be an object mapping alias -> model id")
+        raise ValueError("别名必须是「别名 → 模型 ID」的映射对象")
     # Effective model set for alias validation: the admin-provided list, or the
     # default whitelist when models is omitted (spec 23 §5: an alias value must
     # point at the default model or a user-supplied model id).
@@ -129,13 +112,11 @@ def validate_definition(
         ak = str(k).strip()
         av = str(v).strip()
         if not ak:
-            raise ValueError("alias keys must be non-empty")
+            raise ValueError("别名不能为空")
         if not av:
-            raise ValueError("alias values must be non-empty")
+            raise ValueError("别名对应的模型 ID 不能为空")
         if av not in _effective_models:
-            raise ValueError(
-                f"alias '{ak}' points to '{av}' which is not in the models list"
-            )
+            raise ValueError(f"别名「{ak}」指向的模型「{av}」不在模型白名单中")
         cleaned_aliases[ak] = av
 
     env_api_key = definition.get("env_api_key")
@@ -143,7 +124,7 @@ def validate_definition(
         env_api_key = str(env_api_key).strip()
         if env_api_key and not _ENV_NAME_RE.match(env_api_key):
             raise ValueError(
-                "env_api_key must match ^CB_[A-Z0-9_]+$ (e.g. CB_MY_KEY)"
+                "环境变量名需以 CB_ 开头,其余只允许大写字母/数字/下划线/连字符(如 CB_MY_KEY)"
             )
 
 
@@ -215,6 +196,8 @@ def delete_definition(channel_id: str) -> bool:
     Purged residuals (so no page/dropdown keeps referencing a dead channel):
       * <cid>.models / <cid>.aliases   — 模型配置页覆盖键
       * <cid>.credit_rate / <cid>.reasoning — 同页倍率/思考档位
+      * <cid>.max_input_tokens / <cid>.max_input_tokens_by_model — 上下文限额
+        （不删的话,删后重建同 id 通道会静默继承旧限额）
       * unified_models entries mapping to this channel
       * enabled_channels / channel_order membership
     """
@@ -237,7 +220,16 @@ def _purge_channel_settings(cid: str) -> None:
         return
     # 1) per-channel overrides written by the 模型配置 page (workbuddy keeps
     #    legacy key names, but workbuddy is a builtin and never hits this).
-    for key in (f"{cid}.models", f"{cid}.aliases", f"{cid}.credit_rate", f"{cid}.reasoning"):
+    #    max_input_tokens 两键是上下文限额的通道级写点(model_limits.py),
+    #    与上面同属 <cid> 前缀残留,必须一并清掉。
+    for key in (
+        f"{cid}.models",
+        f"{cid}.aliases",
+        f"{cid}.credit_rate",
+        f"{cid}.reasoning",
+        f"{cid}.max_input_tokens",
+        f"{cid}.max_input_tokens_by_model",
+    ):
         try:
             db.delete_setting(key)
         except Exception:

@@ -310,6 +310,7 @@ tr:hover td{background:var(--accent-soft)}
 .status-line{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap}
 .muted{color:var(--fg-3)}
 .hint{font-size:var(--fs-s);color:var(--fg-3);margin-top:3px}
+.hint.err{color:var(--err)}
 .cache-note{font-size:var(--fs-s);color:var(--fg-3);margin-top:3px}
 .warn-text{color:var(--warn)}
 .calc-mark{color:var(--warn);cursor:help;font-size:10px;margin-left:4px;vertical-align:middle}

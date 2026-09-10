@@ -41,12 +41,12 @@ export default {props:['token','toast','invalidateChannels'],components:{'login-
   const um=ref({open:false,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',draft:{},warning:null,busy:false,envTouched:false});
   function umEmptyDraft(){return {id:'',display_name:'',base_url:'',modelsText:'',aliasRows:[{k:'',v:''}],env_api_key:'',api_key:''}}
   function openKeyModal(def){  // def: existing definition for edit; omit for create
-    if(def){um.value={open:true,mode:'edit',kind:'apikey',channelId:def.id,tab:'form',infoId:def.id,infoKind:'apikey',warning:null,busy:false,envTouched:false,draft:{
+    if(def){um.value={open:true,mode:'edit',kind:'apikey',channelId:def.id,tab:'form',infoId:def.id,infoKind:'apikey',warning:null,busy:false,envTouched:false,tried:false,draft:{
       id:def.id,display_name:def.display_name||'',base_url:def.base_url||'',
       modelsText:(def.models||[]).join(', '),
       aliasRows:Object.entries(def.aliases||{}).map(([k,v])=>({k,v})).concat([{k:'',v:''}]),
       env_api_key:def.env_api_key||'',api_key:''}};}
-    else{um.value={open:true,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',warning:null,busy:false,envTouched:false,draft:umEmptyDraft()}}
+    else{um.value={open:true,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',warning:null,busy:false,envTouched:false,tried:false,draft:umEmptyDraft()}}
   }
   // 详情浮窗「编辑」:把当前通道定义灌入 draft 再切到表单 tab。
   // 之前只切 tab 不填 draft → 编辑态 id/名称全空且输入框 :disabled,无法保存。
@@ -58,11 +58,11 @@ export default {props:['token','toast','invalidateChannels'],components:{'login-
   // 别名行编辑器:添加/删除行(对齐 models.js 各平台设置)
   function addAliasRow(){um.value.draft.aliasRows.push({k:'',v:''})}
   function rmAliasRow(i){um.value.draft.aliasRows.splice(i,1)}
-  function umClose(){um.value={open:false,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',warning:null,busy:false,envTouched:false,draft:umEmptyDraft()}}
+  function umClose(){um.value={open:false,mode:'create',kind:'',channelId:'',tab:'form',infoId:'',infoKind:'',warning:null,busy:false,envTouched:false,tried:false,draft:umEmptyDraft()}}
   // info tab: read-only summary opened from a row's 「详情」 button
   function openInfo(c){
     const isAk=c.kind==='apikey';
-    um.value={open:true,tab:'info',mode:isAk&&ccOf(c.id)?'edit':'create',kind:isAk?'apikey':'login',channelId:c.id,infoId:c.id,infoKind:c.kind,warning:null,busy:false,envTouched:false,draft:umEmptyDraft()};
+    um.value={open:true,tab:'info',mode:isAk&&ccOf(c.id)?'edit':'create',kind:isAk?'apikey':'login',channelId:c.id,infoId:c.id,infoKind:c.kind,warning:null,busy:false,envTouched:false,tried:false,draft:umEmptyDraft()};
   }
   // ────────── drag sort (SortableJS, global window.Sortable) ──────────
   const loginTbody=ref(null),apikeyTbody=ref(null),sortInst=[];
@@ -82,10 +82,47 @@ export default {props:['token','toast','invalidateChannels'],components:{'login-
   }
   function onLoginEnd(){if(!loginTbody.value)return;applyOrder(readOrder(loginTbody.value));persistOrder();}
   function onApikeyEnd(){if(!apikeyTbody.value)return;applyOrder(readOrder(apikeyTbody.value));persistOrder();}
+  // 前端第一道校验:规则与后端 validate_definition 对齐,文案用人话(不暴露正则)。
+  // 「必填」类错误在点过保存(tried)后才内联显示;格式错误只要填了就不合规立即显示。
+  const UM_ID_RE=/^[a-z][a-z0-9_-]{0,31}$/;
+  const UM_ENV_KEY_RE=/^CB_[A-Z0-9_-]+$/;
+  function fieldErr(field){
+    const f=um.value.draft,tried=!!um.value.tried;
+    const v=String(f[field]||'').trim();
+    if(field==='id'){
+      if(!v)return tried?'通道 ID 必填':'';
+      if(!UM_ID_RE.test(v))return '通道 ID 需以小写字母开头,只含小写字母/数字/下划线/连字符,最长 32 字符';
+    }else if(field==='display_name'){
+      if(!v)return tried?'显示名称必填':'';
+      if(v.length>40)return '显示名称不得超过 40 字符';
+    }else if(field==='base_url'){
+      if(!v)return tried?'Base URL 必填':'';
+      if(!(v.indexOf('http://')===0||v.indexOf('https://')===0))return 'Base URL 需以 http:// 或 https:// 开头';
+    }else if(field==='env_api_key'){
+      if(v&&!UM_ENV_KEY_RE.test(v))return '环境变量名需以 CB_ 开头,其余只允许大写字母/数字/下划线/连字符';
+    }else if(field==='alias'){
+      const models=String(f.modelsText||'').split(',').map(s=>s.trim()).filter(Boolean);
+      const eff=models.length?models:['DeepSeek-V4-Flash'];
+      for(const r of (f.aliasRows||[])){
+        const ak=String(r.k||'').trim(),av=String(r.v||'').trim();
+        if(ak&&av&&eff.indexOf(av)<0)return '别名「'+ak+'」对应的模型「'+av+'」不在模型白名单中(留空白名单时只能指向默认模型)';
+      }
+    }
+    return '';
+  }
+  function draftFirstErr(){
+    for(const fld of ['id','display_name','base_url','env_api_key','alias']){
+      const e=fieldErr(fld);
+      if(e)return e;
+    }
+    return '';
+  }
   async function umSave(){
     if(um.value.busy)return;
     const f=um.value.draft;
-    if(!f.id.trim()||!f.display_name.trim()||!f.base_url.trim()){p.toast('id / 名称 / Base URL 必填','err');return}
+    um.value.tried=true;
+    const verr=draftFirstErr();
+    if(verr){p.toast(verr,'err');return}
     const models=f.modelsText.split(',').map(s=>s.trim()).filter(Boolean);
     // models 可选:为空不传,让后端补默认 ["DeepSeek-V4-Flash"](spec 23 §2.1)
     // 别名:aliasRows → aliases 对象(过滤空行;重复 k 后者覆盖,与原 textarea 行为一致)
@@ -127,13 +164,14 @@ export default {props:['token','toast','invalidateChannels'],components:{'login-
   function ccOf(id){return ccList.value.find(x=>x.id===id)}
   // (ccStartCreate/ccStartEdit/ccSave 已迁入统一浮窗 um* 函数)
   async function ccDelete(c){
-    if(!confirm('删除自定义通道 '+c.id+' ？该通道账号行将全部置 inactive。'))return;
+    if(!confirm('删除自定义通道 '+c.id+' ？该通道账号行将被删除。'))return;
     try{
       await api.del('/admin/channels/custom/'+encodeURIComponent(c.id),p.token);
       // 本地回写:直接从定义表/通道表移除,免整表重拉(spec WS-3 §3)
       ccList.value=ccList.value.filter(x=>x.id!==c.id);
       list.value=list.value.filter(x=>x.id!==c.id);
       if(activeChannel.value===c.id)activeChannel.value=list.value.find(x=>x.enabled)?.id||list.value[0]?.id||'';
+      await loadAccounts();
       p.toast('已删除 '+c.id);
     }catch(e){
       p.toast('删除失败：'+apiErr(e),'err');
@@ -343,7 +381,7 @@ export default {props:['token','toast','invalidateChannels'],components:{'login-
   });
   function onEnvInput(){um.value.envTouched=true}
 
-  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,loginChannels,apikeyChannels,rowKey,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccDelete,um,openKeyModal,umEditFromInfo,umClose,umSave,addAliasRow,rmAliasRow,onEnvInput,onModalImported,openInfo,discover,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,loadPins,refreshAll,setPin,pins,pinLd,grouped,accName,provName,health,healthClass,healthTitle,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I,keyPanelMetaById,loginTbody,apikeyTbody}
+  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,loginChannels,apikeyChannels,rowKey,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccDelete,um,openKeyModal,umEditFromInfo,umClose,umSave,fieldErr,addAliasRow,rmAliasRow,onEnvInput,onModalImported,openInfo,discover,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,loadPins,refreshAll,setPin,pins,pinLd,grouped,accName,provName,health,healthClass,healthTitle,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I,keyPanelMetaById,loginTbody,apikeyTbody}
 },template:`
 <div>
   <div class="phead"><h1>通道管理</h1><p>定义通道 · 管理凭证 · 启用开关</p></div>
@@ -486,9 +524,9 @@ export default {props:['token','toast','invalidateChannels'],components:{'login-
         <!-- step 2b: apikey form -->
         <template v-else-if="um.kind==='apikey'">
           <div class="form-grid">
-            <div class="field"><label>通道 ID <span class="req">*</span><span class="hint" style="margin:0" v-if="um.mode==='create'">小写字母数字下划线连字符,32 字以内</span></label><input v-model="um.draft.id" :disabled="um.mode==='edit'" placeholder="如 siliconflow"/></div>
-            <div class="field"><label>显示名称 <span class="req">*</span></label><input v-model="um.draft.display_name" placeholder="如 硅基流动"/></div>
-            <div class="field"><label>Base URL <span class="req">*</span><span class="hint" style="margin:0">https:// 或 http://127.0.0.1[:port]</span></label><input v-model="um.draft.base_url" placeholder="https://api.example.com/v1"/></div>
+            <div class="field"><label>通道 ID <span class="req">*</span><span class="hint" style="margin:0" v-if="um.mode==='create'">小写字母开头;小写字母/数字/下划线/连字符,32 字以内</span></label><input v-model="um.draft.id" :disabled="um.mode==='edit'" placeholder="如 siliconflow"/><div class="hint err" v-if="fieldErr('id')">{{fieldErr('id')}}</div></div>
+            <div class="field"><label>显示名称 <span class="req">*</span></label><input v-model="um.draft.display_name" placeholder="如 硅基流动"/><div class="hint err" v-if="fieldErr('display_name')">{{fieldErr('display_name')}}</div></div>
+            <div class="field"><label>Base URL <span class="req">*</span><span class="hint" style="margin:0">http:// 或 https://(支持内网地址)</span></label><input v-model="um.draft.base_url" placeholder="https://api.example.com/v1"/><div class="hint" v-if="String(um.draft.base_url||'').trim().indexOf('http://')===0" style="color:var(--warn);margin-top:4px">⚠ 明文传输:API key 不加密,仅建议内网使用</div><div class="hint err" v-if="fieldErr('base_url')">{{fieldErr('base_url')}}</div></div>
             <div class="field"><label>API Key <span v-if="um.mode==='create'" class="req">*</span><span class="hint" style="margin:0">{{um.mode==='edit'?'留空保留旧 Key;填则追加/轮换(同 Key 跳过)':'裸 Key / Bearer xxx / {"api_key":"..."} 均可'}}</span></label><input v-model="um.draft.api_key" type="password" :placeholder="um.mode==='edit'?'留空不轮换':'粘贴上游 API Key'"/></div>
             <div class="field"><label>模型白名单<span class="hint" style="margin:0">可选;留空默认 DeepSeek-V4-Flash,保存后可在「模型配置」页调整或用探活拉取</span></label><input v-model="um.draft.modelsText" placeholder="model-a, model-b"/></div>
             <div class="field" style="grid-column:1 / -1"><label>别名<span class="hint" style="margin:0">别名 → 模型 ID,可空;删空后保存 = 无别名</span></label>
@@ -499,8 +537,9 @@ export default {props:['token','toast','invalidateChannels'],components:{'login-
                 <button class="btn s danger" @click="rmAliasRow(i)">删除</button>
               </div>
               <button class="btn s" @click="addAliasRow" style="font-size:11px;padding:3px 10px"><span v-html="I.plus"></span>添加别名</button>
+              <div class="hint err" v-if="fieldErr('alias')">{{fieldErr('alias')}}</div>
             </div>
-            <div class="field"><label>环境变量名<span class="hint" style="margin:0">可选;留空自动生成 CB_&lt;通道ID大写&gt;</span></label><input v-model="um.draft.env_api_key" @input="onEnvInput" placeholder="CB_MY_KEY"/></div>
+            <div class="field"><label>环境变量名<span class="hint" style="margin:0">可选;留空自动生成 CB_&lt;通道ID大写&gt;;需 CB_ 开头,仅大写字母/数字/下划线/连字符</span></label><input v-model="um.draft.env_api_key" @input="onEnvInput" placeholder="CB_MY_KEY"/><div class="hint err" v-if="fieldErr('env_api_key')">{{fieldErr('env_api_key')}}</div></div>
           </div>
           <div v-if="um.warning" class="callout" style="margin-top:10px;font-size:12px;background:var(--warn-bg);border-color:var(--warn-border);color:var(--warn-fg)">探活失败(HTTP {{um.warning.probe_status}}):{{um.warning.probe_error||'无返回内容'}}。定义已保存,可稍后调整 Base URL 重试。</div>
         </template>

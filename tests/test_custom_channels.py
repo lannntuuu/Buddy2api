@@ -54,7 +54,7 @@ def test_validate_rejects_bad_slug(bad_id):
 
 
 def test_validate_rejects_duplicate_id():
-    with pytest.raises(ValueError, match="already in use"):
+    with pytest.raises(ValueError, match="已被占用"):
         cc.validate_definition(
             {"id": "dup", "display_name": "X", "base_url": "https://x/v1", "models": ["m"]},
             reserved_ids={"dup"},
@@ -71,11 +71,16 @@ def test_validate_allows_duplicate_id_when_excluded():
     )
 
 
-def test_validate_rejects_http_non_loopback():
-    """非本机的 http:// 必须拒绝（D7 只放行本机）。"""
-    with pytest.raises(ValueError, match="https"):
+def test_validate_rejects_non_http_scheme():
+    """非 http(s) 方案（无协议头 / ftp 等）必须拒绝。"""
+    with pytest.raises(ValueError, match="需以 http:// 或 https:// 开头"):
         cc.validate_definition(
-            {"id": "a", "display_name": "X", "base_url": "http://example.com/v1", "models": ["m"]},
+            {"id": "a", "display_name": "X", "base_url": "ftp://example.com/v1", "models": ["m"]},
+            reserved_ids=set(),
+        )
+    with pytest.raises(ValueError, match="需以 http:// 或 https:// 开头"):
+        cc.validate_definition(
+            {"id": "a", "display_name": "X", "base_url": "example.com/v1", "models": ["m"]},
             reserved_ids=set(),
         )
 
@@ -87,11 +92,13 @@ def test_validate_rejects_http_non_loopback():
         "http://127.0.0.1:8000/v1",
         "http://localhost/v1",
         "http://localhost:8000/v1",
+        "http://192.168.1.10:8000/v1",   # 内网 http(放宽后放行,前端给出明文警告)
+        "http://example.com/v1",          # 公网 http 也放行,由管理员自行权衡
         "https://api.example.com/v1",
     ],
 )
-def test_validate_accepts_loopback_http_or_https(url):
-    """本机 http（127.0.0.1 / localhost）以及任何 https 都放行。"""
+def test_validate_accepts_http_and_https(url):
+    """任意 http:// / https:// 都放行（含内网/公网 http）。"""
     cc.validate_definition(
         {"id": "ok", "display_name": "X", "base_url": url, "models": ["m"]},
         reserved_ids=set(),
@@ -99,7 +106,7 @@ def test_validate_accepts_loopback_http_or_https(url):
 
 
 def test_validate_rejects_alias_pointing_to_missing_model():
-    with pytest.raises(ValueError, match="not in the models list"):
+    with pytest.raises(ValueError, match="不在模型白名单中"):
         cc.validate_definition(
             {
                 "id": "ok",
@@ -117,15 +124,14 @@ def test_validate_rejects_alias_pointing_to_missing_model():
     [
         "MY_KEY",            # missing CB_ prefix
         "CB_lower",          # lowercase
-        "CB-WRONG-DASH",     # hyphen
         "cb_upper",          # lowercase prefix
         "CB_",               # empty suffix
-        "CB_X-DASH",         # hyphen inside
+        "CB_X!",             # illegal character
     ],
 )
 def test_validate_rejects_bad_env_name(env_name):
-    """Spec §3.1: env_api_key 必须匹配 ^CB_[A-Z0-9_]+$."""
-    with pytest.raises(ValueError, match="env_api_key"):
+    """Spec §3.1: env_api_key 必须匹配 ^CB_[A-Z0-9_-]+$（连字符与通道 id 对齐）。"""
+    with pytest.raises(ValueError, match="环境变量名"):
         cc.validate_definition(
             {
                 "id": "ok",
@@ -140,10 +146,11 @@ def test_validate_rejects_bad_env_name(env_name):
 
 @pytest.mark.parametrize(
     "env_name",
-    ["CB_X", "CB_BAILIAN_API_KEY", "CB_MY_KEY_2"],
+    ["CB_X", "CB_BAILIAN_API_KEY", "CB_MY_KEY_2", "CB_QWEN-27B", "CB_GMI-KEY"],
 )
 def test_validate_accepts_well_formed_env_name(env_name):
-    """合法 env_api_key（含 CB_ + 大写字母数字下划线 1+ 字符）放行。"""
+    """合法 env_api_key（CB_ + 大写字母/数字/下划线/连字符 1+ 字符）放行；
+    含自动填充产物 CB_+id.upper()（id 允许连字符，spec 23 §1.2）。"""
     cc.validate_definition(
         {
             "id": "ok",
@@ -369,7 +376,7 @@ def test_validate_alias_may_point_to_default_model_when_models_omitted():
 
 def test_validate_rejects_alias_pointing_to_unknown_model():
     """别名指向既非用户模型也非默认模型的 id 仍报错。"""
-    with pytest.raises(ValueError, match="not in the models list"):
+    with pytest.raises(ValueError, match="不在模型白名单中"):
         cc.validate_definition(
             {
                 "id": "ok",
@@ -410,11 +417,14 @@ def test_post_custom_fills_default_models_and_generated_env(isolated_db, monkeyp
     """POST 不带 models / env_api_key(但带 api_key 走完整链路)→
     definition.models == ['DeepSeek-V4-Flash'] 且 env_api_key == 'CB_<ID 大写>'。"""
     import asyncio
+    import providers
     from gateway import deps as _deps
     from gateway.routers import admin as _admin
 
     # 关掉管理鉴权,让 handler 直接跑
     monkeypatch.setattr(_deps, "ALLOW_NO_ADMIN_AUTH", True)
+    # 显式移除 env 锁定,保证「默认启用」断言确定(见下方)
+    monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
 
     cid = "siliconflow"
 
@@ -439,6 +449,11 @@ def test_post_custom_fills_default_models_and_generated_env(isolated_db, monkeyp
     assert stored["models"] == ["DeepSeek-V4-Flash"]
     assert stored["env_api_key"] == "CB_" + cid.upper()
 
+    # 新建通道默认启用(全新 DB 无 enabled_channels 键,回退全量 known 集合
+    # 已含新 cid,属幂等 no-write,但可读性上必须可调度)
+    assert cid in providers.enabled_provider_ids()
+    assert providers.is_channel_enabled(cid) is True
+
 
 def test_post_custom_explicit_models_and_env_passthrough(isolated_db, monkeypatch):
     """显式传 models / env_api_key 仍原样保存(不覆盖)。"""
@@ -447,6 +462,7 @@ def test_post_custom_explicit_models_and_env_passthrough(isolated_db, monkeypatc
     from gateway.routers import admin as _admin
 
     monkeypatch.setattr(_deps, "ALLOW_NO_ADMIN_AUTH", True)
+    monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
     cid = "deepseekx"
 
     async def run():
@@ -465,6 +481,12 @@ def test_post_custom_explicit_models_and_env_passthrough(isolated_db, monkeypatc
     out = asyncio.run(run())
     assert out["models"] == ["m1", "m2"]
     assert out["env_api_key"] == "CB_DSX_KEY"
+
+    # 新建通道默认启用(同 test_post_custom_fills_default_models_and_generated_env)
+    import providers
+
+    assert cid in providers.enabled_provider_ids()
+    assert providers.is_channel_enabled(cid) is True
 
 
 def test_put_custom_blank_env_generates_by_path_param(isolated_db, monkeypatch):
@@ -509,4 +531,226 @@ def test_put_custom_blank_env_generates_by_path_param(isolated_db, monkeypatch):
     assert out["env_api_key"] == "CB_" + cid.upper()
     # 未传的 models 仍落默认
     assert out["models"] == ["DeepSeek-V4-Flash"]
+
+
+# ---------------------------------------------------------------------------
+# 删除自定义通道 = 真删账号行(不再留 inactive 孤儿)+ settings 残留全清
+# ---------------------------------------------------------------------------
+
+
+def test_delete_custom_channel_removes_accounts_and_residues(isolated_db, monkeypatch):
+    """DELETE /admin/channels/custom/{cid}:定义消失;该 provider 的账号行
+    (active + inactive)全部真删,响应计数键为 accounts_deleted;<cid>.models /
+    <cid>.max_input_tokens 等 settings 残留一并清掉;其他通道账号不受影响。"""
+    import asyncio
+    import providers
+
+    from fastapi import HTTPException
+    from storage import database as db
+    from gateway import deps as _deps
+    from gateway.routers import admin as _admin
+
+    monkeypatch.setattr(_deps, "ALLOW_NO_ADMIN_AUTH", True)
+    monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
+
+    cid = "delchan"
+    cc.upsert_definition(
+        {
+            "id": cid,
+            "display_name": "待删",
+            "base_url": "https://del.example.com/v1",
+            "models": ["m1"],
+            "aliases": {},
+            "env_api_key": "CB_DEL",
+        }
+    )
+    # 通道级 settings 残留(含历史上漏清的 max_input_tokens 两键)
+    db.set_setting(f"{cid}.models", ["m1"])
+    db.set_setting(f"{cid}.max_input_tokens", 8192)
+    db.set_setting(f"{cid}.max_input_tokens_by_model", {"m1": 4096})
+    # 该通道的账号行:active + inactive 各一
+    a_active = db.add_account(
+        {"name": "k-active", "uid": "del-1", "provider": cid, "status": "active"}
+    )
+    a_inactive = db.add_account(
+        {"name": "k-inactive", "uid": "del-2", "provider": cid, "status": "inactive"}
+    )
+    # 其他通道账号(不应被误删)
+    a_wb = db.add_account(
+        {"name": "wb", "uid": "wb-1", "provider": "workbuddy", "status": "active"}
+    )
+
+    async def run():
+        return await _admin.admin_delete_custom_channel(cid, authorization=None)
+
+    out = asyncio.run(run())
+    assert out == {"status": "ok", "id": cid, "accounts_deleted": 2}
+
+    # 定义消失,known 集合收敛
+    assert cc.get_definition(cid) is None
+    assert cid not in providers.known_channel_ids()
+    # 账号行真删(不再留 inactive 孤儿)
+    assert db.list_accounts(provider=cid) == []
+    assert db.get_account(a_active) is None
+    assert db.get_account(a_inactive) is None
+    # settings 残留清干净(含 max_input_tokens 两键)
+    assert db.get_setting(f"{cid}.models") is None
+    assert db.get_setting(f"{cid}.max_input_tokens") is None
+    assert db.get_setting(f"{cid}.max_input_tokens_by_model") is None
+    # 其他通道账号不受影响
+    assert db.get_account(a_wb) is not None
+
+    # 再删一次 → 404
+    async def run_404():
+        return await _admin.admin_delete_custom_channel(cid, authorization=None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(run_404())
+    assert exc_info.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 新建自定义通道默认启用(保序 + env 锁定跳过)
+# ---------------------------------------------------------------------------
+
+
+def test_post_custom_channel_enabled_by_default_preserves_order(isolated_db, monkeypatch):
+    """DB 已有 enabled_channels 键(用户曾在 UI 勾过开关)时,新建通道仍默认
+    启用,且原有通道相对顺序不变、workbuddy 仍居首、新 cid 追加在末尾。"""
+    import asyncio
+    import providers
+    from gateway import deps as _deps
+    from gateway.routers import admin as _admin
+
+    monkeypatch.setattr(_deps, "ALLOW_NO_ADMIN_AUTH", True)
+    monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
+
+    # 模拟用户已在 UI 勾过开关/拖过序:DB 已有 enabled_channels 键
+    providers.set_enabled_channels(
+        ids=["workbuddy", "qclaw", "qwenwork"],
+        order=["workbuddy", "qclaw", "qwenwork", "traework", "traesolo"],
+    )
+    before = providers.get_channel_order()
+    assert before == ["workbuddy", "qclaw", "qwenwork"]
+
+    cid = "autoflow"
+
+    async def run():
+        req = _make_request(
+            {
+                "id": cid,
+                "display_name": "Auto",
+                "base_url": "https://auto.example.com/v1",
+            }
+        )
+        return await _admin.admin_create_custom_channel(req, authorization=None)
+
+    out = asyncio.run(run())
+    assert out["id"] == cid
+    assert out["status"] == "ok"
+
+    # 新通道默认启用
+    assert cid in providers.enabled_provider_ids()
+    assert providers.is_channel_enabled(cid) is True
+    # 原有通道相对顺序不变,workbuddy 仍居首,新 cid 追加在末尾
+    after = providers.get_channel_order()
+    assert after[0] == "workbuddy"
+    assert [c for c in after if c in before] == before
+    assert after[-1] == cid
+
+
+def test_post_custom_channel_env_locked_skips_enable(isolated_db, monkeypatch):
+    """env 锁定(CB_GATEWAY_PROVIDERS)时创建不报错:定义照常保存,但启用态
+    由 env 接管 —— 不写 DB,新 cid 不因本端点而启用。"""
+    import asyncio
+    import providers
+    from storage import database as db
+    from gateway import deps as _deps
+    from gateway.routers import admin as _admin
+
+    monkeypatch.setattr(_deps, "ALLOW_NO_ADMIN_AUTH", True)
+    monkeypatch.setenv("CB_GATEWAY_PROVIDERS", "workbuddy")
+
+    cid = "lockedchan"
+
+    async def run():
+        req = _make_request(
+            {
+                "id": cid,
+                "display_name": "Locked",
+                "base_url": "https://locked.example.com/v1",
+            }
+        )
+        return await _admin.admin_create_custom_channel(req, authorization=None)
+
+    out = asyncio.run(run())
+    assert out["id"] == cid
+    assert out["status"] == "ok"
+    # 定义已保存
+    assert cc.get_definition(cid) is not None
+    # env 分支直接 return:DB 启用态完全不被本端点写入
+    assert db.get_setting("enabled_channels", None) is None
+    assert providers.is_channel_enabled(cid) is False
+
+
+# ---------------------------------------------------------------------------
+# 启动自愈:孤儿账号行清扫(_lifespan 中 seed 之后)
+# ---------------------------------------------------------------------------
+
+
+def test_purge_orphan_accounts_removes_nonactive_unknown_provider_rows(isolated_db):
+    """purge_orphan_accounts:provider 不在 known 集合(内置 ∪ 现存自定义
+    定义)且非 active 的孤儿行被删;active 孤儿行保留;已知通道的账号行
+    (内置 workbuddy / seed gmi)不受影响。"""
+    from storage import database as db
+    from gateway import server as _server
+
+    # fresh-install 语义:seed 定义先落库(真实 _lifespan 中 purge 晚于 seed)
+    cc.seed_initial_definitions()
+
+    orphan_inactive = db.add_account(
+        {"name": "ghost", "uid": "g-1", "provider": "ghost-ch", "status": "inactive"}
+    )
+    orphan_active = db.add_account(
+        {"name": "ghost2", "uid": "g-2", "provider": "ghost-ch", "status": "active"}
+    )
+    gmi_row = db.add_account(
+        {"name": "gmi1", "uid": "gmi-1", "provider": "gmi", "status": "inactive"}
+    )
+    wb_row = db.add_account(
+        {"name": "wb", "uid": "wb-1", "provider": "workbuddy", "status": "inactive"}
+    )
+
+    removed = _server.purge_orphan_accounts()
+
+    assert removed == 1
+    assert db.get_account(orphan_inactive) is None
+    # active 孤儿保留(用户可见可手动删,且本就无法被路由)
+    assert db.get_account(orphan_active) is not None
+    # 已知通道的行不受影响(定义存在 → 不算孤儿)
+    assert db.get_account(gmi_row) is not None
+    assert db.get_account(wb_row) is not None
+
+
+def test_lifespan_seeds_then_purges_orphans(isolated_db):
+    """_lifespan 全链路:先 seed gmi/bailian 定义,再清 inactive 孤儿行 ——
+    顺序颠倒时 gmi/bailian 的行会被误删,本用例守这个插入点。"""
+    import asyncio
+    from storage import database as db
+    from gateway import server as _server
+
+    orphan = db.add_account(
+        {"name": "ghost", "uid": "l-1", "provider": "ghost-ch", "status": "inactive"}
+    )
+
+    async def run():
+        async with _server._lifespan(None):
+            pass
+
+    asyncio.run(run())
+
+    assert db.get_account(orphan) is None
+    # seed 定义已落库(purge 不误伤的前提)
+    assert cc.get_definition("gmi") is not None
+    assert cc.get_definition("bailian") is not None
 

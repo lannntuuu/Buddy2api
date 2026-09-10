@@ -5,13 +5,18 @@ admin submodule owns one resource domain and its own APIRouter.
 """
 from __future__ import annotations
 
+import logging
+
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
+import providers
 from storage import database as db
 from providers import custom_channels
 from gateway.deps import _check_admin, _read_json_object
+
+logger = logging.getLogger("buddy2api.admin")
 
 router = APIRouter()
 
@@ -169,22 +174,22 @@ async def admin_create_custom_channel(
     Body (required fields first):
         id            : slug, ^[a-z][a-z0-9_-]{0,31}$
         display_name  : ≤ 40 chars
-        base_url      : https:// or http://127.0.0.1[:port] / http://localhost[:port]
+        base_url      : http:// or https:// URL（明文 http 密钥不加密,仅建议内网）
         models        : non-empty list of model id strings
         aliases       : optional dict alias->id (ids must be in models)
         api_key       : optional. When present, written to accounts (uid=id-{tail});
                         used to probe GET {base}/models. Probe failure → HTTP 200
                         + `warning` block; definition is still saved (D7).
-        env_api_key   : optional, must match ^CB_[A-Z0-9_]+$
+        env_api_key   : optional, must match ^CB_[A-Z0-9_-]+$（与通道 id 字符集对齐）
     """
     _check_admin(authorization)
     data = await _read_json_object(request)
 
     cid = str(data.get("id") or "").strip()
     if not cid:
-        raise HTTPException(status_code=400, detail="id is required")
+        raise HTTPException(status_code=400, detail="通道 ID 必填")
     if custom_channels.get_definition(cid) is not None:
-        raise HTTPException(status_code=409, detail=f"channel id '{cid}' already exists")
+        raise HTTPException(status_code=409, detail=f"通道 ID「{cid}」已存在")
 
     reserved = custom_channels.reserved_ids()
     try:
@@ -236,6 +241,19 @@ async def admin_create_custom_channel(
 
     stored = custom_channels.upsert_definition(definition_to_save)
     _sync_channel_overrides(stored)
+    # 新建通道默认启用:DB 已有 enabled_channels 键(用户曾在 UI 勾过开关)时,
+    # 新 cid 不在其中会被默认停用,与全新安装(回退全量 known 集合)行为不一致。
+    # 必须带 order= 保持用户拖拽顺序;env 锁定时 DB 写入无效,直接跳过;
+    # best-effort——启用失败不阻断创建(通道保持停用,与现状一致)。
+    try:
+        if not providers.env_locked():
+            cur = providers.enabled_provider_ids()
+            if cid not in cur:
+                providers.set_enabled_channels(
+                    list(cur) + [cid], order=providers.get_channel_order()
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("create channel: auto-enable %s failed: %s", cid, exc)
     out = _public_definition(stored)
     out["status"] = "ok"
     out["account"] = {
@@ -276,7 +294,7 @@ async def admin_update_custom_channel(
     cid = str(cid or "").strip()
     existing = custom_channels.get_definition(cid)
     if existing is None:
-        raise HTTPException(status_code=404, detail=f"channel '{cid}' not found")
+        raise HTTPException(status_code=404, detail=f"通道「{cid}」不存在")
 
     data = await _read_json_object(request)
     # Merge patch onto the stored definition so untouched fields remain valid.
@@ -343,24 +361,24 @@ async def admin_update_custom_channel(
 async def admin_delete_custom_channel(
     cid: str, authorization: str | None = Header(default=None)
 ):
-    """Remove a custom-channel definition. Set every account row for this
-    provider to status='inactive' so the dispatcher stops using it (D6 —
-    keep logs). Seed channels (gmi / bailian) are deletable too: deleting
-    leaves the settings key as an empty list, which is distinct from
-    "absent", so seed_initial_definitions() will NOT resurrect them on the
-    next boot."""
+    """Remove a custom-channel definition and delete every account row for
+    it (真删,不再留 inactive 孤儿行)。日志取证不受影响——account_id /
+    account_name 已在请求时值拷贝进日志行。Seed channels (gmi / bailian)
+    are deletable too: deleting leaves the settings key as an empty list,
+    which is distinct from "absent", so seed_initial_definitions() will NOT
+    resurrect them on the next boot."""
     _check_admin(authorization)
     cid = str(cid or "").strip()
     existing = custom_channels.get_definition(cid)
     if existing is None:
-        raise HTTPException(status_code=404, detail=f"channel '{cid}' not found")
+        raise HTTPException(status_code=404, detail=f"通道「{cid}」不存在")
 
-    # Inactive every account row (preserve rows for log forensics, D6).
-    inactive_count = 0
+    # 逐行真删该通道的全部账号行(含 inactive),连带清
+    # account_resource_cache / account_checkin_cache。
+    deleted_count = 0
     for row in db.list_accounts(provider=cid):
-        if row.get("status") == "active":
-            db.update_account(row["id"], {"status": "inactive"})
-            inactive_count += 1
+        db.delete_account(row["id"])
+        deleted_count += 1
 
     custom_channels.delete_definition(cid)
-    return {"status": "ok", "id": cid, "inactive_accounts": inactive_count}
+    return {"status": "ok", "id": cid, "accounts_deleted": deleted_count}
