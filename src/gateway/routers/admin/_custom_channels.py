@@ -182,9 +182,9 @@ async def admin_create_custom_channel(
 
     cid = str(data.get("id") or "").strip()
     if not cid:
-        raise HTTPException(status_code=400, detail="id is required")
+        raise HTTPException(status_code=400, detail="通道 ID 必填")
     if custom_channels.get_definition(cid) is not None:
-        raise HTTPException(status_code=409, detail=f"channel id '{cid}' already exists")
+        raise HTTPException(status_code=409, detail=f"通道 ID「{cid}」已存在")
 
     reserved = custom_channels.reserved_ids()
     try:
@@ -276,7 +276,7 @@ async def admin_update_custom_channel(
     cid = str(cid or "").strip()
     existing = custom_channels.get_definition(cid)
     if existing is None:
-        raise HTTPException(status_code=404, detail=f"channel '{cid}' not found")
+        raise HTTPException(status_code=404, detail=f"通道「{cid}」不存在")
 
     data = await _read_json_object(request)
     # Merge patch onto the stored definition so untouched fields remain valid.
@@ -353,7 +353,7 @@ async def admin_delete_custom_channel(
     cid = str(cid or "").strip()
     existing = custom_channels.get_definition(cid)
     if existing is None:
-        raise HTTPException(status_code=404, detail=f"channel '{cid}' not found")
+        raise HTTPException(status_code=404, detail=f"通道「{cid}」不存在")
 
     # Inactive every account row (preserve rows for log forensics, D6).
     inactive_count = 0

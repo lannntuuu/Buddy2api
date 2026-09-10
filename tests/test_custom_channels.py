@@ -54,7 +54,7 @@ def test_validate_rejects_bad_slug(bad_id):
 
 
 def test_validate_rejects_duplicate_id():
-    with pytest.raises(ValueError, match="already in use"):
+    with pytest.raises(ValueError, match="已被占用"):
         cc.validate_definition(
             {"id": "dup", "display_name": "X", "base_url": "https://x/v1", "models": ["m"]},
             reserved_ids={"dup"},
@@ -73,12 +73,12 @@ def test_validate_allows_duplicate_id_when_excluded():
 
 def test_validate_rejects_non_http_scheme():
     """非 http(s) 方案（无协议头 / ftp 等）必须拒绝。"""
-    with pytest.raises(ValueError, match="http:// or https://"):
+    with pytest.raises(ValueError, match="需以 http:// 或 https:// 开头"):
         cc.validate_definition(
             {"id": "a", "display_name": "X", "base_url": "ftp://example.com/v1", "models": ["m"]},
             reserved_ids=set(),
         )
-    with pytest.raises(ValueError, match="http:// or https://"):
+    with pytest.raises(ValueError, match="需以 http:// 或 https:// 开头"):
         cc.validate_definition(
             {"id": "a", "display_name": "X", "base_url": "example.com/v1", "models": ["m"]},
             reserved_ids=set(),
@@ -106,7 +106,7 @@ def test_validate_accepts_http_and_https(url):
 
 
 def test_validate_rejects_alias_pointing_to_missing_model():
-    with pytest.raises(ValueError, match="not in the models list"):
+    with pytest.raises(ValueError, match="不在模型白名单中"):
         cc.validate_definition(
             {
                 "id": "ok",
@@ -131,7 +131,7 @@ def test_validate_rejects_alias_pointing_to_missing_model():
 )
 def test_validate_rejects_bad_env_name(env_name):
     """Spec §3.1: env_api_key 必须匹配 ^CB_[A-Z0-9_-]+$（连字符与通道 id 对齐）。"""
-    with pytest.raises(ValueError, match="env_api_key"):
+    with pytest.raises(ValueError, match="环境变量名"):
         cc.validate_definition(
             {
                 "id": "ok",
@@ -376,7 +376,7 @@ def test_validate_alias_may_point_to_default_model_when_models_omitted():
 
 def test_validate_rejects_alias_pointing_to_unknown_model():
     """别名指向既非用户模型也非默认模型的 id 仍报错。"""
-    with pytest.raises(ValueError, match="not in the models list"):
+    with pytest.raises(ValueError, match="不在模型白名单中"):
         cc.validate_definition(
             {
                 "id": "ok",
