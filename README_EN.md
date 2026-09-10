@@ -375,6 +375,12 @@ Channel-level token / credit accounting is inconsistent:
 
 Since v2.2.0, traesolo / qclaw / qwenwork can enable a **gateway-side token→credit estimate** (set `credit_rate` per channel in "Model config → Per-channel settings"; default 1000 tokens / 1 credit). This is an **estimate, not a real charge** — for trend-spotting and internal estimates only; don't reconcile it against the upstream's real balance. TraeWork would need its SSE parser fixed first to participate. See `docs/credit-and-token-tracking.md` for details.
 
+The **Usage** and **Request logs** pages carry a **speed (t/s)** column (API field `tps`) that measures model decode speed:
+
+- The numerator is **output tokens** (`completion_tokens`); the denominator is **decode time** = `duration_ms − first_token_ms` (first token → completion); negative gaps (e.g. after an account failover, where the two baselines differ) are clamped to 0.
+- **Request logs** show it per request; only streaming requests have a value — non-streaming rows or zero decode time show `-`.
+- **Usage stats** aggregate by **pooling**: `Σ output tokens ÷ Σ decode time` (sum ÷ sum, not a mean of per-request ratios); when the window's total decode time is 0 the API returns `null` and the page shows `-`.
+
 ## Data and security
 
 - Account tokens are encrypted before being written. Windows uses system DPAPI.
