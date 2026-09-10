@@ -789,13 +789,14 @@ def test_no_unimported_shared_symbol_reference() -> None:
 
 
 def test_tps_speed_columns() -> None:
-    """t/s 速度列:请求日志逐请求速度 + 用量统计平均速度 + api.js fmtTps 格式化器。"""
+    """t/s 速度列(DSH 解码速度口径):请求日志逐请求解码速度 + 用量统计池化解码速度 + api.js fmtTps。"""
     api_js = _read(WEB_JS / "api.js")
     assert "fmtTps" in api_js
     logs_js = _read(WEB_JS / "pages" / "logs.js")
     assert "speed" in logs_js
+    assert "first_token_ms" in logs_js
     assert "速度" in logs_js
     assert 'colspan="16"' in logs_js
     usage_js = _read(WEB_JS / "pages" / "usage.js")
-    assert "平均速度" in usage_js
+    assert "解码速度" in usage_js
     assert "fmtTps" in usage_js

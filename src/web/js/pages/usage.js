@@ -4,7 +4,7 @@ const{ref,reactive,computed,onMounted}=Vue;
 const RATIO_TIP='缓存命中 Token ÷ 输入 Token(prompt_tokens) — 命中部分已含在输入中;输入为 0 时不计算';
 const AVG_TIP='总耗时 ÷ 请求数 — 全部请求的平均值,含失败';
 const CACHE_INC_TIP='已包含在输入 Token(prompt_tokens)中,非额外增量';
-const TPS_TIP='逐请求平均速度 = Σ(Token÷耗时) ÷ 有效请求数(t/s);无 Token/耗时的请求不计入';
+const TPS_TIP='池化解码速度 = Σ输出 Token ÷ Σ解码时长(t/s);解码时长=耗时−首 token 时间,仅流式,负差钳 0,Σ为 0 不计';
 
 // ensureChannels 由 app.js 作为 prop 传入(父 setup 的函数不会出现在子 setup 的
 // props 上,遗漏会导致平台下拉为空 + 加载失败)。
@@ -58,7 +58,7 @@ export default {props:['token','toast','ensureChannels'],setup(p){
       <div class="metric" :title="RATIO_TIP"><div class="m-label">缓存命中率</div><div class="m-value">{{pct(data.totals?.cache_hit_ratio)}}</div><div class="m-sub">cache_read / prompt_tokens</div></div>
     </div>
     <div class="card" v-if="hasData"><div class="table-scroll"><table>
-      <thead><tr><th>平台 / 模型 / 日期</th><th>请求数</th><th>输入 Token</th><th :title="CACHE_INC_TIP">缓存命中 Token</th><th>缓存命中率 <span class="calc-mark" :title="RATIO_TIP">◆</span></th><th>输出 Token</th><th>总 Token</th><th>Credit</th><th>平均耗时 <span class="calc-mark" :title="AVG_TIP">◆</span></th><th :title="TPS_TIP">平均速度 <span class="calc-mark">◆</span></th></tr></thead>
+      <thead><tr><th>平台 / 模型 / 日期</th><th>请求数</th><th>输入 Token</th><th :title="CACHE_INC_TIP">缓存命中 Token</th><th>缓存命中率 <span class="calc-mark" :title="RATIO_TIP">◆</span></th><th>输出 Token</th><th>总 Token</th><th>Credit</th><th>平均耗时 <span class="calc-mark" :title="AVG_TIP">◆</span></th><th :title="TPS_TIP">解码速度 <span class="calc-mark">◆</span></th></tr></thead>
       <tbody>
         <template v-for="(row,i) in flatRows" :key="i">
           <tr v-if="row.prov&&row.mdl===null&&row.summary" class="prov-row"><td style="font-weight:800">{{row.prov}} · 平台汇总</td><td>{{n(row.summary.requests)}}</td><td>{{tok(row.summary.prompt_tokens)}}</td><td>{{tok(row.summary.cache_read_tokens)}}</td><td>{{pct(row.summary.cache_hit_ratio)}}</td><td>{{tok(row.summary.completion_tokens)}}</td><td>{{tok(row.summary.total_tokens)}}</td><td>{{money(row.summary.credit)}}</td><td>{{ms(row.summary.avg_duration_ms)}}</td><td>{{fmtTps(row.summary.tps)}}</td></tr>

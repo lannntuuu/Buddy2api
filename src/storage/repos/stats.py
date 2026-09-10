@@ -54,9 +54,10 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
                COALESCE(SUM(COALESCE(cache_creation_tokens, 0)), 0) AS cache_creation_tokens,
                COALESCE(SUM(credit), 0) AS credit,
                COALESCE(SUM(duration_ms), 0) AS duration_ms,
-               COALESCE(SUM(CASE WHEN duration_ms > 0 AND total_tokens > 0
-                                THEN total_tokens * 1000.0 / duration_ms END), 0) AS tps_sum,
-               SUM(CASE WHEN duration_ms > 0 AND total_tokens > 0 THEN 1 ELSE 0 END) AS tps_n
+               COALESCE(SUM(CASE WHEN first_token_ms IS NOT NULL
+                                THEN COALESCE(completion_tokens, 0) END), 0) AS decode_tokens,
+               COALESCE(SUM(CASE WHEN first_token_ms IS NOT NULL
+                                THEN MAX(0, COALESCE(duration_ms, 0) - first_token_ms) END), 0) AS decode_ms
         FROM logs{sql_where}
         GROUP BY provider, model, date
         ORDER BY date DESC, provider ASC, model ASC
@@ -75,8 +76,8 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
             "cache_creation_tokens": 0,
             "credit": 0.0,
             "duration_ms": 0,
-            "tps_sum": 0.0,
-            "tps_n": 0,
+            "decode_tokens": 0,
+            "decode_ms": 0,
             "cache_hit_ratio": 0.0,
         }
 
@@ -89,8 +90,8 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
         target["cache_creation_tokens"] += int(row["cache_creation_tokens"] or 0)
         target["credit"] += float(row["credit"] or 0)
         target["duration_ms"] += int(row["duration_ms"] or 0)
-        target["tps_sum"] += float(row["tps_sum"] or 0)
-        target["tps_n"] += int(row["tps_n"] or 0)
+        target["decode_tokens"] += int(row["decode_tokens"] or 0)
+        target["decode_ms"] += int(row["decode_ms"] or 0)
 
     def _finalize(s: dict) -> dict:
         requests = max(1, s["requests"])
@@ -100,7 +101,11 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
             if s["prompt_tokens"] > 0
             else None
         )
-        tps = round(s["tps_sum"] / s["tps_n"], 1) if s["tps_n"] > 0 else None
+        tps = (
+            round(s["decode_tokens"] * 1000 / s["decode_ms"], 1)
+            if s["decode_ms"] > 0
+            else None
+        )
         return {
             "requests": s["requests"],
             "prompt_tokens": s["prompt_tokens"],
@@ -132,7 +137,7 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
         daily_ratio = (
             (daily_cache_read / daily_prompt * 100) if daily_prompt > 0 else None
         )
-        tps_n = int(row["tps_n"] or 0)
+        d_ms = int(row["decode_ms"] or 0)
         model_bucket["daily"].append(
             {
                 "date": row["date"],
@@ -146,7 +151,11 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
                 "avg_duration_ms": (
                     int(row["duration_ms"] / row["requests"]) if row["requests"] else 0
                 ),
-                "tps": (round(float(row["tps_sum"] or 0) / tps_n, 1) if tps_n else None),
+                "tps": (
+                    round(int(row["decode_tokens"] or 0) * 1000 / d_ms, 1)
+                    if d_ms > 0
+                    else None
+                ),
                 "cache_hit_ratio": (
                     round(daily_ratio, 2) if daily_ratio is not None else None
                 ),

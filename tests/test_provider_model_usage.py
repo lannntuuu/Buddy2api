@@ -24,7 +24,8 @@ def admin_env(monkeypatch):
 
 
 def _add_log(provider: str, model: str, created_at: int, *, prompt: int = 100,
-             completion: int = 50, credit: float = 0.1, duration_ms: int = 1000):
+             completion: int = 50, credit: float = 0.1, duration_ms: int = 1000,
+             first_token_ms: int | None = None):
     db.record_request({
         "api_key_id": None,
         "api_key_name": None,
@@ -39,6 +40,7 @@ def _add_log(provider: str, model: str, created_at: int, *, prompt: int = 100,
         "credit": credit,
         "finish_reason": "stop",
         "duration_ms": duration_ms,
+        "first_token_ms": first_token_ms,
         "status_code": 200,
         "error_msg": "",
         "created_at": created_at,
@@ -108,26 +110,42 @@ def test_usage_filters_by_provider_model_and_time(isolated_db):
     assert total_rows == 3  # 40 天前的被排除
 
 
-def test_usage_tps_daily_and_summary(isolated_db):
+def test_usage_tps_pooled_decode_speed(isolated_db):
     today = date.today()
-    # 100 tok / 1s = 100 t/s; 100 tok / 2s = 50 t/s → 逐请求平均 75 t/s
-    _add_log("qclaw", "m1", _ts(today), prompt=50, completion=50, duration_ms=1000)
-    _add_log("qclaw", "m1", _ts(today), prompt=50, completion=50, duration_ms=2000)
-    # 0 Token 的请求不计入速度(不稀释平均)
-    _add_log("qclaw", "m1", _ts(today), prompt=0, completion=0, duration_ms=1000)
+    # DSH 池化口径:Σ Output Token ÷ Σ 解码时长(解码=耗时−首 token 时间,仅流式)
+    # A: 150 tok / (3000-1000)ms = 150 / 2.0s
+    _add_log("qclaw", "m1", _ts(today), prompt=100, completion=150, duration_ms=3000, first_token_ms=1000)
+    # B: 100 tok / (2000-1500)ms = 100 / 0.5s
+    _add_log("qclaw", "m1", _ts(today), prompt=100, completion=100, duration_ms=2000, first_token_ms=1500)
+    # C: 非流式(无 first_token_ms)→ 不计入
+    _add_log("qclaw", "m1", _ts(today), prompt=100, completion=500, duration_ms=1000)
     result = db.get_provider_model_usage({})
     m1 = result["providers"]["qclaw"]["models"]["m1"]
     today_row = [d for d in m1["daily"] if d["date"] == today.isoformat()][0]
-    assert today_row["tps"] == 75.0
-    assert m1["summary"]["tps"] == 75.0
-    assert result["providers"]["qclaw"]["summary"]["tps"] == 75.0
-    assert result["totals"]["tps"] == 75.0
+    # 池化: 250 tok / 2.5s = 100.0 t/s(不是逐请求 75/200 的算术平均)
+    assert today_row["tps"] == 100.0
+    assert m1["summary"]["tps"] == 100.0
+    assert result["providers"]["qclaw"]["summary"]["tps"] == 100.0
+    assert result["totals"]["tps"] == 100.0
+
+
+def test_usage_tps_negative_decode_clamped_to_zero(isolated_db):
+    today = date.today()
+    # 换号重试时 duration_ms 基线在 last attempt、first_token_ms 基线在请求起点,
+    # 差值可为负 → DSH 同款 max(0,·) 钳零:该请求的 Token 仍池化,时长记 0
+    _add_log("qclaw", "m1", _ts(today), prompt=100, completion=150, duration_ms=3000, first_token_ms=1000)
+    _add_log("qclaw", "m1", _ts(today), prompt=100, completion=10, duration_ms=1000, first_token_ms=1200)
+    result = db.get_provider_model_usage({})
+    m1 = result["providers"]["qclaw"]["models"]["m1"]
+    # (150+10) / 2.0s = 80.0
+    assert m1["summary"]["tps"] == 80.0
 
 
 def test_usage_tps_none_without_valid_samples(isolated_db):
     today = date.today()
-    # duration_ms=0 → 无有效速度样本(尽管 total_tokens>0)
-    _add_log("qclaw", "m1", _ts(today), duration_ms=0)
+    # 只有非流式样本,或解码时长全被钳 0(采样了但 Σdecode=0)→ 不产出速度
+    _add_log("qclaw", "m1", _ts(today), prompt=100, completion=500, duration_ms=1000)
+    _add_log("qclaw", "m1", _ts(today), prompt=100, completion=10, duration_ms=1000, first_token_ms=1200)
     result = db.get_provider_model_usage({})
     m1 = result["providers"]["qclaw"]["models"]["m1"]
     assert m1["daily"][0]["tps"] is None
