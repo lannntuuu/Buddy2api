@@ -212,14 +212,31 @@ def _is_under(path: Path, roots: list[Path]) -> bool:
 def _upsert_workbuddy(parsed: dict, auth_path: str) -> str:
     parsed = dict(parsed)
     parsed["provider"] = "workbuddy"
-    extra = parsed.get("extra") if isinstance(parsed.get("extra"), dict) else {}
-    extra["auth_path"] = auth_path
-    parsed["extra"] = extra
     uid = str(parsed.get("uid") or "")
+    extra = parsed.get("extra") if isinstance(parsed.get("extra"), dict) else {}
+
+    # 固化：把 .info 内容复制进 Buddy2api 自己的目录，避免依赖桌面端那个会被
+    # 切换登录覆盖的 workbuddy-desktop.info。auth_path 改为指向固化副本。
+    snapshot_ok = bool(uid)
+    if snapshot_ok:
+        try:
+            from accounts import workbuddy_snapshot as _snap
+
+            stored = _snap.ensure_snapshot(uid, Path(auth_path))
+            extra["auth_path"] = str(stored)
+            extra["snapshot"] = True
+        except Exception:  # noqa: BLE001
+            snapshot_ok = False
+    if not snapshot_ok:
+        extra["auth_path"] = auth_path
+
+    parsed["extra"] = extra
     if uid:
         for row in db.list_accounts(provider="workbuddy"):
             if str(row.get("uid") or "") == uid:
                 patch = {key: parsed[key] for key in _TOKEN_FIELDS if key in parsed}
+                if snapshot_ok:
+                    patch["extra"] = extra
                 db.update_account(row["id"], patch)
                 return "updated"
     db.add_account(parsed)

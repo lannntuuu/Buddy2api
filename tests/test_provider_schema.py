@@ -37,10 +37,20 @@ def test_env_var_overrides_db(monkeypatch):
 def test_set_enabled_channels_persists_and_lock_first(monkeypatch, isolated_db):
     """UI write path: env unset, db.set_setting wins."""
     import providers
+    from providers import custom_channels
 
+    # Note: do NOT stub db.get_setting to default here (same reason as
+    # test_set_enabled_channels_with_order): a stub would hide the seeded
+    # gmi definition from `_known_set()`, and the write path below must be
+    # able to read it back from the real settings store.
     monkeypatch.delenv("CB_GATEWAY_PROVIDERS", raising=False)
-    _fresh_default(monkeypatch)
     assert providers.env_locked() is False
+    # gmi is no longer a reserved built-in id (spec 39): it is addressable
+    # only while a definition for it exists, exactly like bailian. Seed it so
+    # the channel is known to the write path.
+    custom_channels.seed_initial_definitions()
+    custom_channels.invalidate_cache(None)
+
     saved = providers.set_enabled_channels(["gmi", "qwenwork"])
     # workbuddy forced on, then user's order preserved with gmi / qwenwork.
     # set_enabled_channels returns (enabled_ids, ordered_full); ordered is index 1.
@@ -132,6 +142,107 @@ def test_bailian_is_known_and_opt_in(monkeypatch, isolated_db):
     monkeypatch.setenv("CB_GATEWAY_PROVIDERS", "workbuddy,bailian")
     assert providers.get_provider("bailian") is not None
     assert providers.is_channel_enabled("bailian") is True
+
+
+def test_gmi_is_non_reserved_and_opt_in(monkeypatch, isolated_db):
+    """Spec 39: gmi mirrors bailian — non-reserved, reachable via definition, opt-in.
+
+    `gmi` used to be hardcoded in `ChannelId` / `KNOWN_CHANNEL_IDS`, which made
+    the seed channel undeletable: `DELETE /admin/channels/custom/gmi` cleared
+    the definition correctly, but `known_channel_ids()` (built-ins ∪ custom)
+    resurrected the id from the built-in list, so `/admin/channels` kept
+    rendering a zombie row. It is now purely data-driven, exactly like bailian.
+
+    This is the symmetric counterpart of `test_bailian_is_known_and_opt_in` —
+    the bailian assertion existed, the gmi one did not, which is why the
+    residue went unnoticed.
+    """
+    import providers
+    from providers import custom_channels
+
+    # Seed gmi (and bailian) so the custom definition exists in the settings key.
+    custom_channels.seed_initial_definitions()
+    custom_channels.invalidate_cache(None)
+
+    # Not a reserved literal anymore — deletable/recreatable as a normal
+    # custom channel id.
+    assert "gmi" not in providers.KNOWN_CHANNEL_IDS
+    # Not in the default ON set (opt-in).
+    assert "gmi" not in providers.DEFAULT_PROVIDER_IDS
+    # Opt-in via env → provider available (reachability comes from the
+    # definition, not from a built-in registration).
+    monkeypatch.setenv("CB_GATEWAY_PROVIDERS", "workbuddy,gmi")
+    assert providers.get_provider("gmi") is not None
+    assert providers.is_channel_enabled("gmi") is True
+
+
+def test_deleted_gmi_definition_does_not_resurrect_from_builtins(isolated_db):
+    """THE spec-39 regression guard: a deleted seed channel must stay deleted.
+
+    `known_channel_ids()` is built-ins ∪ custom definitions. While `gmi` sat in
+    the built-in `KNOWN_CHANNEL_IDS`, removing its definition could never remove
+    the id, so the admin UI kept showing an undeletable row. This test drives
+    the real delete path (`custom_channels.delete_definition`) and asserts the
+    id is gone from `known_channel_ids()` — it fails loudly if anyone hardcodes
+    a seed id back into the built-in list.
+    """
+    import providers
+    from providers import custom_channels
+
+    # Ensure a gmi definition exists: seed it, or upsert a temp one when the
+    # settings key already exists without gmi (e.g. a deployment that already
+    # deleted the seed — the exact state this guard protects).
+    custom_channels.seed_initial_definitions()
+    custom_channels.invalidate_cache(None)
+    if custom_channels.get_definition("gmi") is None:
+        custom_channels.upsert_definition(
+            {
+                "id": "gmi",
+                "display_name": "GMI Cloud",
+                "base_url": "https://api.gmi-serving.com/v1",
+                "models": ["zai-org/GLM-5.3-Flash"],
+                "aliases": {"auto": "zai-org/GLM-5.3-Flash"},
+                "source": "test",
+            }
+        )
+        custom_channels.invalidate_cache(None)
+
+    # Precondition: with a definition present, gmi is addressable.
+    assert custom_channels.get_definition("gmi") is not None
+    assert "gmi" in providers.known_channel_ids()
+
+    # The admin deletes the seed channel.
+    assert custom_channels.delete_definition("gmi") is True
+
+    # The deleted id must NOT come back from the built-in list.
+    assert "gmi" not in providers.known_channel_ids()
+    assert providers.is_known_channel("gmi") is False
+    # And it is no longer resolvable to a provider.
+    assert providers.get_provider("gmi") is None
+
+    # A stale `gmi` left in enabled_channels / channel_order (old DB) is
+    # filtered out by `_read_db_list`, so no ghost entry leaks into reads.
+    db.set_setting("enabled_channels", ["workbuddy", "gmi"])
+    db.set_setting("channel_order", ["workbuddy", "gmi"])
+    assert "gmi" not in providers.enabled_provider_ids()
+
+    # Not banned, just not reserved: the admin may recreate the same id.
+    assert "gmi" not in custom_channels.reserved_ids()
+    custom_channels.upsert_definition(
+        {
+            "id": "gmi",
+            "display_name": "GMI Cloud",
+            "base_url": "https://api.gmi-serving.com/v1",
+            "models": ["zai-org/GLM-5.3-Flash"],
+            "aliases": {"auto": "zai-org/GLM-5.3-Flash"},
+            "source": "test",
+        }
+    )
+    custom_channels.invalidate_cache(None)
+    assert "gmi" in providers.known_channel_ids()
+
+    # Leave no cached provider behind for later tests (the cache is process-global).
+    custom_channels.invalidate_cache(None)
 
 
 def test_accounts_and_keys_have_channel_columns(isolated_db):

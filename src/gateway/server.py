@@ -370,6 +370,12 @@ def _resolve_config() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
     db_path = db_cfg.get("path")
     if db_path and not os.environ.get("CB_GATEWAY_DB_PATH"):
         os.environ["CB_GATEWAY_DB_PATH"] = str(db_path)
+
+    # [workbuddy] snapshot_dir → CB_WORKBUDDY_SNAPSHOT_DIR（固化副本目录）。
+    wb_cfg = cfg.get("workbuddy") if isinstance(cfg.get("workbuddy"), dict) else {}
+    wb_snapshot = wb_cfg.get("snapshot_dir")
+    if wb_snapshot and not os.environ.get("CB_WORKBUDDY_SNAPSHOT_DIR"):
+        os.environ["CB_WORKBUDDY_SNAPSHOT_DIR"] = str(Path(wb_snapshot).expanduser())
     return ap, args
 
 

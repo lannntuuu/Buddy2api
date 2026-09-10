@@ -1,5 +1,5 @@
 import {I} from './icons.js';
-import {toastActionFor} from './api.js';
+import {api,toastActionFor} from './api.js';
 import dash from './pages/dashboard.js';
 import quota from './pages/quota.js';
 import keys from './pages/keys.js';

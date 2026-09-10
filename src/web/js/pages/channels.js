@@ -176,8 +176,10 @@ export default {props:['token','toast','invalidateChannels'],components:{'login-
 
   // ────────── accounts list (full table from accounts.js) ──────────
   const accs=ref([]),accLd=ref(false),accBusy=ref({}),test=ref(null),tl=ref(0),filters=reactive({q:'',status:'all',sort:'priority',provider:'all'});
-  function hydrate(a){return {...a,_weight:a.weight||1,_priority:a.priority||0,_creditSnapshot:a.credit_snapshot||a.credit_limit||0,_baseWeight:a.weight||1,_basePriority:a.priority||0,_baseCreditSnapshot:a.credit_snapshot||a.credit_limit||0}}
-  function dirty(a){return Number(a._weight||1)!==Number(a._baseWeight||1)||Number(a._priority||0)!==Number(a._basePriority||0)||Number(a._creditSnapshot||0)!==Number(a._baseCreditSnapshot||0)}
+  // 每通道手动锁定账号(pin):选择框在分组头内,默认 "auto" = 按权重/优先级调度
+  const pins=ref({}),pinLd=ref({});
+  function hydrate(a){return {...a,_weight:a.weight||1,_priority:a.priority||0,_creditSnapshot:a.credit_snapshot||a.credit_limit||0,_baseWeight:a.weight||1,_basePriority:a.priority||0,_baseCreditSnapshot:a.credit_snapshot||a.credit_limit||0,_nickname:a.nickname||a.name||'',_baseNickname:a.nickname||a.name||''}}
+  function dirty(a){return Number(a._weight||1)!==Number(a._baseWeight||1)||Number(a._priority||0)!==Number(a._basePriority||0)||Number(a._creditSnapshot||0)!==Number(a._baseCreditSnapshot||0)||String(a._nickname||'')!==String(a._baseNickname||'')}
   const busyKey=(id,k)=>busyKeyOf(accBusy,id,k),withBusy=(a,k,fn)=>withBusyR(accBusy,a.id,k,fn);
   // 通道健康观测面(35号 §2.5):P0 行徽标,数据来自 /admin/channel-health
   const health=ref({});
@@ -193,6 +195,44 @@ export default {props:['token','toast','invalidateChannels'],components:{'login-
     catch(e){p.toast(apiErr(e),'err')}
     accLd.value=false;
   }
+  async function loadPins(){
+    try{pins.value=(await api.get('/admin/accounts/pin',p.token)).pins||{}}
+    catch(e){pins.value={};p.toast(apiErr(e,'读取锁定状态失败'),'err')}
+  }
+  // 刷新列表:重载账号与锁定状态。
+  // 注意:WorkBuddy 桌面端改用户名只改服务器端,不会回写本机 *.info 凭据文件,
+  // 也没有 API 返回当前昵称 —— 所以这里不做自动同步昵称,改名请在行内昵称框直接编辑后保存。
+  async function refreshAll(){
+    if(accLd.value)return;
+    accLd.value=true;
+    await Promise.all([loadAccounts(),loadPins()]);
+    accLd.value=false;
+  }
+  // 分组头内的手动锁定选择框:选中某账号 → 该通道后续请求只走它;
+  // 选 "auto" → 取消锁定,改回按权重/优先级调度。uid 脱敏展示。
+  async function setPin(provider, aid){
+    pinLd.value={...pinLd.value,[provider]:true};
+    try{
+      const r=await api.post('/admin/accounts/pin',{provider,account_id:aid?Number(aid):null},p.token);
+      pins.value=r.pins||{};
+      p.toast(aid?('已锁定 '+provider+' 到所选账号'):(provider+' 已取消锁定(按权重调度)'));
+    }catch(e){await loadPins();p.toast(apiErr(e,'设置失败'),'err')}
+    const o={...pinLd.value};delete o[provider];pinLd.value=o;
+  }
+  // 按通道分组(仅含当前筛选后可见的账号),通道顺序沿用 list(登录型在前)。
+  const grouped=computed(()=>{
+    const rows=visibleAccounts.value;
+    const byProv={};
+    for(const a of rows){ const pk=a.provider||'workbuddy'; (byProv[pk] || (byProv[pk]=[])).push(a); }
+    const order=list.value.map(c=>c.id);
+    const ordered=Object.keys(byProv).sort((x,y)=>{
+      const ix=order.indexOf(x),iy=order.indexOf(y);
+      return (ix<0?999:ix)-(iy<0?999:iy);
+    });
+    return ordered.map(prov=>({provider:prov, accounts:byProv[prov]}));
+  });
+  function accName(a){return a.nickname||a.name||('账号'+a.id)}
+  function provName(id){const c=list.value.find(x=>x.id===id);return c?(c.display_name||c.id):id}
   function creditPct(a){return Math.max(0,Math.min(100,Number(a.credit_used_pct||0)))+'%'}
   function tokenLife(a){
     if(a.account_type==='api_key'||a.provider&&KEY_PANEL_META.value[a.provider])return '-';
@@ -218,14 +258,17 @@ export default {props:['token','toast','invalidateChannels'],components:{'login-
   });
   async function ref2(a){await withBusy(a,'refresh',async()=>{try{await api.post('/admin/accounts/'+a.id+'/refresh',{},p.token,{timeoutMs:60000});p.toast('刷新成功');await loadAccounts()}catch(e){p.toast(apiErr(e,'刷新失败'),'err')}})}
   async function saveMeta(a){await withBusy(a,'save',async()=>{try{const creditSnapshot=Math.max(0,Number(a._creditSnapshot)||0);const body={weight:parseInt(a._weight)||1,priority:parseInt(a._priority)||0};if(Number(a._creditSnapshot||0)!==Number(a._baseCreditSnapshot||0))body.credit_limit=creditSnapshot;
+    const newNick=String(a._nickname||'').trim();
+    if(newNick!==String(a._baseNickname||''))body.nickname=newNick; // 后端会同步 name
     // 契约 3/6:PUT 返回 account 行对象 → 本地回写;缺行对象或形状不符 → 回退整表 loadAccounts()
     const r=await api.put('/admin/accounts/'+a.id,body,p.token);
     const row=respRow(r,'account',x=>x&&x.id!=null);
     if(row&&patchRowById(accs.value,hydrate(row))){
       const nu=accs.value.find(x=>Number(x.id)===Number(a.id));
-      if(nu){nu._baseWeight=body.weight;nu._basePriority=body.priority;if(body.credit_limit!==undefined)nu._baseCreditSnapshot=creditSnapshot}
+      if(nu){nu._baseWeight=body.weight;nu._basePriority=body.priority;if(body.credit_limit!==undefined)nu._baseCreditSnapshot=creditSnapshot;
+        if(body.nickname!==undefined){nu.nickname=body.nickname;nu.name=body.nickname;nu._nickname=body.nickname;nu._baseNickname=body.nickname}}
     }else{await loadAccounts()}
-    p.toast(body.credit_limit!==undefined?'已保存余额快照':'已保存');
+    p.toast(body.nickname!==undefined?'已更新昵称':'已保存');
   }catch(e){p.toast(apiErr(e,'保存失败'),'err')}})}
   async function toggle(a){await withBusy(a,'toggle',async()=>{try{
     // 契约 3/6:行对象本地回写,失败/形状不符回退整表
@@ -271,7 +314,7 @@ export default {props:['token','toast','invalidateChannels'],components:{'login-
   }
   onUnmounted(destroySortable);
   onMounted(async()=>{
-    await Promise.all([loadList(),loadCC(),loadAccounts()]);
+    await Promise.all([loadList(),loadCC(),loadAccounts(),loadPins()]);
     refreshKeyMeta();
     // 选中后默认做一次本机检测（登录型通道；密钥型自带面板）
     if(activeChannel.value&&activeChannel.value!=='traesolo')await discover('');
@@ -300,7 +343,7 @@ export default {props:['token','toast','invalidateChannels'],components:{'login-
   });
   function onEnvInput(){um.value.envTouched=true}
 
-  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,loginChannels,apikeyChannels,rowKey,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccDelete,um,openKeyModal,umEditFromInfo,umClose,umSave,addAliasRow,rmAliasRow,onEnvInput,onModalImported,openInfo,discover,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,health,healthClass,healthTitle,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I,keyPanelMetaById,loginTbody,apikeyTbody}
+  return{list,ld,err,envLocked,activeChannel,toggling,loadList,toggleChannel,activeCh,loginChannels,apikeyChannels,rowKey,ccList,ccLd,ccBusy,ccErr,ccForm,ccOf,ccDelete,um,openKeyModal,umEditFromInfo,umClose,umSave,addAliasRow,rmAliasRow,onEnvInput,onModalImported,openInfo,discover,accs,accLd,visibleAccounts,filters,busyKey,dirty,ref2,saveMeta,toggle,testOne,del,loadAccounts,loadPins,refreshAll,setPin,pins,pinLd,grouped,accName,provName,health,healthClass,healthTitle,credit,creditPct,tokenLife,test,tl,sa,ai,nm,adding,add,fmt,tok,I,keyPanelMetaById,loginTbody,apikeyTbody}
 },template:`
 <div>
   <div class="phead"><h1>通道管理</h1><p>定义通道 · 管理凭证 · 启用开关</p></div>
@@ -345,12 +388,30 @@ export default {props:['token','toast','invalidateChannels'],components:{'login-
   <!-- ── Card D: credentials list (global summary, independent of the selected channel) ── -->
   <div style="margin-top:16px">
   <div class="sec-h" style="margin-bottom:8px">凭证列表<span class="hint" style="margin-left:8px">全部通道的账号与密钥汇总;同一密钥型通道可并存多把 Key,按权重/优先级轮换</span></div>
-  <div class="tbar"><button class="btn s" @click="loadAccounts" :disabled="accLd"><span v-html="I.refresh"></span>{{accLd?'刷新中':'刷新列表'}}</button><button class="btn s" @click="sa=true"><span v-html="I.plus"></span>高级手动添加</button><div class="spacer"></div><span class="tag" v-if="accs.length">{{visibleAccounts.length}}/{{accs.length}}个 · {{accs.filter(a=>a.status==='active').length}}活跃</span></div>
+  <div class="tbar"><button class="btn s" @click="refreshAll" :disabled="accLd"><span v-html="I.refresh"></span>{{accLd?'刷新中':'刷新列表'}}</button><button class="btn s" @click="sa=true"><span v-html="I.plus"></span>高级手动添加</button><div class="spacer"></div><span class="tag" v-if="accs.length">{{visibleAccounts.length}}/{{accs.length}}个 · {{accs.filter(a=>a.status==='active').length}}活跃</span></div>
   <div v-if="accLd" class="load"><div class="spin"></div></div>
-  <div class="card" v-else-if="accs.length"><div class="card-p" style="padding-bottom:0"><div class="control-row"><input class="searchbox" v-model="filters.q" placeholder="搜索账号 / UID / 域名"/><select class="selectctl" v-model="filters.status"><option value="all">全部状态</option><option value="active">active</option><option value="inactive">inactive</option><option value="expired">expired</option></select><select class="selectctl" v-model="filters.provider"><option value="all">全部通道</option><option v-for="c in list" :key="'fp-'+c.id" :value="c.id">{{c.display_name||c.id}}</option></select><select class="selectctl" v-model="filters.sort"><option value="priority">优先级 / 权重</option><option value="requests">请求数高到低</option><option value="used">累计已用高到低</option></select><div class="spacer"></div><span class="tag">当前 {{visibleAccounts.length}} 条</span></div></div><div class="table-scroll"><table><thead><tr><th>账号</th><th>通道</th><th>UID</th><th>状态</th><th>权重</th><th>优先级</th><th>余额快照</th><th>Token 有效期</th><th>请求</th><th>Token</th><th>累计已用</th><th></th></tr></thead><tbody>
-    <tr v-for="a in visibleAccounts" :key="a.id"><td style="font-weight:600"><span :class="healthClass(a.provider)" :title="healthTitle(a.provider)"></span> {{a.nickname||a.name}} <span class="tag warn" v-if="dirty(a)">未保存</span></td><td><span class="tag">{{a.provider||'workbuddy'}}</span></td><td class="mono">{{a.uid?.slice(0,8)}}…</td><td><span class="badge" :class="a.status">{{a.status}}</span></td><td><input class="numctl" v-model.number="a._weight" type="number" min="1" max="100"/></td><td><input class="numctl" v-model.number="a._priority" type="number" min="-100" max="100"/></td><td class="credit-cell"><input class="numctl credit" v-model.number="a._creditSnapshot" type="number" min="0" step="0.01" placeholder="0"/><div class="credit-meta" v-if="a.credit_snapshot>0">余 {{credit(a.credit_remaining)}} · 已用 {{creditPct(a)}}</div><div class="credit-meta" v-else-if="a.total_credits>0">累计消耗(估算) {{credit(a.total_credits)}}</div><div class="credit-meta" v-else>官方失败时可手动校准</div></td><td>{{tokenLife(a)}}</td><td>{{a.total_requests}}</td><td>{{tok(a.total_tokens)}}</td><td>{{credit(a.total_credits)}}</td><td><div class="ops"><button class="btn s" @click="saveMeta(a)" :disabled="!dirty(a)||busyKey(a.id,'save')">{{busyKey(a.id,'save')?'保存中':'保存'}}</button><button class="btn s plain" @click="toggle(a)" :disabled="busyKey(a.id,'toggle')">{{busyKey(a.id,'toggle')?'处理中':(a.status==='active'?'禁用':'启用')}}</button><button class="btn s" @click="testOne(a)" :disabled="tl===a.id">{{tl===a.id?'测试中':'测试'}}</button><button class="btn s" @click="ref2(a)" :disabled="busyKey(a.id,'refresh')">{{busyKey(a.id,'refresh')?'刷新中':'刷新'}}</button><button class="btn s danger" @click="del(a)">删除</button></div></td></tr>
-    <tr v-if="!visibleAccounts.length"><td colspan="12" class="empty">没有匹配的账号</td></tr>
-  </tbody></table></div></div>
+  <div class="card" v-else-if="accs.length"><div class="card-p" style="padding-bottom:0"><div class="control-row"><input class="searchbox" v-model="filters.q" placeholder="搜索账号 / UID / 域名"/><select class="selectctl" v-model="filters.status"><option value="all">全部状态</option><option value="active">active</option><option value="inactive">inactive</option><option value="expired">expired</option></select><select class="selectctl" v-model="filters.sort"><option value="priority">优先级 / 权重</option><option value="requests">请求数高到低</option><option value="used">累计已用高到低</option></select><div class="spacer"></div><span class="tag">当前 {{visibleAccounts.length}} 条</span></div></div><div class="table-scroll"><table><thead><tr><th>账号</th><th>UID</th><th>状态</th><th>权重</th><th>优先级</th><th>余额快照</th><th>Token 有效期</th><th>请求</th><th>Token</th><th>累计已用</th><th></th></tr></thead>
+    <template v-for="grp in grouped" :key="grp.provider">
+      <tbody>
+      <tr class="grp-h chan">
+        <td colspan="11" style="background:var(--bg-sunken);font-weight:600;font-size:12px;color:var(--fg-2);padding:8px 12px">
+          <span class="tag" style="margin-right:8px">{{grp.provider}}</span>{{provName(grp.provider)}}
+          <span class="hint" style="font-weight:400;margin-left:8px">手动指定账号 · 选择后该通道只走此账号,选「自动」改回按权重/优先级调度</span>
+          <span style="float:right;display:inline-flex;align-items:center;gap:6px">
+            <select class="selectctl" :disabled="pinLd[grp.provider]" v-model="pins[grp.provider]" @change="setPin(grp.provider, pins[grp.provider])">
+              <option value="">自动(按权重调度)</option>
+              <option v-for="a in grp.accounts" :key="'pin-'+a.id" :value="a.id" :disabled="a.status!=='active'">{{accName(a)}} ({{a.uid?.slice(0,8)}}…)</option>
+            </select>
+            <span v-if="pinLd[grp.provider]" class="hint">保存中…</span>
+          </span>
+        </td>
+      </tr>
+      <tr v-for="a in grp.accounts" :key="a.id"><td style="font-weight:600;white-space:nowrap"><span :class="healthClass(a.provider)" :title="healthTitle(a.provider)"></span> <input class="textctl" v-model="a._nickname" placeholder="昵称(可改)" :title="'当前昵称；改名后点保存。桌面端改的名字本机读不到，可在此直接改'"/><span class="tag warn" v-if="dirty(a)">未保存</span><span class="tag pri" v-if="Number(pins[a.provider])===Number(a.id)" style="margin-left:6px">已锁定</span></td><td class="mono">{{a.uid?.slice(0,8)}}…</td><td><span class="badge" :class="a.status">{{a.status}}</span></td><td><input class="numctl" v-model.number="a._weight" type="number" min="1" max="100"/></td><td><input class="numctl" v-model.number="a._priority" type="number" min="-100" max="100"/></td><td class="credit-cell"><input class="numctl credit" v-model.number="a._creditSnapshot" type="number" min="0" step="0.01" placeholder="0"/><div class="credit-meta" v-if="a.credit_snapshot>0">余 {{credit(a.credit_remaining)}} · 已用 {{creditPct(a)}}</div><div class="credit-meta" v-else-if="a.total_credits>0">累计消耗(估算) {{credit(a.total_credits)}}</div><div class="credit-meta" v-else>官方失败时可手动校准</div></td><td>{{tokenLife(a)}}</td><td>{{a.total_requests}}</td><td>{{tok(a.total_tokens)}}</td><td>{{credit(a.total_credits)}}</td><td><div class="ops"><button class="btn s" @click="saveMeta(a)" :disabled="!dirty(a)||busyKey(a.id,'save')">{{busyKey(a.id,'save')?'保存中':'保存'}}</button><button class="btn s plain" @click="toggle(a)" :disabled="busyKey(a.id,'toggle')">{{busyKey(a.id,'toggle')?'处理中':(a.status==='active'?'禁用':'启用')}}</button><button class="btn s" @click="testOne(a)" :disabled="tl===a.id">{{tl===a.id?'测试中':'测试'}}</button><button class="btn s" @click="ref2(a)" :disabled="busyKey(a.id,'refresh')">{{busyKey(a.id,'refresh')?'刷新中':'刷新'}}</button><button class="btn s danger" @click="del(a)">删除</button></div></td></tr>
+      <tr v-if="!grp.accounts.length"><td colspan="11" class="empty">该通道下没有匹配的账号</td></tr>
+      </tbody>
+    </template>
+    <tr v-if="!visibleAccounts.length"><td colspan="11" class="empty">没有匹配的账号</td></tr></tbody>
+  </table></div></div>
   <div class="card card-p empty" v-else><div class="em">🔌</div><p>暂无账号 · 登录型平台在通道行内「详情」浮窗的凭证区检测导入;密钥型通道通过浮窗添加密钥</p></div>
   </div>
 
