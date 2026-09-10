@@ -109,6 +109,7 @@ export function tok(v){v=Number(v||0);if(v>=1e9)return (v/1e9).toFixed(v>=1e10?1
 export function pct(v){v=Number(v||0);return v.toFixed(v%1?2:0)+'%'}
 export function money(v){return Number(v||0).toFixed(4).replace(/\.?0+$/,'')}
 export function ms(v){v=Number(v||0);return v>=1000?(v/1000).toFixed(1)+'s':v+'ms'}
+export function fmtTps(v){if(v==null)return '-';v=Number(v);return Number.isFinite(v)&&v>=0?Math.max(0,v).toFixed(1)+' t/s':'-'}
 export function fmt(t){return t?new Date(t*1000).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'-'}
 export function fmtSec(t){return t?new Date(t*1000).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}):'-'}
 

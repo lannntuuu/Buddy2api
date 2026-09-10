@@ -382,6 +382,12 @@ path = "/var/lib/buddy2api/codebuddy_gateway.db"
 只用于看趋势和做内部估算，不要拿它和上游真实余额做差额对账。
 TraeWork 想算需要先单独修它的 SSE 解析，未做。详见 `docs/credit-and-token-tracking.md`。
 
+管理页的「用量统计」与「请求日志」带 **速度（t/s）** 列（API 字段 `tps`），度量模型解码速度：
+
+- 分子是**输出 Token**（`completion_tokens`），分母是**解码时长** = `duration_ms − first_token_ms`（首 token 到完成的时间）；负差（如换号重试后两处基线不一致）钳 0。
+- 「请求日志」按请求显示，仅流式请求有值；非流式或解码时长为 0 显示 `-`。
+- 「用量统计」按**池化**口径聚合：`Σ 输出 Token ÷ Σ 解码时长`（总和 ÷ 总和，不是逐请求速度的算术平均）；窗口内 Σ 解码时长为 0 时接口返回 `null`、页面显示 `-`。
+
 ## 数据和安全
 
 - 账号 Token 写入前会加密。Windows 用系统 DPAPI。

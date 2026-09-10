@@ -44,23 +44,29 @@ GET /admin/provider-model-usage
               "prompt_tokens": 1200,
               "completion_tokens": 600,
               "total_tokens": 1800,
+              "cache_read_tokens": 300,
+              "cache_creation_tokens": 0,
               "credit": 0.18,
-              "avg_duration_ms": 950
+              "avg_duration_ms": 950,
+              "cache_hit_ratio": 25.0,
+              "tps": 111.1
             }
           ],
-          "summary": { "requests": 12, "prompt_tokens": 1200, "completion_tokens": 600, "total_tokens": 1800, "credit": 0.18, "avg_duration_ms": 950 }
+          "summary": { "requests": 12, "prompt_tokens": 1200, "completion_tokens": 600, "total_tokens": 1800, "cache_read_tokens": 300, "cache_creation_tokens": 0, "credit": 0.18, "duration_ms": 11400, "avg_duration_ms": 950, "cache_hit_ratio": 25.0, "tps": 111.1 }
         }
       },
-      "summary": { "requests": 12, "prompt_tokens": 1200, "completion_tokens": 600, "total_tokens": 1800, "credit": 0.18, "avg_duration_ms": 950 }
+      "summary": { "requests": 12, "prompt_tokens": 1200, "completion_tokens": 600, "total_tokens": 1800, "cache_read_tokens": 300, "cache_creation_tokens": 0, "credit": 0.18, "duration_ms": 11400, "avg_duration_ms": 950, "cache_hit_ratio": 25.0, "tps": 111.1 }
     }
   },
-  "totals": { "requests": 12, "prompt_tokens": 1200, "completion_tokens": 600, "total_tokens": 1800, "credit": 0.18, "avg_duration_ms": 950 }
+  "totals": { "requests": 12, "prompt_tokens": 1200, "completion_tokens": 600, "total_tokens": 1800, "cache_read_tokens": 300, "cache_creation_tokens": 0, "credit": 0.18, "duration_ms": 11400, "avg_duration_ms": 950, "cache_hit_ratio": 25.0, "tps": 111.1 }
 }
 ```
 
 - `daily` 按日期降序
 - `summary`：模型小计、平台汇总；`totals`：全局合计
 - `avg_duration_ms` = `SUM(duration_ms) / COUNT(*)`（加权平均）
+- `cache_hit_ratio` = `cache_read_tokens / prompt_tokens × 100`（百分数），输入 Token 为 0 时为 `null`
+- `tps` = 池化解码速度（t/s）= `Σ completion_tokens ÷ Σ 解码时长`；解码时长 = `duration_ms − first_token_ms`（仅流式请求，负差钳 0），Σ 解码时长为 0 时为 `null`
 
 ### 示例
 
@@ -82,7 +88,7 @@ Web UI 顶部导航新增 **「用量统计」** 页面：
 - 时间范围：今日 / 近 7 天 / 近 30 天 / 近一年快捷按钮 + 自定义日期区间（「今日」对应 `days=1`，区间为本机当天 00:00 至 23:59:59）；**页面默认显示今日**
 - 平台筛选：全部或具体平台；选定平台后出现该平台白名单内的模型下拉
 - 顶部三张汇总卡片（请求数 / Token 总量 / Credit 消耗）
-- 明细表：平台汇总行 → 模型小计行 → 每日明细行（日期降序）
+- 明细表：平台汇总行 → 模型小计行 → 每日明细行（日期降序）；列含**解码速度（t/s）**（◆ 标记的派生列，池化口径），无有效样本显示 `-`
 
 ## 数据说明
 
@@ -90,3 +96,4 @@ Web UI 顶部导航新增 **「用量统计」** 页面：
 - 查询范围受日志保留期 `CB_GATEWAY_LOG_RETENTION_DAYS`（默认 90 天）约束，超期日志已被清理
 - 失败请求同样记录 token/credit（如有），如只关心成功请求可先在「请求日志」页按状态筛后对照
 - 「请求日志」页每行带 **Client** 列：常态只显示发起客户端（如 `codex`），鼠标悬浮显示 `client client_version`；展开详情里可看完整的 Client 与 Client 版本，用于按客户端追溯请求来源；顶部搜索框支持按 `client` 或 `client_version` 关键词检索
+- 「用量统计」明细表与「请求日志」页均带 **速度（t/s）** 列（API 字段 `tps`）：前者是池化解码速度（`Σ 输出 Token ÷ Σ 解码时长`），后者是逐请求解码速度（`输出 Token ÷ 解码时长`，仅流式）；解码时长 = `duration_ms − first_token_ms`，负差钳 0；非流式或无有效样本显示 `-`
