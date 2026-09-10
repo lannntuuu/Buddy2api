@@ -196,6 +196,8 @@ def delete_definition(channel_id: str) -> bool:
     Purged residuals (so no page/dropdown keeps referencing a dead channel):
       * <cid>.models / <cid>.aliases   — 模型配置页覆盖键
       * <cid>.credit_rate / <cid>.reasoning — 同页倍率/思考档位
+      * <cid>.max_input_tokens / <cid>.max_input_tokens_by_model — 上下文限额
+        （不删的话,删后重建同 id 通道会静默继承旧限额）
       * unified_models entries mapping to this channel
       * enabled_channels / channel_order membership
     """
@@ -218,7 +220,16 @@ def _purge_channel_settings(cid: str) -> None:
         return
     # 1) per-channel overrides written by the 模型配置 page (workbuddy keeps
     #    legacy key names, but workbuddy is a builtin and never hits this).
-    for key in (f"{cid}.models", f"{cid}.aliases", f"{cid}.credit_rate", f"{cid}.reasoning"):
+    #    max_input_tokens 两键是上下文限额的通道级写点(model_limits.py),
+    #    与上面同属 <cid> 前缀残留,必须一并清掉。
+    for key in (
+        f"{cid}.models",
+        f"{cid}.aliases",
+        f"{cid}.credit_rate",
+        f"{cid}.reasoning",
+        f"{cid}.max_input_tokens",
+        f"{cid}.max_input_tokens_by_model",
+    ):
         try:
             db.delete_setting(key)
         except Exception:

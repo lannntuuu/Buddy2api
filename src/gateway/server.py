@@ -141,6 +141,45 @@ def _schedule_log_prune() -> None:
 
 
 # ============================================================
+# Orphan account rows — startup self-heal
+# ============================================================
+
+def purge_orphan_accounts() -> int:
+    """启动自愈:清扫「孤儿」账号行——provider 已不在 known_channel_ids()
+    (内置通道 ∪ 现存自定义定义)且 status 非 active 的行。
+
+    必须晚于 custom_channels.seed_initial_definitions() 运行:否则
+    fresh-install 时 gmi/bailian 定义尚未落库,其账号行会被误判孤儿。
+    active 孤儿行保留(用户可见可手动删,且它们本就无法被路由)。
+    返回清扫条数;任何异常吞掉只告警,不阻断启动。
+    """
+    try:
+        # 先读一次自定义定义:settings 表不可用时会抛异常 → 直接放弃清扫,
+        # 避免 known 集合退化成仅内置通道、把全部自定义通道误判孤儿。
+        from providers import custom_channels as _cc
+
+        _cc.list_definitions()
+        known = set(providers.known_channel_ids())
+        removed = 0
+        for row in db.list_accounts():
+            if row.get("provider") in known:
+                continue
+            if row.get("status") == "active":
+                continue
+            db.delete_account(row["id"])
+            removed += 1
+        if removed:
+            logger.warning(
+                "startup: purged %d orphan account row(s) (unknown provider, non-active)",
+                removed,
+            )
+        return removed
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("startup: orphan account purge failed: %s", exc)
+        return 0
+
+
+# ============================================================
 # FastAPI app assembly
 # ============================================================
 
@@ -149,8 +188,9 @@ import contextlib
 
 @contextlib.asynccontextmanager
 async def _lifespan(_app):
-    """Boot-time hooks. Currently only the custom-channel seed migration,
-    which is idempotent and runs whenever the settings key is absent."""
+    """Boot-time hooks: the custom-channel seed migration (idempotent, runs
+    whenever the settings key is absent), then the orphan-account sweep —
+    the sweep MUST run after the seed (see purge_orphan_accounts)."""
     # Defer imports: gateway deps / DB / custom_channels all touch the same
     # module graph; touching them at import time creates a cycle.
     from providers import custom_channels as _cc
@@ -159,6 +199,7 @@ async def _lifespan(_app):
         _cc.seed_initial_definitions()
     except Exception as exc:  # noqa: BLE001
         sys.stderr.write(f"[startup] custom-channels seed migration failed: {exc}\n")
+    purge_orphan_accounts()
     _schedule_log_prune()
     yield
 

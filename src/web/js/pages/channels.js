@@ -164,13 +164,14 @@ export default {props:['token','toast','invalidateChannels'],components:{'login-
   function ccOf(id){return ccList.value.find(x=>x.id===id)}
   // (ccStartCreate/ccStartEdit/ccSave 已迁入统一浮窗 um* 函数)
   async function ccDelete(c){
-    if(!confirm('删除自定义通道 '+c.id+' ？该通道账号行将全部置 inactive。'))return;
+    if(!confirm('删除自定义通道 '+c.id+' ？该通道账号行将被删除。'))return;
     try{
       await api.del('/admin/channels/custom/'+encodeURIComponent(c.id),p.token);
       // 本地回写:直接从定义表/通道表移除,免整表重拉(spec WS-3 §3)
       ccList.value=ccList.value.filter(x=>x.id!==c.id);
       list.value=list.value.filter(x=>x.id!==c.id);
       if(activeChannel.value===c.id)activeChannel.value=list.value.find(x=>x.enabled)?.id||list.value[0]?.id||'';
+      await loadAccounts();
       p.toast('已删除 '+c.id);
     }catch(e){
       p.toast('删除失败：'+apiErr(e),'err');
