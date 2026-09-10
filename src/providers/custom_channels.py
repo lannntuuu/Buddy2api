@@ -36,26 +36,6 @@ DEFAULT_MODELS = ("DeepSeek-V4-Flash",)
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _ENV_NAME_RE = re.compile(r"^CB_[A-Z0-9_]+$")
 
-_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
-
-
-def _is_https(url: str) -> bool:
-    return url.startswith("https://")
-
-
-def _is_loopback_http(url: str) -> bool:
-    """True iff url is http://127.0.0.1[:port] or http://localhost[:port] (D7
-    allows plaintext only for loopback debugging)."""
-    if not url.startswith("http://"):
-        return False
-    rest = url[len("http://"):]
-    # Strip path/query.
-    host_part = rest.split("/", 1)[0]
-    # Strip credentials (not supported, but be defensive).
-    host_part = host_part.split("@", 1)[-1]
-    host = host_part.split(":", 1)[0].lower()
-    return host in _LOOPBACK_HOSTS
-
 
 def validate_definition(
     definition: dict,
@@ -93,10 +73,10 @@ def validate_definition(
     base_url = str(definition.get("base_url") or "").strip()
     if not base_url:
         raise ValueError("base_url is required")
-    if not (_is_https(base_url) or _is_loopback_http(base_url)):
-        raise ValueError(
-            "base_url must be https:// or http://127.0.0.1[:port]/http://localhost[:port]"
-        )
+    # 放行任意 http:// / https://（含内网 http）：API key 走明文有泄密风险，
+    # 前端在输入框下方给出「仅建议内网」警告，由管理员自行权衡。
+    if not (base_url.startswith("http://") or base_url.startswith("https://")):
+        raise ValueError("base_url must be an http:// or https:// URL")
 
     models = definition.get("models")
     # `models` is OPTIONAL. Omitted / None / empty list all mean "use the

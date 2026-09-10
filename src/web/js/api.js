@@ -16,10 +16,15 @@ export const ERR_TEXTS={
 };
 export function apiErr(e,fallback='加载失败'){
   const m=String((e&&e.message)||'');
-  return ERR_TEXTS[m]||fallback;
+  const base=ERR_TEXTS[m]||fallback;
+  // _request 已从 4xx 响应体提取后端 detail(如 base_url 校验原因),拼在通用文案后,
+  // 避免「请求参数无效」却看不到具体哪个字段错了。
+  const d=(e&&e.detail)?String(e.detail):'';
+  return d?base+' '+d:base;
 }
 // 401 文案 → toast 附带「去设置」跳转动作(app.js 消费);其余文案返回 null。
-export function toastActionFor(msg){return msg===ERR_TEXTS['401']?{label:'去设置',page:'settings'}:null}
+// 前缀匹配:apiErr 可能给 401 文案追加后端 detail,严格相等会丢动作。
+export function toastActionFor(msg){return String(msg||'').startsWith(ERR_TEXTS['401'])?{label:'去设置',page:'settings'}:null}
 
 // ── 契约 6:行对象回写 + 整表 load() 回退(spec WS-3 §3)─────────
 // 写操作响应优先取行对象本地回写;缺行对象或形状不符返回 null,

@@ -324,11 +324,12 @@ JS_DYNAMIC_CLASSES = {
 #   apikey      通道列表 tag 语义标记(.tag 提供样式)
 #   drag-handle 拖拽手柄(样式全内联;SortableJS handle 钩子)
 #   grp-h       分组表头行(样式全内联;SortableJS onMove 排除钩子)
+#   chan        凭证表分组头标记(与 grp-h 共用,纯语义;样式全内联)
 #   sec-h       channels 小节标题(无专用样式,默认排版)
 #   tab/tabbar  详情浮窗 tab 行(无专用样式,.on 态由 .seg button.on 等承担)
 #   ch-warn     env 锁定提示(原 .ch-panel .ch-warn 因页面无 .ch-panel 祖先从未
 #               生效,WS-B 死块删除后该类只剩语义标记作用,样式由内联 style 承担)
-NO_CSS_WHITELIST = {"apikey", "drag-handle", "grp-h", "sec-h", "tab", "tabbar", "ch-warn"}
+NO_CSS_WHITELIST = {"apikey", "drag-handle", "grp-h", "chan", "sec-h", "tab", "tabbar", "ch-warn"}
 
 
 def test_css_covers_all_used_classes() -> None:

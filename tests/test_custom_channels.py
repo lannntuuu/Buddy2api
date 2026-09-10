@@ -71,11 +71,16 @@ def test_validate_allows_duplicate_id_when_excluded():
     )
 
 
-def test_validate_rejects_http_non_loopback():
-    """非本机的 http:// 必须拒绝（D7 只放行本机）。"""
-    with pytest.raises(ValueError, match="https"):
+def test_validate_rejects_non_http_scheme():
+    """非 http(s) 方案（无协议头 / ftp 等）必须拒绝。"""
+    with pytest.raises(ValueError, match="http:// or https://"):
         cc.validate_definition(
-            {"id": "a", "display_name": "X", "base_url": "http://example.com/v1", "models": ["m"]},
+            {"id": "a", "display_name": "X", "base_url": "ftp://example.com/v1", "models": ["m"]},
+            reserved_ids=set(),
+        )
+    with pytest.raises(ValueError, match="http:// or https://"):
+        cc.validate_definition(
+            {"id": "a", "display_name": "X", "base_url": "example.com/v1", "models": ["m"]},
             reserved_ids=set(),
         )
 
@@ -87,11 +92,13 @@ def test_validate_rejects_http_non_loopback():
         "http://127.0.0.1:8000/v1",
         "http://localhost/v1",
         "http://localhost:8000/v1",
+        "http://192.168.1.10:8000/v1",   # 内网 http(放宽后放行,前端给出明文警告)
+        "http://example.com/v1",          # 公网 http 也放行,由管理员自行权衡
         "https://api.example.com/v1",
     ],
 )
-def test_validate_accepts_loopback_http_or_https(url):
-    """本机 http（127.0.0.1 / localhost）以及任何 https 都放行。"""
+def test_validate_accepts_http_and_https(url):
+    """任意 http:// / https:// 都放行（含内网/公网 http）。"""
     cc.validate_definition(
         {"id": "ok", "display_name": "X", "base_url": url, "models": ["m"]},
         reserved_ids=set(),

@@ -169,7 +169,7 @@ async def admin_create_custom_channel(
     Body (required fields first):
         id            : slug, ^[a-z][a-z0-9_-]{0,31}$
         display_name  : ≤ 40 chars
-        base_url      : https:// or http://127.0.0.1[:port] / http://localhost[:port]
+        base_url      : http:// or https:// URL（明文 http 密钥不加密,仅建议内网）
         models        : non-empty list of model id strings
         aliases       : optional dict alias->id (ids must be in models)
         api_key       : optional. When present, written to accounts (uid=id-{tail});
