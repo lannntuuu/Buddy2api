@@ -547,6 +547,12 @@ tr:hover td{background:var(--accent-soft)}
 .detail-v{font-family:var(--mono);font-size:var(--fs-b);margin-top:3px;word-break:break-all}
 .prov-row td{background:var(--bg-sunken);border-top:1px solid var(--border)}
 .model-row td{background:var(--bg-elevated)}
+.acct-row td{background:var(--bg-sunken);border-top:1px solid var(--border)}
+.acct-toggle{display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-b);
+  color:var(--fg-2);cursor:pointer;user-select:none;white-space:nowrap}
+.acct-toggle input{accent-color:var(--accent);cursor:pointer;margin:0}
+.acct-toggle input:disabled{cursor:not-allowed}
+.acct-toggle input:disabled+span{opacity:.5}
 
 /* ---- error / loading / empty ------------------------------- */
 .errbox{font-family:var(--mono);font-size:var(--fs-b);white-space:pre-wrap;word-break:break-word;

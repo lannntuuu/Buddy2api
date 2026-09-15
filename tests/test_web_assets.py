@@ -832,3 +832,14 @@ def test_tps_speed_columns() -> None:
     usage_js = _read(WEB_JS / "pages" / "usage.js")
     assert "解码速度" in usage_js
     assert "fmtTps" in usage_js
+
+
+def test_usage_account_grouping_ui() -> None:
+    """spec 40 §4.2:用量统计「按账号分组」可勾选开关的静态契约。"""
+    usage_js = _read(WEB_JS / "pages" / "usage.js")
+    for needle in ("acct-toggle", "ACCT_TIP", "showAccounts", "hasMultiAcct",
+                   "account_count", "accounts", "cb_gw_usage_acct"):
+        assert needle in usage_js, f"usage.js missing grouping token: {needle}"
+    css = _read(_CSS)
+    assert ".acct-toggle" in css, "app.css missing .acct-toggle selector"
+    assert ".acct-row" in css, "app.css missing .acct-row selector"

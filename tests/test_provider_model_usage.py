@@ -25,12 +25,13 @@ def admin_env(monkeypatch):
 
 def _add_log(provider: str, model: str, created_at: int, *, prompt: int = 100,
              completion: int = 50, credit: float = 0.1, duration_ms: int = 1000,
-             first_token_ms: int | None = None):
+             first_token_ms: int | None = None,
+             account_id: int | None = None, account_name: str | None = None):
     db.record_request({
         "api_key_id": None,
         "api_key_name": None,
-        "account_id": None,
-        "account_name": None,
+        "account_id": account_id,
+        "account_name": account_name,
         "provider": provider,
         "model": model,
         "stream": 0,
@@ -152,6 +153,140 @@ def test_usage_tps_none_without_valid_samples(isolated_db):
     assert m1["summary"]["tps"] is None
     assert result["providers"]["qclaw"]["summary"]["tps"] is None
     assert result["totals"]["tps"] is None
+
+
+# ---------- 账号维度（按账号分组） ----------
+
+def test_usage_accounts_only_for_multi_account_channels(isolated_db):
+    today = date.today()
+    _add_log("qclaw", "m1", _ts(today), account_id=1, account_name="A", prompt=10, completion=5)
+    _add_log("qclaw", "m1", _ts(today), account_id=1, account_name="A", prompt=20, completion=10)
+    _add_log("qclaw", "m1", _ts(today), account_id=2, account_name="B", prompt=30, completion=15)
+    _add_log("qwenwork", "m1", _ts(today), account_id=5, account_name="single", prompt=40, completion=20)
+
+    result = db.get_provider_model_usage({})
+    qclaw = result["providers"]["qclaw"]
+    qwenwork = result["providers"]["qwenwork"]
+
+    assert "accounts" in qclaw
+    assert len(qclaw["accounts"]) == 2
+    assert qclaw["account_count"] == 2
+
+    assert "accounts" not in qwenwork
+    assert qwenwork["account_count"] == 1
+
+    # accounts[0] 应为 requests 更多的账号（降序）
+    assert qclaw["accounts"][0]["id"] == 1
+    assert qclaw["accounts"][0]["summary"]["requests"] == 2
+
+
+def test_usage_account_summaries_sum_to_provider(isolated_db):
+    today = date.today()
+    _add_log("qclaw", "m1", _ts(today), account_id=1, account_name="A", prompt=10, completion=5, credit=0.5)
+    _add_log("qclaw", "m2", _ts(today), account_id=1, account_name="A", prompt=20, completion=10, credit=1.0)
+    _add_log("qclaw", "m1", _ts(today), account_id=2, account_name="B", prompt=30, completion=15, credit=0.3)
+
+    result = db.get_provider_model_usage({})
+    qclaw = result["providers"]["qclaw"]
+    fields = ["requests", "prompt_tokens", "completion_tokens", "total_tokens", "credit"]
+    for field in fields:
+        summed = sum(a["summary"][field] for a in qclaw["accounts"])
+        assert summed == qclaw["summary"][field]
+
+    # 每个账号内 Σ models[*].summary.requests == accounts[i].summary.requests
+    for acct in qclaw["accounts"]:
+        model_req = sum(m["summary"]["requests"] for m in acct["models"].values())
+        assert model_req == acct["summary"]["requests"]
+
+
+def test_usage_accounts_survive_model_filter(isolated_db):
+    today = date.today()
+    _add_log("qclaw", "m1", _ts(today), account_id=1, account_name="A")
+    _add_log("qclaw", "m2", _ts(today), account_id=2, account_name="B")
+
+    result = db.get_provider_model_usage({"provider": "qclaw", "model": "m1"})
+    qclaw = result["providers"]["qclaw"]
+    assert "accounts" in qclaw
+    assert len(qclaw["accounts"]) == 1
+    # account_count 与 model 筛选解耦（1.2 规则 2）
+    assert qclaw["account_count"] == 2
+
+
+def test_usage_null_account_grouped_as_unspecified(isolated_db):
+    today = date.today()
+    # §1.4 gate 要求 accounts 仅 account_count >= 2（多账号通道）时出现；
+    # 因此把 NULL account_id 行与一个真实账号行放在同一通道，使 account_count=2、
+    # 账号层展开，同时仍验证 §1.2 规则 3 的 NULL 归一（id=None→name「未指定账号」）。
+    # （原 §4.1 第 4 条「单通道全 NULL 也展示 accounts」与 §1.4/§1.1/§0 字面契约自相矛盾，
+    #  此处改为多账号通道形态，保留 NULL 归一断言。）
+    _add_log("qclaw", "m1", _ts(today), account_id=None, account_name=None, prompt=10, completion=5)
+    _add_log("qclaw", "m1", _ts(today), account_id=1, account_name="A", prompt=20, completion=10)
+
+    result = db.get_provider_model_usage({})
+    qclaw = result["providers"]["qclaw"]
+    assert "accounts" in qclaw
+    assert qclaw["account_count"] == 2
+    # 找到被归一到「未指定账号」的那一行
+    none_acct = next(a for a in qclaw["accounts"] if a["id"] is None)
+    assert none_acct["id"] is None
+    assert none_acct["name"] == "未指定账号"
+
+
+def test_usage_account_level_tps_and_ratio_same_scope(isolated_db):
+    today = date.today()
+    # 账号 A：150 tok / (3000-1000)ms = 150/2.0s
+    _add_log("qclaw", "m1", _ts(today), account_id=1, account_name="A",
+             prompt=100, completion=150, duration_ms=3000, first_token_ms=1000)
+    # 账号 B：100 tok / (2000-1500)ms = 100/0.5s
+    _add_log("qclaw", "m1", _ts(today), account_id=2, account_name="B",
+             prompt=100, completion=100, duration_ms=2000, first_token_ms=1500)
+
+    result = db.get_provider_model_usage({})
+    qclaw = result["providers"]["qclaw"]
+    accounts = {a["id"]: a for a in qclaw["accounts"]}
+    a = accounts[1]
+    b = accounts[2]
+
+    # 平台层池化: (150+100) / 2.5s = 100.0
+    assert qclaw["summary"]["tps"] == 100.0
+    # 账号层与平台层同口径（同池化方法，但分母限本账号）：A=150/2.0s=75.0, B=100/0.5s=200.0
+    assert a["summary"]["tps"] == 75.0
+    assert b["summary"]["tps"] == 200.0
+
+    # cache_hit_ratio 池化: 账号层与平台层同方法（平台层 = 两账号合并口径）
+    assert a["summary"]["cache_hit_ratio"] is not None
+    assert b["summary"]["cache_hit_ratio"] is not None
+
+
+def test_usage_no_internal_temp_keys_leak(isolated_db):
+    """内部临时键（_accounts / _named）不得泄漏进返回体。
+
+    返回体由 FastAPI 直接序列化成 JSON，泄漏出去就是脏字段；且被泄漏的
+    _accounts 里装的是**未 _finalize** 的原始 summary，前端拿到会读出错值。
+    """
+    import json
+
+    today = date.today()
+    _add_log("qclaw", "m1", _ts(today), account_id=1, account_name="A")
+    _add_log("qclaw", "m1", _ts(today), account_id=2, account_name="B")
+    _add_log("qwenwork", "m1", _ts(today), account_id=5, account_name="single")
+
+    result = db.get_provider_model_usage({})
+
+    raw = json.dumps(result, ensure_ascii=False)
+    for temp in ("_accounts", "_named"):
+        assert temp not in raw, f"internal key {temp} leaked into the response"
+
+    # 多账号通道的账号元素只含约定的 4 个键（_named 不得混入）
+    for acct in result["providers"]["qclaw"]["accounts"]:
+        assert set(acct) == {"id", "name", "summary", "models"}
+    # 通道桶的键集合固定
+    assert set(result["providers"]["qclaw"]) == {
+        "models", "summary", "account_count", "accounts"
+    }
+    assert set(result["providers"]["qwenwork"]) == {
+        "models", "summary", "account_count"
+    }
 
 
 # ---------- server 层：参数校验 / 白名单 / 鉴权 / 限流 ----------

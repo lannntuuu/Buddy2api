@@ -31,21 +31,41 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
         where.append("model=?")
         values.append(model)
     start = filters.get("start")
-    if start not in (None, "", "all"):
+    has_start = start not in (None, "", "all")
+    if has_start:
         where.append("created_at>=?")
         values.append(int(start))
     end = filters.get("end")
-    if end not in (None, "", "all"):
+    has_end = end not in (None, "", "all")
+    if has_end:
         where.append("created_at<=?")
         values.append(int(end))
 
     sql_where = (" WHERE " + " AND ".join(where)) if where else ""
+
+    # account_count 查询的 WHERE：与主查询同口径，但不含 model 条件
+    # （1.2 规则 2：账号层与 model 筛选解耦）。
+    count_where = []
+    count_values: list[Any] = []
+    if provider:
+        count_where.append("provider=?")
+        count_values.append(provider)
+    if has_start:
+        count_where.append("created_at>=?")
+        count_values.append(int(start))
+    if has_end:
+        count_where.append("created_at<=?")
+        count_values.append(int(end))
+    count_sql_where = (" WHERE " + " AND ".join(count_where)) if count_where else ""
+
     conn = get_conn()
     rows = conn.execute(
         f"""
         SELECT provider,
                model,
                date(created_at, 'unixepoch', 'localtime') AS date,
+                account_id,
+                account_name,
                COUNT(*) AS requests,
                COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
                COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
@@ -59,11 +79,23 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
                COALESCE(SUM(CASE WHEN first_token_ms IS NOT NULL
                                 THEN MAX(0, COALESCE(duration_ms, 0) - first_token_ms) END), 0) AS decode_ms
         FROM logs{sql_where}
-        GROUP BY provider, model, date
+        GROUP BY provider, model, date, account_id, account_name
         ORDER BY date DESC, provider ASC, model ASC
         """,
         values,
     ).fetchall()
+
+    # 第二条查询：account_count，只含时间窗(+可选 provider)，不含 model
+    # （1.2 规则 2）。conn.close() 必须在这一条之后（1.3）。
+    account_count_rows = conn.execute(
+        f"""
+        SELECT provider, COUNT(DISTINCT COALESCE(account_id, -1)) AS n
+        FROM logs{count_sql_where}
+        GROUP BY provider
+        """,
+        count_values,
+    ).fetchall()
+    account_count_by_provider = {r["provider"]: int(r["n"]) for r in account_count_rows}
     conn.close()
 
     def _new_summary() -> dict:
@@ -127,7 +159,7 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
         p = row["provider"] or "workbuddy"
         m = row["model"] or ""
         if p not in providers_out:
-            providers_out[p] = {"models": {}, "summary": _new_summary()}
+            providers_out[p] = {"models": {}, "summary": _new_summary(), "_accounts": {}}
         prov_bucket = providers_out[p]
         if m not in prov_bucket["models"]:
             prov_bucket["models"][m] = {"daily": [], "summary": _new_summary()}
@@ -161,14 +193,66 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
                 ),
             }
         )
+        # 账号维度：同一批行多建一层桶；NULL 归一到「未指定账号」。
+        aid = row["account_id"]
+        akey = str(aid) if aid is not None else "none"
+        accounts = prov_bucket["_accounts"]
+        if akey not in accounts:
+            accounts[akey] = {
+                "id": aid,
+                "name": f"账号 #{aid}" if aid is not None else "未指定账号",
+                "_named": False,
+                "models": {},
+                "summary": _new_summary(),
+            }
+        acct = accounts[akey]
+        raw_name = str(row["account_name"] or "").strip()
+        if raw_name and not acct["_named"]:
+            # rows 按日期降序：首个非空名字即最近的账号名
+            acct["name"] = raw_name
+            acct["_named"] = True
+        if m not in acct["models"]:
+            acct["models"][m] = {"daily": [], "summary": _new_summary()}
+        acct_model = acct["models"][m]
+        acct_model["daily"].append(dict(model_bucket["daily"][-1]))
+        _add(acct_model["summary"], row)
+        _add(acct["summary"], row)
+
         _add(model_bucket["summary"], row)
         _add(prov_bucket["summary"], row)
         _add(totals, row)
 
-    for prov_bucket in providers_out.values():
+    for p, prov_bucket in providers_out.items():
         for model_bucket in prov_bucket["models"].values():
             model_bucket["summary"] = _finalize(model_bucket["summary"])
         prov_bucket["summary"] = _finalize(prov_bucket["summary"])
+        accounts = prov_bucket.pop("_accounts", {})
+        for acct in accounts.values():
+            for model_bucket in acct["models"].values():
+                model_bucket["summary"] = _finalize(model_bucket["summary"])
+            acct["summary"] = _finalize(acct["summary"])
+        account_count = int(account_count_by_provider.get(p) or 0) or len(accounts)
+        prov_bucket["account_count"] = account_count
+        # §1.4 精确 gate：仅 account_count >= 2（多账号通道）才展开账号层；
+        # 单账号通道（含仅 NULL account_id 的行，计为 account_count=1）保持现有三段式，
+        # 不输出 accounts 键（§1.1「accounts 仅 account_count >= 2 时出现」/ §0）。
+        if account_count >= 2 and accounts:
+            ordered = sorted(
+                accounts.values(),
+                key=lambda a: (
+                    -a["summary"]["requests"],
+                    a["id"] if a["id"] is not None else 0,
+                ),
+            )
+            prov_bucket["accounts"] = [
+                {
+                    "id": a["id"],
+                    "name": a["name"],
+                    "summary": a["summary"],
+                    "models": a["models"],
+                }
+                for a in ordered
+            ]
 
     return {
         "providers": providers_out,
