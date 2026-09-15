@@ -1,10 +1,11 @@
 import {api,apiErr,n,tok,money,ms,pct,fmtTps} from '../api.js';
 import {I} from '../icons.js';
-const{ref,reactive,computed,onMounted}=Vue;
+const{ref,reactive,computed,onMounted,watch}=Vue;
 const RATIO_TIP='缓存命中 Token ÷ 输入 Token(prompt_tokens) — 命中部分已含在输入中;输入为 0 时不计算';
 const AVG_TIP='总耗时 ÷ 请求数 — 全部请求的平均值,含失败';
 const CACHE_INC_TIP='已包含在输入 Token(prompt_tokens)中,非额外增量';
 const TPS_TIP='池化解码速度 = Σ输出 Token ÷ Σ解码时长(t/s);解码时长=耗时−首 token 时间,仅流式,负差钳 0,Σ为 0 不计';
+const ACCT_TIP='按请求日志里的账号(request logs.account_name)归集;仅多账号通道展开,单账号通道保持平台→模型→日期三段式;只改变展示维度,平台小计与顶部合计口径不变';
 
 // ensureChannels 由 app.js 作为 prop 传入(父 setup 的函数不会出现在子 setup 的
 // props 上,遗漏会导致平台下拉为空 + 加载失败)。
@@ -19,10 +20,39 @@ export default {props:['token','toast','ensureChannels'],setup(p){
   async function loadProviderModels(channel){if(!channel)return;try{const r=await api.get('/admin/channels/'+channel+'/models',p.token);channelModels.value={...channelModels.value,[channel]:r.models||[]}}catch(e){channelModels.value={...channelModels.value,[channel]:[]}}}
   function qs(){const u=new URLSearchParams();if(f.provider)u.set('provider',f.provider);if(f.model)u.set('model',f.model);if(f.range==='custom'){if(f.start)u.set('start_date',f.start);if(f.end)u.set('end_date',f.end)}else u.set('days',f.days!=null?f.days:Number(f.range)||7);return u.toString()}
   async function load(){ld.value=true;err.value='';try{if(f.provider&&!channelModels.value[f.provider])await loadProviderModels(f.provider);data.value=await api.get('/admin/provider-model-usage?'+qs(),p.token)}catch(e){let msg=apiErr(e,'用量加载失败');try{const r=await fetch('/admin/provider-model-usage?'+qs(),{headers:p.token?{Authorization:'Bearer '+p.token}:{},credentials:'same-origin'});if(r.status===400){const j=await r.json();msg=j.detail||msg}}catch(_){}err.value=msg;data.value=null}ld.value=false}
-  const flatRows=computed(()=>{const out=[];const provs=data.value?.providers||{};for(const prov of Object.keys(provs)){const bucket=provs[prov];for(const mdl of Object.keys(bucket.models||{})){const m=bucket.models[mdl];out.push({prov,mdl,summary:m.summary});for(const d of (m.daily||[]))out.push({prov,mdl,detail:d})}out.push({prov,mdl:null,summary:bucket.summary})}return out});
+  // 勾选框:控制「账号」维度是否展开;默认勾选,状态记忆到 cb_gw_usage_acct(读失败按默认 true)。
+  let acctStored=true;try{const v=localStorage.getItem('cb_gw_usage_acct');if(v!==null)acctStored=v==='1'}catch(_){}
+  const showAccounts=ref(acctStored);
+  watch(showAccounts,(v)=>{try{localStorage.setItem('cb_gw_usage_acct',v?'1':'0')}catch(_){}});
+  const hasMultiAcct=computed(()=>{const provs=data.value?.providers||{};return Object.keys(provs).some(p=>(provs[p].account_count||0)>=2&&(provs[p].accounts||[]).length>0)});
+  const flatRows=computed(()=>{
+    const out=[];const provs=data.value?.providers||{};const want=showAccounts.value&&hasMultiAcct.value;
+    for(const prov of Object.keys(provs)){
+      const bucket=provs[prov];
+      // 每个通道独立判定:多账号通道展开账号层,单账号通道维持三段式(同表混排)
+      const grouped=want&&(bucket.accounts||[]).length>0;
+      for(const mdl of Object.keys(bucket.models||{})){
+        const m=bucket.models[mdl];
+        out.push({kind:'model',lvl:1,prov,mdl,summary:m.summary});
+        if(!grouped)for(const d of (m.daily||[]))out.push({kind:'day',lvl:2,prov,mdl,detail:d});
+      }
+      if(grouped){
+        for(const a of bucket.accounts){
+          for(const mdl of Object.keys(a.models||{})){
+            const m=a.models[mdl];
+            out.push({kind:'amodel',lvl:2,prov,acct:a,mdl,summary:m.summary});
+            for(const d of (m.daily||[]))out.push({kind:'day',lvl:3,prov,acct:a,mdl,detail:d});
+          }
+          out.push({kind:'acct',lvl:1,prov,acct:a,summary:a.summary});
+        }
+      }
+      out.push({kind:'prov',lvl:0,prov,summary:bucket.summary});
+    }
+    return out;
+  });
   const hasData=computed(()=>{const provs=data.value?.providers||{};return Object.keys(provs).length>0});
   onMounted(()=>{loadChannels();load()});
-  return{data,ld,err,f,channels,channelModels,rangePreset,onProviderChange,load,n,tok,money,ms,pct,fmtTps,flatRows,hasData,I,RATIO_TIP,AVG_TIP,CACHE_INC_TIP,TPS_TIP}
+  return{data,ld,err,f,channels,channelModels,rangePreset,onProviderChange,load,n,tok,money,ms,pct,fmtTps,flatRows,hasData,showAccounts,hasMultiAcct,I,RATIO_TIP,AVG_TIP,CACHE_INC_TIP,TPS_TIP,ACCT_TIP}
 },template:`
 <div>
   <div class="phead"><h1>用量统计</h1><p>按平台 × 模型 × 日期聚合的 Token 用量</p></div>
@@ -48,6 +78,10 @@ export default {props:['token','toast','ensureChannels'],setup(p){
       <option v-for="m in (channelModels[f.provider]||[])" :key="m" :value="m">{{m}}</option>
     </select>
     <button class="btn s" @click="load" :disabled="ld"><span v-html="I.refresh"></span>{{ld?'查询中':'查询'}}</button>
+    <label class="acct-toggle" :title="hasMultiAcct?ACCT_TIP:'当前所选范围内没有多账号通道'">
+      <input type="checkbox" v-model="showAccounts" :disabled="!hasMultiAcct"/>
+      <span>按账号分组</span>
+    </label>
   </div>
   <div v-if="ld" class="load"><div class="spin"></div></div>
   <div class="card card-p empty" v-else-if="err"><div class="em">!</div><p style="font-weight:600;color:var(--fg)">{{err}}</p></div>
@@ -61,9 +95,11 @@ export default {props:['token','toast','ensureChannels'],setup(p){
       <thead><tr><th>平台 / 模型 / 日期</th><th>请求数</th><th>输入 Token</th><th :title="CACHE_INC_TIP">缓存命中 Token</th><th>缓存命中率 <span class="calc-mark" :title="RATIO_TIP">◆</span></th><th>输出 Token</th><th>总 Token</th><th>Credit</th><th>平均耗时 <span class="calc-mark" :title="AVG_TIP">◆</span></th><th :title="TPS_TIP">解码速度 <span class="calc-mark">◆</span></th></tr></thead>
       <tbody>
         <template v-for="(row,i) in flatRows" :key="i">
-          <tr v-if="row.prov&&row.mdl===null&&row.summary" class="prov-row"><td style="font-weight:800">{{row.prov}} · 平台汇总</td><td>{{n(row.summary.requests)}}</td><td>{{tok(row.summary.prompt_tokens)}}</td><td>{{tok(row.summary.cache_read_tokens)}}</td><td>{{pct(row.summary.cache_hit_ratio)}}</td><td>{{tok(row.summary.completion_tokens)}}</td><td>{{tok(row.summary.total_tokens)}}</td><td>{{money(row.summary.credit)}}</td><td>{{ms(row.summary.avg_duration_ms)}}</td><td>{{fmtTps(row.summary.tps)}}</td></tr>
-          <tr v-else-if="row.mdl&&row.detail"><td class="mono" style="padding-left:32px">{{row.mdl}} · {{row.detail.date}}</td><td>{{n(row.detail.requests)}}</td><td>{{tok(row.detail.prompt_tokens)}}</td><td>{{tok(row.detail.cache_read_tokens)}}</td><td>{{pct(row.detail.cache_hit_ratio)}}</td><td>{{tok(row.detail.completion_tokens)}}</td><td>{{tok(row.detail.total_tokens)}}</td><td>{{money(row.detail.credit)}}</td><td>{{ms(row.detail.avg_duration_ms)}}</td><td>{{fmtTps(row.detail.tps)}}</td></tr>
-          <tr v-else-if="row.mdl&&row.summary" class="model-row"><td style="font-weight:600;padding-left:20px">{{row.mdl}} · 小计</td><td>{{n(row.summary.requests)}}</td><td>{{tok(row.summary.prompt_tokens)}}</td><td>{{tok(row.summary.cache_read_tokens)}}</td><td>{{pct(row.summary.cache_hit_ratio)}}</td><td>{{tok(row.summary.completion_tokens)}}</td><td>{{tok(row.summary.total_tokens)}}</td><td>{{money(row.summary.credit)}}</td><td>{{ms(row.summary.avg_duration_ms)}}</td><td>{{fmtTps(row.summary.tps)}}</td></tr>
+          <tr v-if="row.kind==='prov'" class="prov-row"><td style="font-weight:800">{{row.prov}} · 平台汇总</td><td>{{n(row.summary.requests)}}</td><td>{{tok(row.summary.prompt_tokens)}}</td><td>{{tok(row.summary.cache_read_tokens)}}</td><td>{{pct(row.summary.cache_hit_ratio)}}</td><td>{{tok(row.summary.completion_tokens)}}</td><td>{{tok(row.summary.total_tokens)}}</td><td>{{money(row.summary.credit)}}</td><td>{{ms(row.summary.avg_duration_ms)}}</td><td>{{fmtTps(row.summary.tps)}}</td></tr>
+          <tr v-else-if="row.kind==='acct'" class="acct-row"><td style="font-weight:600;padding-left:20px" :title="'账号 ID '+(row.acct.id??'-')">{{row.acct.name}} · 账号小计</td><td>{{n(row.summary.requests)}}</td><td>{{tok(row.summary.prompt_tokens)}}</td><td>{{tok(row.summary.cache_read_tokens)}}</td><td>{{pct(row.summary.cache_hit_ratio)}}</td><td>{{tok(row.summary.completion_tokens)}}</td><td>{{tok(row.summary.total_tokens)}}</td><td>{{money(row.summary.credit)}}</td><td>{{ms(row.summary.avg_duration_ms)}}</td><td>{{fmtTps(row.summary.tps)}}</td></tr>
+          <tr v-else-if="row.kind==='amodel'" class="model-row"><td class="mono" style="padding-left:40px">{{row.mdl}} · 小计</td><td>{{n(row.summary.requests)}}</td><td>{{tok(row.summary.prompt_tokens)}}</td><td>{{tok(row.summary.cache_read_tokens)}}</td><td>{{pct(row.summary.cache_hit_ratio)}}</td><td>{{tok(row.summary.completion_tokens)}}</td><td>{{tok(row.summary.total_tokens)}}</td><td>{{money(row.summary.credit)}}</td><td>{{ms(row.summary.avg_duration_ms)}}</td><td>{{fmtTps(row.summary.tps)}}</td></tr>
+          <tr v-else-if="row.kind==='model'" class="model-row"><td style="font-weight:600;padding-left:20px">{{row.mdl}} · 小计</td><td>{{n(row.summary.requests)}}</td><td>{{tok(row.summary.prompt_tokens)}}</td><td>{{tok(row.summary.cache_read_tokens)}}</td><td>{{pct(row.summary.cache_hit_ratio)}}</td><td>{{tok(row.summary.completion_tokens)}}</td><td>{{tok(row.summary.total_tokens)}}</td><td>{{money(row.summary.credit)}}</td><td>{{ms(row.summary.avg_duration_ms)}}</td><td>{{fmtTps(row.summary.tps)}}</td></tr>
+          <tr v-else-if="row.kind==='day'"><td class="mono" :style="'padding-left:'+(row.lvl>=3?60:32)+'px'">{{row.mdl}} · {{row.detail.date}}</td><td>{{n(row.detail.requests)}}</td><td>{{tok(row.detail.prompt_tokens)}}</td><td>{{tok(row.detail.cache_read_tokens)}}</td><td>{{pct(row.detail.cache_hit_ratio)}}</td><td>{{tok(row.detail.completion_tokens)}}</td><td>{{tok(row.detail.total_tokens)}}</td><td>{{money(row.detail.credit)}}</td><td>{{ms(row.detail.avg_duration_ms)}}</td><td>{{fmtTps(row.detail.tps)}}</td></tr>
         </template>
       </tbody>
     </table></div></div>

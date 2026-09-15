@@ -55,7 +55,22 @@ GET /admin/provider-model-usage
           "summary": { "requests": 12, "prompt_tokens": 1200, "completion_tokens": 600, "total_tokens": 1800, "cache_read_tokens": 300, "cache_creation_tokens": 0, "credit": 0.18, "duration_ms": 11400, "avg_duration_ms": 950, "cache_hit_ratio": 25.0, "tps": 111.1 }
         }
       },
-      "summary": { "requests": 12, "prompt_tokens": 1200, "completion_tokens": 600, "total_tokens": 1800, "cache_read_tokens": 300, "cache_creation_tokens": 0, "credit": 0.18, "duration_ms": 11400, "avg_duration_ms": 950, "cache_hit_ratio": 25.0, "tps": 111.1 }
+      "summary": { "requests": 12, "prompt_tokens": 1200, "completion_tokens": 600, "total_tokens": 1800, "cache_read_tokens": 300, "cache_creation_tokens": 0, "credit": 0.18, "duration_ms": 11400, "avg_duration_ms": 950, "cache_hit_ratio": 25.0, "tps": 111.1 },
+      "account_count": 2,
+      "accounts": [
+        {
+          "id": 1,
+          "name": "图图",
+          "summary": { "requests": 8, "prompt_tokens": 800, "completion_tokens": 400, "total_tokens": 1200, "cache_read_tokens": 200, "cache_creation_tokens": 0, "credit": 0.12, "duration_ms": 7600, "avg_duration_ms": 950, "cache_hit_ratio": 25.0, "tps": 111.1 },
+          "models": { "gpt-5.5": { "daily": [ { "date": "2025-06-01", "requests": 8, "prompt_tokens": 800, "completion_tokens": 400, "total_tokens": 1200, "cache_read_tokens": 200, "cache_creation_tokens": 0, "credit": 0.12, "avg_duration_ms": 950, "cache_hit_ratio": 25.0, "tps": 111.1 } ], "summary": { "requests": 8, "prompt_tokens": 800, "completion_tokens": 400, "total_tokens": 1200, "cache_read_tokens": 200, "cache_creation_tokens": 0, "credit": 0.12, "duration_ms": 7600, "avg_duration_ms": 950, "cache_hit_ratio": 25.0, "tps": 111.1 } } }
+        },
+        {
+          "id": 11,
+          "name": "18127098842",
+          "summary": { "requests": 4, "prompt_tokens": 400, "completion_tokens": 200, "total_tokens": 600, "cache_read_tokens": 100, "cache_creation_tokens": 0, "credit": 0.06, "duration_ms": 3800, "avg_duration_ms": 950, "cache_hit_ratio": 25.0, "tps": 111.1 },
+          "models": { "gpt-5.5": { "daily": [ { "date": "2025-06-01", "requests": 4, "prompt_tokens": 400, "completion_tokens": 200, "total_tokens": 600, "cache_read_tokens": 100, "cache_creation_tokens": 0, "credit": 0.06, "avg_duration_ms": 950, "cache_hit_ratio": 25.0, "tps": 111.1 } ], "summary": { "requests": 4, "prompt_tokens": 400, "completion_tokens": 200, "total_tokens": 600, "cache_read_tokens": 100, "cache_creation_tokens": 0, "credit": 0.06, "duration_ms": 3800, "avg_duration_ms": 950, "cache_hit_ratio": 25.0, "tps": 111.1 } } }
+        }
+      ]
     }
   },
   "totals": { "requests": 12, "prompt_tokens": 1200, "completion_tokens": 600, "total_tokens": 1800, "cache_read_tokens": 300, "cache_creation_tokens": 0, "credit": 0.18, "duration_ms": 11400, "avg_duration_ms": 950, "cache_hit_ratio": 25.0, "tps": 111.1 }
@@ -67,6 +82,8 @@ GET /admin/provider-model-usage
 - `avg_duration_ms` = `SUM(duration_ms) / COUNT(*)`（加权平均）
 - `cache_hit_ratio` = `cache_read_tokens / prompt_tokens × 100`（百分数），输入 Token 为 0 时为 `null`
 - `tps` = 池化解码速度（t/s）= `Σ completion_tokens ÷ Σ 解码时长`；解码时长 = `duration_ms − first_token_ms`（仅流式请求，负差钳 0），Σ 解码时长为 0 时为 `null`
+- `account_count`：时间窗内该通道 **distinct 账号数**（含 `account_id IS NULL` 归一的「未指定账号」）；由独立查询得出，**与 `model` 筛选解耦**（条件只含时间窗 + 可选 `provider`），所以筛到某模型只剩单账号时，账号层不会消失
+- `accounts`：**仅当 `account_count >= 2` 时**才出现该键；是数组（保序，不用 dict key 避免数字键被重排）。每个元素含 `id` / `name` / `summary` / `models`，与平台层同形状、同口径（复用同一套 `_finalize`）。排序：该账号 `summary.requests` 降序，再 `id` 升序（`id` 为 `None` 时按 0 参与比较）。账号层聚合满足 `Σ 各账号 summary == 平台 summary`（requests / tokens / credit 同口径）。`account_id IS NULL` 归并为 `id: null`、显示名 `未指定账号`；`account_id` 非空但 `account_name` 为空时回落显示 `账号 #{id}`；账号名取该账号日期降序首个非空 `account_name`
 
 ### 示例
 
@@ -89,6 +106,7 @@ Web UI 顶部导航新增 **「用量统计」** 页面：
 - 平台筛选：全部或具体平台；选定平台后出现该平台白名单内的模型下拉
 - 顶部三张汇总卡片（请求数 / Token 总量 / Credit 消耗）
 - 明细表：平台汇总行 → 模型小计行 → 每日明细行（日期降序）；列含**解码速度（t/s）**（◆ 标记的派生列，池化口径），无有效样本显示 `-`
+- 明细表支持**按账号分组**（控制条最右侧一个勾选框，默认勾选，状态记忆到 `localStorage` 键 `cb_gw_usage_acct`）：勾选开启后，仅**多账号通道**展开账号层，呈现 `平台汇总 → 账号小计 → 账号内模型小计 → 日明细`（两级小计都显示），单账号通道维持原有的 `平台汇总 → 模型小计 → 日明细` 三段式不变；该勾选是纯前端展示维度开关（不筛选、不排除某账号），切换不发请求、不消耗限流额度；无任何多账号通道时勾选框置灰但不隐藏。关闭勾选时输出与未分组时逐字节一致
 
 ## 数据说明
 
@@ -97,3 +115,4 @@ Web UI 顶部导航新增 **「用量统计」** 页面：
 - 失败请求同样记录 token/credit（如有），如只关心成功请求可先在「请求日志」页按状态筛后对照
 - 「请求日志」页每行带 **Client** 列：常态只显示发起客户端（如 `codex`），鼠标悬浮显示 `client client_version`；展开详情里可看完整的 Client 与 Client 版本，用于按客户端追溯请求来源；顶部搜索框支持按 `client` 或 `client_version` 关键词检索
 - 「用量统计」明细表与「请求日志」页均带 **速度（t/s）** 列（API 字段 `tps`）：前者是池化解码速度（`Σ 输出 Token ÷ Σ 解码时长`），后者是逐请求解码速度（`输出 Token ÷ 解码时长`，仅流式）；解码时长 = `duration_ms − first_token_ms`，负差钳 0；非流式或无有效样本显示 `-`
+- 「用量统计」按账号分组时的账号归属取自日志行的 `account_name` **值拷贝**（请求时快照），因此账号被删除后，其历史用量仍归属于原账号名，不会被抹除或归并到「未指定账号」
