@@ -181,30 +181,31 @@
 
 ### 2.2 渲染树（勾选开启时）
 
-以 workbuddy（2 个账号）为例，**缩进即层级**：
+以 workbuddy（2 个账号）为例，**缩进即层级**；**分组标题行一律落在该组内容之上**：
 
 ```
-glm-5.3 · 小计            ← L1 平台级模型小计（padding-left:20px）
-hy3 · 小计                ← L1 平台级模型小计
-图图 · 账号小计            ← L1 账号小计（padding-left:20px）
-  glm-5.3 · 小计           ← L2 账号内模型小计（padding-left:40px）
-    09-10                  ← L3 日明细（padding-left:60px）
-    09-09
-18127098842 · 账号小计
-  glm-5.3 · 小计
-    09-08
-workbuddy · 平台汇总       ← L0 该通道全账号合计
+workbuddy · 平台汇总       ← L0 该通道全账号合计（标题行，在最上）
+  glm-5.3 · 小计            ← L1 平台级模型小计（padding-left:20px）
+  hy3 · 小计                ← L1 平台级模型小计
+  图图 · 账号小计            ← L1 账号小计（padding-left:20px）
+    glm-5.3 · 小计           ← L2 账号内模型小计（padding-left:40px）
+      09-10                  ← L3 日明细（padding-left:60px）
+      09-09
+  18127098842 · 账号小计
+    glm-5.3 · 小计
+      09-08
 ```
 
-> **与需求确认时那张示意图的唯一差异（刻意为之，不得"修正"）**：
-> 示意图把「平台汇总」画在最上方，但**现状代码就是把平台汇总 push 在每个通道块的末尾**
-> （`usage.js` 现有 `flatRows` 在模型循环结束后才 push 平台汇总），且需求的硬约束是
-> 「勾选关闭时与今天逐字节一致」。因此本 spec 规定：**沿用现有「每组小计落在组末尾」
-> 的既有排版**，账号块同理（账号小计落在账号块末尾）。嵌套关系与示意图完全一致，
-> 变的只是「小计行在组内的位置」，且与勾选关闭时的行为保持一致。
+> **本 spec r2 修订（用户反馈）**：r1 曾规定「沿用现有每组小计落在组末尾的排版」。
+> 用户指出**分组标题在上才符合直觉**，且 `docs/provider-model-usage.md` 一直描述的是
+> `平台汇总行 → 模型小计行 → 每日明细行`（标题在上），是 r1 把现状代码的怪癖
+> （每组汇总 push 在末尾）错误地固化进了契约。**r2 起：所有层级一律标题行在前。**
+> 这是一次**有意的**行为变更：勾选关闭时平台汇总行也会从末尾移到该通道块的最前面，
+> 从而与文档第 108 行的既有描述一致。因此「勾选关闭时与改动前逐字节一致」**不再成立**，
+> 取而代之的约束是：关闭时与开启时的表头顺序一致，仅少掉账号层与平台级模型小计下的日期明细。
 
-勾选**关闭**时：输出与今天**逐字节一致**（`平台汇总 → 模型小计 → 日期明细`），
-行为完全回退。
+勾选**关闭**时：`平台汇总 → 模型小计 → 日期明细`，**平台汇总行在该通道块的顶部**
+（标题行在前；这是 r2 相对改动前唯一的行为差异，且与既有文档描述对齐）。
 
 **单账号通道**：无论勾选与否，都保持三段式，一行不加。
 
@@ -218,6 +219,8 @@ const flatRows=computed(()=>{
     const bucket=provs[prov];
     // 每个通道独立判定：多账号通道展开账号层，单账号通道维持三段式（同表混排）
     const grouped=want&&(bucket.accounts||[]).length>0;
+    // r2：分组标题行落在该组内容之上——平台汇总先于平台级模型小计/账号块
+    out.push({kind:'prov',lvl:0,prov,summary:bucket.summary});
     for(const mdl of Object.keys(bucket.models||{})){
       const m=bucket.models[mdl];
       out.push({kind:'model',lvl:1,prov,mdl,summary:m.summary});
@@ -225,22 +228,25 @@ const flatRows=computed(()=>{
     }
     if(grouped){
       for(const a of bucket.accounts){
+        // r2：账号小计先于账号内模型小计与其日明细
+        out.push({kind:'acct',lvl:1,prov,acct:a,summary:a.summary});
         for(const mdl of Object.keys(a.models||{})){
           const m=a.models[mdl];
           out.push({kind:'amodel',lvl:2,prov,acct:a,mdl,summary:m.summary});
           for(const d of (m.daily||[]))out.push({kind:'day',lvl:3,prov,acct:a,mdl,detail:d});
         }
-        out.push({kind:'acct',lvl:1,prov,acct:a,summary:a.summary});
       }
     }
-    out.push({kind:'prov',lvl:0,prov,summary:bucket.summary});
   }
   return out;
 });
 ```
 
-**注意**：展开判定必须是**每通道**的（`grouped`），不能是一个全局布尔 —— 否则
-`want` 为真但某通道没有 `accounts` 时，该通道的日明细会被整段吞掉。
+**注意（两条，都必须满足）**：
+1. 展开判定必须是**每通道**的（`grouped`），不能是一个全局布尔 —— 否则
+   `want` 为真但某通道没有 `accounts` 时，该通道的日明细会被整段吞掉。
+2. **标题行在组内容之上**（r2）：每个 `prov` 行必须早于它自己通道的 `model`/`acct`/`amodel`/`day`
+   行；每个 `acct` 行必须早于它自己账号的 `amodel`/`day` 行。
 
 ### 2.4 模板改动
 

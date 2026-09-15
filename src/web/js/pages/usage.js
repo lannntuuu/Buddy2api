@@ -31,6 +31,9 @@ export default {props:['token','toast','ensureChannels'],setup(p){
       const bucket=provs[prov];
       // 每个通道独立判定:多账号通道展开账号层,单账号通道维持三段式(同表混排)
       const grouped=want&&(bucket.accounts||[]).length>0;
+      // 分组标题行落在该组内容之上:平台汇总→(平台级模型小计/账号块);
+      // 账号小计→(账号内模型小计→日明细);模型小计→其日明细。
+      out.push({kind:'prov',lvl:0,prov,summary:bucket.summary});
       for(const mdl of Object.keys(bucket.models||{})){
         const m=bucket.models[mdl];
         out.push({kind:'model',lvl:1,prov,mdl,summary:m.summary});
@@ -38,15 +41,14 @@ export default {props:['token','toast','ensureChannels'],setup(p){
       }
       if(grouped){
         for(const a of bucket.accounts){
+          out.push({kind:'acct',lvl:1,prov,acct:a,summary:a.summary});
           for(const mdl of Object.keys(a.models||{})){
             const m=a.models[mdl];
             out.push({kind:'amodel',lvl:2,prov,acct:a,mdl,summary:m.summary});
             for(const d of (m.daily||[]))out.push({kind:'day',lvl:3,prov,acct:a,mdl,detail:d});
           }
-          out.push({kind:'acct',lvl:1,prov,acct:a,summary:a.summary});
         }
       }
-      out.push({kind:'prov',lvl:0,prov,summary:bucket.summary});
     }
     return out;
   });
