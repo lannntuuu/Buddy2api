@@ -277,6 +277,38 @@ def test_quota_uses_batch_resources_endpoint() -> None:
     assert "refreshResource(" in src
 
 
+def test_claim_modal_account_cell_exposes_channel_on_hover() -> None:
+    """「一键领取结果」弹窗:账号列 hover 必须透出通道,且不新增列。
+
+    背景:领取结果逐行来自多通道(workbuddy / traework / traesolo),但表格
+    只有账号/结果/连续/HTTP 四列,同一账号名跨通道时无法分辨是哪个通道领的。
+    甲方要求「鼠标放在账号列的值上面时浮现通道」,并明确选择不加列。本用例钉
+    死这个口径:账号单元格带 title 且绑定该行自己的 r.channel。
+    """
+    src = _read(WEB_JS / "pages" / "quota.js")
+
+    # 定位 claim 弹窗(标题取自 claim.title,一键领取/单账号领取共用),截到表格结束。
+    start = src.index('v-if="claim" @click.self="claim=null"')
+    modal = src[start:src.index("</table>", start) + len("</table>")]
+
+    # 列数不变:表头仍是 账号/结果/连续/HTTP 四列(未新增「通道」列)
+    heads = re.findall(r"<th>([^<]*)</th>", modal)
+    assert heads == ["账号", "结果", "连续", "HTTP"], heads
+    assert "通道" not in "".join(heads), "通道不得作为独立列出现(甲方选择 hover 方案)"
+
+    # 账号单元格:可见文本是 account_name,通道只能通过 title(hover)浮现
+    cells = re.findall(r"<td([^>]*)>", modal)
+    account_cell = cells[0]
+    assert ":title=" in account_cell, f"账号列缺少 hover title: {account_cell!r}"
+    assert "r.channel" in account_cell, f"title 必须绑定该行自己的 channel: {account_cell!r}"
+    assert "r.account_name" not in account_cell, "通道不得混进可见文本"
+    assert "{{r.account_name}}" in modal, "账号列可见文本必须保持 account_name"
+
+    # 后端已保证 results 每行带 channel(见 test_checkin_all_summary.py);前端
+    # 兜底默认值与 chName() 一致,避免单账号领取路径缺字段时 hover 出空串。
+    assert "'workbuddy'" in account_cell, f"title 缺少通道缺省兜底: {account_cell!r}"
+
+
 def test_hash_routing_in_app() -> None:
     """WS-3 §6:go() 同步 location.hash,hashchange 驱动渲染,启动 hash 优先。"""
     src = _read(_APP_JS)
