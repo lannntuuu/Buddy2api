@@ -1013,8 +1013,9 @@ async def checkin_all(channel_filter: list[str] | None = None) -> dict:
             result["channel"] = channel
             results.append(result)
     invalidate_credit_summary_cache()
-    wb_credit = round(
-        sum(float(row.get("credit") or 0) for row in results if row.get("claimed") and row.get("channel") == "workbuddy"),
+    # 本次领取积分合计（全通道），与前端结果列表逐行金额一致
+    claimed_credit = round(
+        sum(float(row.get("credit") or 0) for row in results if row.get("claimed")),
         4,
     )
     return {
@@ -1022,8 +1023,7 @@ async def checkin_all(channel_filter: list[str] | None = None) -> dict:
         "claimed": sum(1 for row in results if row.get("claimed")),
         "already_claimed": sum(1 for row in results if row.get("already_claimed")),
         "failed": sum(1 for row in results if not row.get("ok")),
-        "credit": wb_credit,
-        "credit_deprecated": True,
+        "credit": claimed_credit,
         "skipped": skipped,
         "results": results,
     }
