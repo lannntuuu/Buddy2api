@@ -843,3 +843,111 @@ def test_usage_account_grouping_ui() -> None:
     css = _read(_CSS)
     assert ".acct-toggle" in css, "app.css missing .acct-toggle selector"
     assert ".acct-row" in css, "app.css missing .acct-row selector"
+
+
+# ---------------------------------------------------------------------------
+# spec 40 §2.2 r2:分组标题行必须落在该组内容**之上**。
+# 早期实现把每组的汇总行 push 在组末尾(沿用旧代码怪癖),标题跑到了明细下面,
+# 与 docs/provider-model-usage.md「平台汇总行 → 模型小计行 → 每日明细行」的描述相反。
+# 这里不匹配源码文本,而是**抽出 usage.js 里真实的 flatRows 在 node 里跑**,
+# 用桩数据断言标题/内容的先后关系——源码被重排时该测试会真的失败。
+# ---------------------------------------------------------------------------
+
+_FLATROWS_DRIVER = r"""
+// 从 usage.js 抽出真实的 hasMultiAcct / flatRows 源码,配桩数据执行。
+const computed = (fn) => ({ get value() { return fn(); } });
+const showAccounts = { value: SHOW_ACCOUNTS };
+const data = { value: { providers: PROVIDERS } };
+HAS_MULTI_SRC
+FLATROWS_SRC
+
+const rows = flatRows.value;
+const kinds = rows.map((r) => r.kind);
+const out = [];
+let ok = true;
+const fail = (m) => { ok = false; out.push('FAIL: ' + m); };
+
+// 1) 每个通道标题必须早于它自己通道的所有内容行
+for (let i = 0; i < rows.length; i++) {
+  const r = rows[i];
+  if (r.kind === 'prov') continue;
+  const pi = rows.findIndex((x) => x.kind === 'prov' && x.prov === r.prov);
+  if (pi === -1 || pi > i) fail(`kind=${r.kind} prov=${r.prov}@${i} 早于其通道标题@${pi}`);
+}
+// 2) 每个账号标题必须早于它自己账号的内容行
+for (let i = 0; i < rows.length; i++) {
+  const r = rows[i];
+  if (!r.acct || r.kind === 'acct') continue;
+  const ai = rows.findIndex((x) => x.kind === 'acct' && x.prov === r.prov && x.acct === r.acct);
+  if (ai === -1 || ai > i) fail(`kind=${r.kind} acct=${r.acct}@${i} 早于其账号标题@${ai}`);
+}
+// 3) 同通道内标题只出现一次,且顺序 = 平台汇总在最前
+const provFirst = rows.findIndex((x) => x.kind === 'prov' && x.prov === 'workbuddy');
+if (kinds[0] !== 'prov') fail(`首行应为平台汇总,实际 ${kinds[0]}`);
+if (provFirst !== 0) fail(`workbuddy 平台汇总应在首位,实际 index=${provFirst}`);
+// 4) 已知期望序列:平台汇总 → 平台级模型小计 → 账号标题 → 账号模型小计 → 日明细
+const expected = SHOW_ACCOUNTS
+  ? ['prov','model','acct','amodel','day','acct','amodel','day','prov','model','day']
+  : ['prov','model','day','day','prov','model','day'];
+if (JSON.stringify(kinds) !== JSON.stringify(expected)) {
+  fail('序列不符\n  实际=' + JSON.stringify(kinds) + '\n  期望=' + JSON.stringify(expected));
+}
+// 5) 日明细缩进:账号内日明细 lvl=3,平台级日明细 lvl=2
+for (const r of rows.filter((x) => x.kind === 'day')) {
+  const want = r.acct ? 3 : 2;
+  if (r.lvl !== want) fail(`day(${r.acct || 'platform'}) lvl=${r.lvl} 期望 ${want}`);
+}
+out.push(ok ? 'OK' : 'BAD');
+console.log(out.join('\n'));
+process.exit(ok ? 0 : 1);
+"""
+
+
+_PROVIDERS = """{
+  workbuddy: {
+    models: { m1: { daily: [{ date: 'd1' }, { date: 'd2' }] } },
+    account_count: 2,
+    accounts: [
+      { name: 'A', models: { m1: { daily: [{ date: 'd1' }] } } },
+      { name: 'B', models: { m1: { daily: [{ date: 'd2' }] } } },
+    ],
+  },
+  traesolo: {
+    models: { m9: { daily: [{ date: 'd1' }] } },
+    account_count: 1,
+  },
+}"""
+
+
+@node_required
+@pytest.mark.parametrize("show_accounts", [True, False])
+def test_usage_group_headers_precede_content(show_accounts: bool) -> None:
+    """分组标题行(平台汇总/账号小计)必须在该组内容之上(spec 40 §2.2 r2)。"""
+    usage_js = _read(WEB_JS / "pages" / "usage.js")
+
+    def extract(pattern: str, label: str) -> str:
+        m = re.search(pattern, usage_js, re.S)
+        assert m, f"无法从 usage.js 抽出 {label};源码结构变了请更新本测试的抽取式"
+        return m.group(0)
+
+    has_multi = extract(r"const hasMultiAcct=computed\(\(\)=>\{.*?\}\);", "hasMultiAcct")
+    flat = extract(r"const flatRows=computed\(\(\)=>\{.*?\n  \}\);", "flatRows")
+    assert "kind:'prov'" in flat, "flatRows 未产出 prov 行"
+
+    src = (
+        _FLATROWS_DRIVER.replace("SHOW_ACCOUNTS", "true" if show_accounts else "false")
+        .replace("PROVIDERS", _PROVIDERS)
+        .replace("HAS_MULTI_SRC", has_multi)
+        .replace("FLATROWS_SRC", flat)
+    )
+    driver = REPO_ROOT / ".tmp" / f"_flatrows_check_{int(show_accounts)}.mjs"
+    driver.parent.mkdir(parents=True, exist_ok=True)
+    driver.write_text(src, encoding="utf-8")
+    result = subprocess.run(
+        [_NODE, str(driver)], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, (
+        "分组标题行未落在组内容之上(或序列不符):\n"
+        + (result.stdout or "").strip()
+        + (("\n" + result.stderr.strip()) if result.stderr.strip() else "")
+    )
