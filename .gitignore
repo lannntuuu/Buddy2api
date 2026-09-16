@@ -11,6 +11,15 @@ htmlcov/
 .tmp/
 pytest-cache-files-*/
 
+# 仓库根的历史 pytest 临时目录（basetemp / 试验脚本产物）。
+# 这些目录由历史会话在仓库根创建，其中若干被沙箱策略锁定（无法在本会话删除，
+# Windows 报 Access denied），因此这里统一忽略，避免它们反复出现在 git status。
+# 清理方式见 redesign-audit/19a-backend-notes.md。
+/tmp_pg/
+/tmp_pytest_*/
+/tests/_run_tmp/
+/docs/pytest_tmp/
+
 # Virtual environments and local package caches
 .venv/
 venv/
@@ -57,10 +66,17 @@ codebuddy_gateway.db
 # 全局通用配置容器（JSON 文件，不进 DB，提交示例 gateway_settings.example.json）
 gateway_settings.json
 model_limits.json
-data/**/*.db
-data/**/*.key
-data/**/*-wal
-data/**/*-shm
+
+# data/ 是运行时目录（DB、凭据、快照），整目录不进版本控制。
+# 只放行 data/backup/README.md —— 它是快照目录的规范/恢复指南，属于文档。
+# 注意：不能只靠 *.db / *.key 这类扩展名规则，因为实际文件名有
+# `credentials.key.latest`（.latest 结尾）和
+# `codebuddy_gateway.db.bak_before_xxx_20260910_112448`（时间戳结尾），
+# 两者都不匹配扩展名通配，会漏网。
+data/*
+!data/backup/
+data/backup/*
+!data/backup/README.md
 logs/
 *.log
 .dsh_server.*.log

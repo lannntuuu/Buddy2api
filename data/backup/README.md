@@ -1,6 +1,6 @@
 # `data/backup/` · gateway db 快照目录
 
-Gateway SQLite 数据库（`codebuddy_gateway.db`）的快照全在这。本目录不受版本控制（`.gitignore` 排除 `data/`），随部署迁移。
+Gateway SQLite 数据库（`codebuddy_gateway.db`）的快照全在这。本目录**除本 README 外**不进版本控制（`.gitignore` 里 `data/*` 整目录排除，只 `!data/backup/README.md` 放行），随部署迁移。
 
 ## 目录结构
 

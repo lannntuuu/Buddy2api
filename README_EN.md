@@ -436,7 +436,7 @@ For the full picture (routing priority, cooldown formula, per-channel retry diff
 
 ## Project layout
 
-The core Python code is split into three packages by responsibility; in v2.3 the six source modules are gathered under `src/`, and `redesign-audit/` moves under `docs/redesign/`. The root holds only entry / deployment / docs:
+The core Python code is split into three packages by responsibility; in v2.3 the six source modules are gathered under `src/`. The root holds only entry / deployment / docs:
 
 ```text
 Buddy2api/
@@ -491,6 +491,7 @@ Buddy2api/
 │  ├─ maintenance/          # Maintenance playbooks
 │  ├─ releases/             # Release notes
 │  └─ redesign/             # v2.2 refactor design docs (00-baseline / 01-audit / 02-strategy / 03-tokens / 04-prod-worktree)
+├─ redesign-audit/          # numbered implementation specs and investigation reports (06-40; read the matching spec before changing code)
 ├─ tests/                   # pytest
 │  ├─ conftest.py
 │  ├─ pytest.ini

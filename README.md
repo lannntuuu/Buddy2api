@@ -431,7 +431,7 @@ TraeWork 想算需要先单独修它的 SSE 解析，未做。详见 `docs/credi
 
 ## 项目结构
 
-v2.2 把三个巨石模块按域拆分；v2.3 把 6 个源模块统一进 `src/`、`redesign-audit/` 进 `docs/redesign/`。目录布局如下：
+v2.2 把三个巨石模块按域拆分；v2.3 把 6 个源模块统一进 `src/`。目录布局如下：
 
 ```text
 Buddy2api/
@@ -486,6 +486,7 @@ Buddy2api/
 │  ├─ maintenance/          # 维护手册
 │  ├─ releases/             # 发布说明
 │  └─ redesign/             # v2.2 重构设计文档（00-baseline / 01-audit / 02-strategy / 03-tokens / 04-prod-worktree）
+├─ redesign-audit/          # 逐条实施 spec 与调查报告（06-40 编号；改动前先读对应的 spec）
 ├─ tests/                   # pytest
 │  ├─ conftest.py
 │  ├─ pytest.ini
