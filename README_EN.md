@@ -383,6 +383,51 @@ The **Usage** and **Request logs** pages carry a **speed (t/s)** column (API fie
 
 The **Usage** detail table supports **grouping by account**: a checkbox on the far right of the control row (on by default, persisted to the `localStorage` key `cb_gw_usage_acct`). When enabled, only multi-account channels expand an account layer (provider summary / platform-level model subtotal / account subtotal / per-account model subtotal / daily detail, with both levels of subtotals shown); single-account channels keep the original provider summary → model subtotal → daily detail three-tier layout. At every level the group heading sits **above** its own content (summary and subtotals first, their detail rows after). The toggle is purely a front-end display dimension (it does not filter or exclude any account) and issues no request. Account attribution comes from the `account_name` value copy captured at request time, so a deleted account's historical attribution is preserved.
 
+## Multiple accounts and "pinning an account"
+
+When a channel has several accounts, the gateway picks one automatically by
+**priority → weight → requests already used**; within the same priority it also sticks to the
+account used most recently so it doesn't jump around on every request.
+
+In the **Channels** page you can **pin** a channel to one account from the account group header:
+
+> **This means "prefer this account", not "use only this account".** As soon as the pinned
+> account becomes unusable (in error cooldown, disabled, token expired, or already tried earlier
+> in this request), the request **automatically fails over to another account on the same
+> channel** — it will not fail and it will not hang. So don't rely on pinning for traffic
+> isolation or exact attribution: check the **Account** column on the **Request logs** page to
+> see which account actually served a request.
+
+After the pinned account errors it is put into a **temporary cooldown**, during which other
+accounts take over; when the cooldown expires the pin takes effect again **automatically** (no
+need to pin it a second time):
+
+| Error | Cooldown (doubles on consecutive failures of the same account) |
+|---|---|
+| `401` / `403` / `429` | starts at 30s, doubles each time, capped at 5 minutes |
+| anything else (5xx / network) | starts at 5s, doubles each time, capped at 80s |
+
+⚠️ **Important**: `401` / `403` (invalid credentials) not only trigger a cooldown, they also flip
+that account's status to **`expired`**, removing it from automatic routing. You then need to
+re-import/refresh its credentials, or set the status back to `active` by hand.
+
+Other notes:
+
+- Pinning is **per channel**: pinning workbuddy to account A does not affect traework.
+- On retries: **non-retryable errors (`400` / `404` / `422`) do not switch accounts** — the error
+  is returned to the client, because switching accounts cannot fix a bad request. A streaming
+  request **stops switching accounts once it has started emitting output** (sent bytes cannot be
+  recalled).
+- The pinned value lives in `src/gateway_settings.json` under the `manual_account_pin` key, **not
+  in the database**: backing up or migrating the database does **not** carry it over, so you must
+  pin again on a new machine.
+- Deleting an account or channel does **not** clear its pin entry; if you later recreate a channel
+  with the same id, the old pin **silently takes effect** again. To clear it for good, switch that
+  channel's pin back to "auto" in the UI.
+
+For the full picture (routing priority, cooldown formula, per-channel retry differences), see
+`docs/design/account-routing.md`.
+
 ## Data and security
 
 - Account tokens are encrypted before being written. Windows uses system DPAPI.
@@ -442,7 +487,7 @@ Buddy2api/
 │      └─ vendor/           # Vue 3.4.21 + SortableJS 1.15.6 (local, works offline)
 ├─ docs/                    # Design and usage docs
 │  ├─ *.md                  # credit-and-token-tracking / dashboard-slow-query / provider-model-usage / traesolo-usage / traework-usage / workbuddy-11128 / cache-tracking
-│  ├─ design/               # per-model-reasoning-effort and similar design notes
+│  ├─ design/               # account-routing (routing/failover semantics) / per-model-reasoning-effort and similar design notes
 │  ├─ maintenance/          # Maintenance playbooks
 │  ├─ releases/             # Release notes
 │  └─ redesign/             # v2.2 refactor design docs (00-baseline / 01-audit / 02-strategy / 03-tokens / 04-prod-worktree)
