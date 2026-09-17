@@ -2595,3 +2595,56 @@ def test_is_11128_error_excludes_unapproved_channel_security_semantic():
     assert compaction._is_11128_error(400, oversize_body, {"_compacted_11128": True}) is False
     # 非 400 不参与。
     assert compaction._is_11128_error(502, oversize_body, {}) is False
+
+
+def test_is_11115_error_detection():
+    """11115 上下文超限检测（2026-09 实测错误体）。
+
+    上游真实返回：
+      {"code":11115,"msg":"prompt is too long: 100001 tokens > 100000 maximum",
+       "extError":{"code":"context_length_exceeded",...}}
+      或旧形态 {"code":11115,"msg":"input length too long"}。
+    """
+    from upstream import compaction
+
+    prompt_too_long = {
+        "code": 11115,
+        "msg": "prompt is too long: 100001 tokens > 100000 maximum",
+        "requestId": "61d918b9a56c403dba463d4c7ea58858",
+        "extError": {"code": "400001", "message": "prompt is too long: 100001 tokens > 100000 maximum"},
+    }
+    input_too_long = json.dumps({
+        "code": 11115,
+        "msg": "input length too long",
+        "extError": {"code": "context_length_exceeded", "message": "input length too long"},
+    })
+    # bytes 形态（流式路径 aread 原始体）
+    raw_bytes = json.dumps(prompt_too_long).encode("utf-8")
+
+    assert compaction._is_11115_error(400, prompt_too_long, {}) is True
+    assert compaction._is_11115_error(400, input_too_long, {}) is True
+    assert compaction._is_11115_error(400, raw_bytes, {}) is True
+    # extError.code=context_length_exceeded 单独出现也应识别（防御上游改 code 数字）
+    assert compaction._is_11115_error(400, {"extError": {"code": "context_length_exceeded"}}, {}) is True
+    # 非 400 不参与
+    assert compaction._is_11115_error(502, prompt_too_long, {}) is False
+    # 已精简过仍超限 → 不再二次自愈
+    assert compaction._is_11115_error(400, prompt_too_long, {"_compacted_11128": True}) is False
+    # 普通错误不误判
+    assert compaction._is_11115_error(400, {"code": 11134, "msg": "server error"}, {}) is False
+
+
+def test_is_oversize_error_covers_11128_and_11115():
+    """proxy._is_oversize_error 应同时覆盖 11128 与 11115 两种超限语义。"""
+    from upstream.compaction import _is_11128_error, _is_11115_error
+
+    err_11128 = {"code": 11128, "msg": "Illegal API invocation: request too large"}
+    err_11115 = {"code": 11115, "msg": "prompt is too long: 100001 tokens > 100000 maximum"}
+    assert proxy._is_oversize_error(400, err_11128, {}) is True
+    assert proxy._is_oversize_error(400, err_11115, {}) is True
+    assert proxy._is_oversize_error(400, {"code": 11134, "msg": "server error"}, {}) is False
+    # marker-agnostic 版本（failover 短路用）：已精简标记后仍可识别语义
+    assert proxy._is_oversize_semantics(400, err_11115) is True
+    assert proxy._is_oversize_semantics(400, err_11115) == (
+        _is_11128_error(400, err_11115, {}) or _is_11115_error(400, err_11115, {})
+    )
