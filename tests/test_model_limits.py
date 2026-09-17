@@ -155,6 +155,39 @@ def test_proxy_precheck_rejects_over_limit(settings_file, fake_settings):
     assert "max input context" in detail["error"]["message"]
 
 
+# ---------- 11115 不在预检硬拦（workbuddy 高上下文对话不误杀） ----------
+
+def test_proxy_no_hard_block_glm53flash_high_context(settings_file, fake_settings):
+    """回归：workbuddy 的 glm-5.3-flash 高上下文请求不该被预检硬拦。
+
+    实测（2026-09 DB 日志）：glm-5.3-flash 在 workbuddy 成功处理过 208k
+    prompt tokens、hy3 成功到 192k、hy4-preview 到 262k。11115 报的
+    "100001 > 100000" 是'某时刻该账号可用的上下文/配额限制'而非模型固定
+    上下文——因此不能用内置硬上限在预检阶段拦掉能正常工作的长对话。
+    未配置 per-model 限额时（内置默认 1M），>100k 的输入应放行交给上游。
+    """
+    with _monkeypatch_alias():
+        # ≈116667 tokens > 100000，但 < 内置默认 1M → 预检放行
+        body = proxy.build_backend_body({
+            "model": "glm-5.3-flash",
+            "messages": [{"role": "user", "content": "x" * 350001}],
+        })
+    assert body["messages"][0]["content"] == "x" * 350001
+
+
+def test_proxy_precheck_rejects_only_when_admin_configured(settings_file, fake_settings):
+    """只有管理员显式配置了 per-model 限额时，预检才会拦截超限输入。"""
+    fake_settings["workbuddy.max_input_tokens_by_model"] = {"glm-5.3-flash": 100000}
+    with _monkeypatch_alias():
+        with pytest.raises(proxy.ModelLimitError) as excinfo:
+            proxy.build_backend_body({
+                "model": "glm-5.3-flash",
+                "messages": [{"role": "user", "content": "x" * 300001}],  # ≈100001 tokens
+            })
+    assert excinfo.value.status == 400
+    assert "max input context" in excinfo.value.detail["error"]["message"]
+
+
 def test_proxy_injects_max_tokens_when_missing(settings_file, fake_settings):
     _write(settings_file, {
         "max_output_tokens": 32768,

@@ -31,6 +31,17 @@ _COMPACT_11128_SECURITY_MARKERS = (
     "unapproved channel",
     "Illegal API invocation from an unapproved channel",
 )
+# 11115 上游上下文超限语义（实测错误体，2026-09 hy3/hy4-preview）：
+#   {"code":11115,"msg":"prompt is too long: 100001 tokens > 100000 maximum",
+#    "extError":{"code":"context_length_exceeded", ...}}
+#   或旧形态 {"code":11115,"msg":"input length too long"}。
+# 与 11128 同样与请求体大小相关，走同一套武装 + 精简 + 原地重试自愈。
+_COMPACT_11115_MARKERS = (
+    "11115",
+    "context_length_exceeded",
+    "prompt is too long",
+    "input length too long",
+)
 _COMPACT_ENABLED_CLIENTS = ("zcode",)
 
 
@@ -110,6 +121,31 @@ def _is_11128_error(status: int, payload, body: dict) -> bool:
     if not any(marker in text for marker in _COMPACT_11128_MARKERS):
         return False
     # If we've already deep-compacted and still 11128'd, give up to avoid busy-looping.
+    if body.get("_compacted_11128"):
+        return False
+    return True
+
+
+def _is_11115_error(status: int, payload, body: dict) -> bool:
+    """True iff this upstream response is the 11115 context-limit block.
+
+    上游在真实输入超过模型上下文上限时返回
+    {"code":11115,"msg":"prompt is too long: N tokens > M maximum"}（或旧形态
+    "input length too long"）。与 11128 一样与请求体大小相关，纳入自愈；
+    已精简过（_compacted_11128 标记）仍超限时不再触发，避免 busy-loop。
+    """
+    if status != 400:
+        return False
+    text = ""
+    if isinstance(payload, bytes):
+        text = payload.decode("utf-8", "replace")
+    elif isinstance(payload, dict):
+        text = str(payload)
+    elif isinstance(payload, str):
+        text = payload
+    if not any(marker in text for marker in _COMPACT_11115_MARKERS):
+        return False
+    # 已精简过仍超限 → 不再二次自愈，直接放行为普通 400（避免 busy-loop）。
     if body.get("_compacted_11128"):
         return False
     return True

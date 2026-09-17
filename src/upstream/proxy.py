@@ -54,6 +54,7 @@ from upstream.moderation import (  # noqa: E402,F401
 from upstream.compaction import (  # noqa: E402,F401
     compaction_stats,
     _is_11128_error,
+    _is_11115_error,
     _arm_channel,
     _channel_armed,
     _record_11128_retry,
@@ -297,6 +298,44 @@ def _has_terminal_choice(payload: dict) -> bool:
     )
 
 
+def _is_oversize_error(status: int, raw_payload, body: dict) -> bool:
+    """True iff the upstream rejected this request for exceeding context size.
+
+    Covers both upstream oversize semantics:
+      - 11128 "Illegal API invocation: request too large"（内容形态敏感）
+      - 11115 "prompt is too long: N tokens > M maximum" / "input length too long"
+        （真实 token 超限，hy3/hy4-preview 等模型 100k 上限实测）
+    """
+    return _is_11128_error(status, raw_payload, body) or _is_11115_error(
+        status, raw_payload, body
+    )
+
+
+def _is_oversize_semantics(status: int, raw_payload) -> bool:
+    """Marker-agnostic oversize check: does this 400 carry 11128/11115 semantics?
+
+    Unlike _is_oversize_error this ignores the `_compacted_11128` marker, so
+    the failover loop can short-circuit even after a compaction attempt —
+    rotating accounts cannot fix an oversized body.
+    """
+    return _is_11128_error(status, raw_payload, {}) or _is_11115_error(
+        status, raw_payload, {}
+    )
+
+
+def _self_heal_oversize(body: dict, channel: str, client_tag) -> None:
+    """Arm the (channel, client) pair and aggressively compact the body once.
+
+    Used by both stream and non-stream retry paths after an oversize 400.
+    Marks the body with `_compacted_11128` so repeated oversize errors do
+    not busy-loop (the detector checks the marker).
+    """
+    _arm_channel(channel, client_tag)
+    _smart_compact_messages(body, channel=channel, client_tag=client_tag)
+    body["_compacted_11128"] = True
+    _record_11128_retry()
+
+
 from upstream.sse import SSEDecoder, _MAX_EVENT_BYTES as _MAX_SSE_EVENT_BYTES  # noqa: E402
 from upstream.chat_grammar import (  # noqa: E402,F401
     ChatStreamObserver as _ChatStreamObserver,
@@ -468,13 +507,10 @@ async def proxy_chat_completions(
         channel = account.get("provider") or "workbuddy"
         client = (api_key_info or {}).get("_client_tag")
         err_status = result[1][0]
-        # 11128 大内容拦截：武装该 (通道,客户端) + 用激进阈值精简后原地重试（自愈）。
+        # 11128/11115 大内容拦截：武装该 (通道,客户端) + 用激进阈值精简后原地重试（自愈）。
         # 仅 ZCode Client 参与精简；DSH 及其它 agent 不精简。
-        if _is_11128_error(err_status, result[1][1], body):
-            _arm_channel(channel, client)
-            _smart_compact_messages(body, channel=channel, client_tag=client)
-            body["_compacted_11128"] = True
-            _record_11128_retry()
+        if _is_oversize_error(err_status, result[1][1], body):
+            _self_heal_oversize(body, channel, client)
             retry_t0 = time.time()
             retry_result = await _collect_stream(
                 url, headers, body, account, api_key_info, model_name, retry_t0
@@ -497,7 +533,12 @@ async def proxy_chat_completions(
 
         last_error = result
         auth_manager.mark_account_failure(account["id"], err_status)
-        will_retry = _is_retryable_status(err_status) and attempt < max_retries - 1
+        # 上下文超限(11115)与内容形态超限(11128)换账号也无济于事：
+        # 同一 body 发到任何账号都必然超限。精简重试已做过，直接返回 400。
+        if _is_oversize_semantics(err_status, result[1][1]):
+            will_retry = False
+        else:
+            will_retry = _is_retryable_status(err_status) and attempt < max_retries - 1
         detail = result[1][1]
         error_message = detail
         if isinstance(detail, dict):
@@ -696,15 +737,13 @@ async def _stream_upstream(
                 async with client.stream("POST", url, headers=headers, json=body, timeout=timeout) as response:
                     if response.status_code != 200:
                         raw_error = await response.aread()
-                        # 11128 大内容拦截：武装通道 + 激进精简后原地重试（自愈）。
-                        if _is_11128_error(response.status_code, raw_error, body):
-                            _arm_channel(channel, (api_key_info or {}).get("_client_tag"))
-                            _smart_compact_messages(
-                                body, channel=channel,
-                                client_tag=(api_key_info or {}).get("_client_tag"),
+                        # 11128/11115 大内容拦截：武装通道 + 激进精简后原地重试（自愈）。
+                        if _is_oversize_error(response.status_code, raw_error, body):
+                            _self_heal_oversize(
+                                body,
+                                channel,
+                                (api_key_info or {}).get("_client_tag"),
                             )
-                            body["_compacted_11128"] = True
-                            _record_11128_retry()
                             # 同一账号重发一次：从 tried 移除以免单账号通道被误判为无可用账号
                             tried_ids.discard(account["id"])
                             attempt -= 1
@@ -716,7 +755,7 @@ async def _stream_upstream(
                             # 自愈精简后仍失败：记录 body 特征 + 完整出站体，便于定位触发源
                             dump_path = _dump_11128_body(body, channel, model_name)
                             logger.warning(
-                                "11128 self-heal retry still failed "
+                                "oversize (11128/11115) self-heal retry still failed "
                                 "profile=%s channel=%s model=%s dump=%s",
                                 _body_size_profile(body),
                                 channel,
@@ -724,6 +763,18 @@ async def _stream_upstream(
                                 dump_path,
                             )
                         auth_manager.mark_account_failure(account["id"], response.status_code)
+                        # 上下文超限(11115)与内容形态超限(11128)换账号也无济于事：
+                        # 同一 body 发到任何账号都必然超限。精简过仍失败或未参与
+                        # 精简的客户端，直接把 400 透传给客户端，不再重试。
+                        if _is_oversize_semantics(response.status_code, raw_error):
+                            _log_request(
+                                api_key_info, account, model_name, True,
+                                0, 0, 0, 0, "error", response.status_code,
+                                raw_error.decode("utf-8", "replace")[:500], t0,
+                                reasoning_effort=effective_reasoning,
+                            )
+                            yield _err_sse_event(raw_error, response.status_code)
+                            return
                         if _is_retryable_status(response.status_code) and attempt < 2:
                             pending_retry_log = _RetryLog(
                                 account=account,
