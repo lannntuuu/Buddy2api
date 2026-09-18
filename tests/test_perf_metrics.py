@@ -704,6 +704,48 @@ def test_lifespan_schedules_log_prune(monkeypatch, isolated_db):
     assert scheduled == [1]
 
 
+def test_schedule_traework_sync_gated_on_enabled(monkeypatch):
+    """traework 未启用时不得调度 sync 循环（停用通道 => 停掉相关后台任务）。"""
+    created = []
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        orig = loop.create_task
+        loop.create_task = lambda coro: created.append(coro)
+        try:
+            monkeypatch.setattr(
+                server_mod.providers, "is_channel_enabled", lambda c: False,
+            )
+            server_mod._schedule_traework_sync()
+        finally:
+            loop.create_task = orig
+
+    asyncio.run(run())
+    assert created == []  # traework 未启用 => 不调度
+
+
+def test_schedule_traework_sync_schedules_when_enabled(monkeypatch):
+    created = []
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        orig = loop.create_task
+        loop.create_task = lambda coro: created.append(coro)
+        try:
+            monkeypatch.setattr(
+                server_mod.providers, "is_channel_enabled", lambda c: True,
+            )
+            server_mod._schedule_traework_sync()
+        finally:
+            loop.create_task = orig
+
+    asyncio.run(run())
+    assert len(created) == 1  # traework 启用 => 调度一次
+    # 关闭未 await 的协程，避免 pytest RuntimeWarning
+    if created:
+        created[0].close()
+
+
 def test_uvicorn_run_sets_timeout_keep_alive():
     # 配置级契约：uvicorn.run 必须带 timeout_keep_alive=30（源码断言）
     source = open(server_mod.__file__, "r", encoding="utf-8").read()
