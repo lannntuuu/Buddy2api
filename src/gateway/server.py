@@ -90,6 +90,11 @@ sys.modules[__name__].__class__ = _ServerModule
 async def _traework_sync_loop() -> None:
     await asyncio.sleep(60)  # delay the first run so startup stays snappy
     while True:
+        # 停用 traework 通道后必须停止循环：即使账号行仍为 active，
+        # sync_traework_usage 也会继续拉官方接口，故按 enabled 决定是否退出。
+        if not providers.is_channel_enabled("traework"):
+            sys.stderr.write("[traework-sync] traework channel disabled; stopping sync loop\n")
+            return
         try:
             res = await control_plane.sync_traework_usage(days=90)
             if res.get("ok"):
@@ -102,9 +107,13 @@ async def _traework_sync_loop() -> None:
         except Exception as exc:  # noqa: BLE001
             sys.stderr.write(f"[traework-sync] error: {exc!r}\n")
         await asyncio.sleep(3600)
+        # 若在睡眠期间 traework 被停用，最迟下一个周期开始时退出；不另行实时轮询。
 
 
 def _schedule_traework_sync() -> None:
+    # 仅当启动时 traework 已启用才调度；运行时停用由循环体内的检查负责退出。
+    if not providers.is_channel_enabled("traework"):
+        return
     try:
         asyncio.get_running_loop().create_task(_traework_sync_loop())
     except RuntimeError:
