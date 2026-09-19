@@ -143,7 +143,17 @@ STATIC_MODELS = (
 
 DEFAULT_MODEL = "auto"
 
-# "auto" is itself a routable upstream key, so it must not be rewritten.
-ALIASES: dict[str, str] = {}
+# 默认别名 = 目录里的官方展示名（`Qwen3.8-Flash` → `qfmodel` 等）。
+#
+# 别名是对外公开名：`GET /v1/models` 列的就是它，客户端也用它发请求，
+# bind 时再翻译回原生 key。预置成 display_name 的好处是客户端下拉里直接
+# 是「Qwen3.8-Flash」这种可读名字，而不是 `qfmodel` 这类内部 key。
+# 管理员可在管理页「模型配置」的**展示名列**里直接改成别的名字（改完即时生效）。
+#
+# 注意 `auto` 本身也是可路由的上游 key，展示名是 `Auto`，因此别名表是
+# `{"Auto": "auto", ...}`；直接用 `auto` 请求仍然照常工作（原生 id 始终可 bind）。
+ALIASES: dict[str, str] = {
+    meta["display_name"]: key for key, meta in MODEL_CATALOG.items()
+}
 
 from providers.retry import RETRYABLE_STATUS  # noqa: E402  (统一重试常量)

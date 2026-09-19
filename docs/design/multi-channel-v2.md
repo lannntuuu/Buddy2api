@@ -571,9 +571,21 @@ Cherry / curl / Codex：存量 Key 升级后仍绑 `workbuddy`，`model: auto` �
 ### `GET /v1/models`
 
 - `owned_by` **保持** `"buddy2api"`（避免只读 `owned_by` 的客户端破碎）。增加非破坏字段 `"channel": "<ChannelId>"`。
+- **列的是「对外模型名」= 别名**，不是上游原生 id。别名才是客户端该请求的东西，bind 时
+  由 `provider.translate_model()` 翻回原生 id 发往上游。规则见
+  `providers.model_config.public_model_names(ids, aliases)`：
+  - 白名单里每个 id 取「第一个指向它的别名」；没有别名就沿用原生 id（故旧配置不会因本改动失效）；
+  - **目标不在白名单里的别名**（历史遗留，如 WorkBuddy 的 `gpt-5.5 → glm-5.2`）**保留**，
+    否则会从目录里凭空消失；
+  - 顺序 = ids 顺序在前、孤儿别名在后，整体去重保序。
+- **不变量：目录里列出的每个名字都必须能 bind 成功**（否则客户端照着目录发请求直接 400）。
+  有回归测试覆盖。
+- **别名可改：** 管理 API `PUT /admin/channels/{ch}/models` 的 `aliases` 字段，
+  或管理页「模型配置」的**展示名列**（多个别名用英文逗号分隔）。改完即时生效。
+  别名只改「对外叫什么」，**原生 id 始终照旧可 bind**。
 - **WorkBuddy 目录：** 若 `settings.models` 存在且为非空数组，用它 **替换** WorkBuddy `list_models()`（与今天替换 `DEFAULT_MODELS` 相同）。条目必须是 **裸** WorkBuddy id；保存时拒绝第一段为 ChannelId 的 id。
-- 为每个 WorkBuddy id 同时输出裸 id 与 `workbuddy/<id>` 镜像。
-- 其他 **已启用** 通道：只输出 `channel/<id>`，**不**输出裸 `qwork-advanced`（防止被塞进 WorkBuddy 的 OpenCode 块）。
+- 为每个 WorkBuddy 名字同时输出裸名与 `workbuddy/<name>` 镜像。
+- 其他 **已启用** 通道：只输出 `channel/<name>`，**不**输出裸 `qwork-advanced`（防止被塞进 WorkBuddy 的 OpenCode 块）。
 - 未启用通道不出现。
 - **`/v1/models` = 方案 A 目录。** 方案 B 的 HTTP id（绑定 key 上的裸 `auto` / `qwork-advanced`）有意不出现。OpenCode 方案 B 从本文复制 JSON，不从本接口生成。
 

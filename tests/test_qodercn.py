@@ -2,8 +2,12 @@
 import hashlib
 import json
 
+import pytest
+
 from providers.qodercn import chat, cosy, store
+from providers.qodercn import PROVIDER
 from providers.qodercn.constants import (
+    ALIASES,
     CHANNEL_ID,
     COSY_VERSION_FROZEN,
     DEFAULT_MODEL,
@@ -11,6 +15,17 @@ from providers.qodercn.constants import (
     MODEL_CATALOG,
     STATIC_MODELS,
 )
+from storage import database as db
+
+
+@pytest.fixture()
+def fake_settings(monkeypatch):
+    """内存 settings，避免碰真实 DB。"""
+    store_: dict = {}
+    monkeypatch.setattr(db, "get_setting", lambda key, default=None: store_.get(key, default))
+    monkeypatch.setattr(db, "set_setting", lambda key, value: store_.__setitem__(key, value))
+    monkeypatch.setattr(db, "delete_setting", lambda key: store_.pop(key, None))
+    return store_
 
 # The desktop and IDE auth docs use different shapes; both must map to an account.
 DESKTOP_DOC = {
@@ -301,6 +316,79 @@ def test_qfmodel_is_enabled_and_uses_free_tier_key():
     """
     assert "qfmodel" in STATIC_MODELS
     assert MODEL_CATALOG["qfmodel"]["display_name"] == "Qwen3.8-Flash"
+
+
+# ---------- 对外展示名（别名）----------
+
+def test_default_aliases_are_the_catalog_display_names():
+    """默认别名 = 目录 display_name，客户端下拉里直接是可读名字而非内部 key。"""
+    assert ALIASES, "qodercn 必须预置别名，否则 /v1/models 只列 qfmodel 这种内部 key"
+    for key, meta in MODEL_CATALOG.items():
+        assert ALIASES[meta["display_name"]] == key
+    assert ALIASES["Qwen3.8-Flash"] == "qfmodel"
+    # 每个别名都指向白名单内的模型（无孤儿）
+    for target in ALIASES.values():
+        assert target in STATIC_MODELS
+
+
+def test_public_model_names_prefers_alias_then_falls_back_to_id():
+    from providers.model_config import public_model_names
+
+    names = public_model_names(["a", "b"], {"Nice A": "a"})
+    assert names == ["Nice A", "b"], "有别名用别名，没别名回退原生 id"
+
+
+def test_public_model_names_keeps_orphan_aliases():
+    """目标不在白名单的别名（如 workbuddy 的 gpt-5.5→glm-5.2）不能消失。"""
+    from providers.model_config import public_model_names
+
+    names = public_model_names(["hy3", "hy3-x"],
+                               {"auto": "hy3-x", "gpt-5.5": "glm-5.2"})
+    assert names == ["hy3", "auto", "gpt-5.5"]
+
+
+def test_public_model_names_is_order_stable_and_deduped():
+    from providers.model_config import public_model_names
+
+    # 两个别名指向同一 id 时只列第一个；重复输入去重
+    names = public_model_names(["a", "a", "b"], {"First": "a", "Second": "a"})
+    assert names == ["First", "b"]
+
+
+def test_listed_names_are_all_bindable(fake_settings):
+    """回归：`/v1/models` 列出的每个名字都必须真的能 bind。
+
+    否则客户端照着目录发请求会直接 400 —— 这正是本次改动的核心不变量。
+    """
+    from gateway import router
+    from providers.model_config import public_model_names
+
+    fake_settings["qodercn.models"] = list(STATIC_MODELS)
+    fake_settings["qodercn.aliases"] = dict(ALIASES)
+    ids = [m["id"] for m in PROVIDER.list_models()]
+    names = public_model_names(ids, dict(ALIASES))
+    assert "Qwen3.8-Flash" in names
+    for name in names:
+        bound = router.bind({"model": f"{CHANNEL_ID}/{name}"},
+                            {"default_channel": CHANNEL_ID})
+        assert bound.inner == name
+    # 别名最终由 translate_model 翻回原生 key（真正发给上游的值）
+    assert PROVIDER.translate_model("Qwen3.8-Flash") == "qfmodel"
+
+
+def test_alias_can_be_renamed_and_v1_models_follows(fake_settings):
+    """别名可改：改名后 /v1/models 跟着变，原生 key 仍可用。"""
+    from providers.model_config import public_model_names
+
+    fake_settings["qodercn.models"] = list(STATIC_MODELS)
+    fake_settings["qodercn.aliases"] = {"Flash免费档": "qfmodel"}
+
+    names = public_model_names([m["id"] for m in PROVIDER.list_models()], PROVIDER.alias_map())
+    assert "Flash免费档" in names
+    assert "Qwen3.8-Flash" not in names
+    # 原生 key 始终可路由，不受改名影响
+    assert PROVIDER.accepts_model("qfmodel")
+    assert PROVIDER.translate_model("Flash免费档") == "qfmodel"
 
 
 def test_build_body_sends_business_block():

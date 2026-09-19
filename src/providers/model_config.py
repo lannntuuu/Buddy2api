@@ -97,6 +97,41 @@ def channel_aliases(channel: str, default_aliases) -> dict[str, str]:
     return _aliases_from_raw(raw)
 
 
+def public_model_names(ids, aliases) -> list[str]:
+    """通道「对外模型名」有序列表：别名优先，原生 id 兜底。
+
+    别名是对外公开名（`GET /v1/models` 列的就是它，客户端也用它发请求），
+    bind 时再由 `translate_model` 翻回原生 id。因此：
+
+      * 白名单里每个 id 取「第一个指向它的别名」作为对外名；没有别名就用原生 id；
+      * **目标不在白名单里的别名**（历史遗留，如 workbuddy 的
+        `gpt-5.5 → glm-5.2`）也要保留，否则会从目录里凭空消失；
+      * 结果按 ids 顺序在前、孤儿别名在后，整体去重保序。
+
+    只影响"列出来的名字"，不影响可达性：原生 id 始终可 bind（除非它被别的
+    别名顶替后仍在白名单里 —— 那它依然被 `accepts_model` 接受）。
+    """
+    by_target: dict[str, str] = {}
+    for alias, target in aliases.items():
+        by_target.setdefault(target, alias)
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for mid in ids:
+        name = by_target.get(mid, mid)
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+
+    id_set = set(ids)
+    for alias, target in aliases.items():
+        if target in id_set or alias in seen:
+            continue
+        seen.add(alias)
+        out.append(alias)
+    return out
+
+
 def is_customized(channel: str) -> dict[str, bool]:
     """管理接口用：该通道哪些项设置了自定义值（自定义空也算自定义）。"""
     models_key, aliases_key = _channel_keys(channel)

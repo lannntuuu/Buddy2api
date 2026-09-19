@@ -196,6 +196,12 @@ QwenWork、QClaw、TraeWork、Trae SOLO 各用自己那把 Key，不要混用。
 
 各通道的模型列表 / 别名可通过管理 API 配置（改完立即生效，无需重启）；不配置时用内置默认。
 
+**别名就是 `GET /v1/models` 列出的名字**，也是客户端应当请求的名字。给模型配了别名后，
+该通道的模型目录里显示的是别名而非上游内部 key（例如 Qoder 通道默认把
+`qfmodel` 显示为 `Qwen3.8-Flash`）；没有别名的模型仍按内部 id 列出。
+别名只改「对外叫什么」，原生 key 始终照旧可请求。管理页「模型配置」页的
+**展示名列**可直接改这些名字（多个别名用英文逗号分隔）。
+
 ```bash
 # 查看（含生效值、内置默认、是否自定义）
 curl -H "Authorization: Bearer <admin-token>" http://127.0.0.1:8787/admin/channels/traework/models
