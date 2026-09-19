@@ -37,7 +37,7 @@ export default {props:['token','toast'],setup(p){
           const v=await api.get('/admin/channels/'+id+'/models',p.token);
           const rateById={};(v.model_details||[]).forEach(d=>{rateById[d.id]=d});
           const al=v.aliases||{};
-          return {...v,kind:kindById[id]||'builtin',modelRows:(v.models||[]).map(mid=>{const d=rateById[mid]||{};return{id:mid,names:aliasNamesFor(al,mid),rate:d.rate,display_name:d.display_name,official:!!d.official,reasoning:(v.reasoning&&v.reasoning[mid])||'',maxInput:(v.model_limits&&v.model_limits[mid]!==undefined)?v.model_limits[mid]:null}}),reasoningDefault:v.reasoning_default||'',reasoningSupported:!!v.reasoning_supported,reasoningCustomized:!!v.reasoning_customized,defaultMaxInput:(v.default_max_input_tokens!==undefined&&v.default_max_input_tokens!==null)?v.default_max_input_tokens:'',modelLimitsCustomized:!!v.model_limits_customized}
+          return {...v,kind:kindById[id]||'builtin',modelRows:(v.models||[]).map(mid=>{const d=rateById[mid]||{};return{id:mid,names:aliasNamesFor(al,mid),rate:d.rate,display_name:d.display_name,official:!!d.official,reasoning:(v.reasoning&&v.reasoning[mid])||'',maxInput:(v.model_limits&&v.model_limits[mid]!==undefined)?v.model_limits[mid]:null}}),reasoningDefault:v.reasoning_default||'',reasoningSupported:!!v.reasoning_supported,reasoningCustomized:!!v.reasoning_customized,sessionModeSupported:!!v.session_mode_supported,sessionMode:v.session_mode||'work',sessionModeDefault:v.session_mode_default||'work',sessionModeCustomized:!!v.session_mode_customized,sessionModeChoices:v.session_mode_choices||['work','code'],defaultMaxInput:(v.default_max_input_tokens!==undefined&&v.default_max_input_tokens!==null)?v.default_max_input_tokens:'',modelLimitsCustomized:!!v.model_limits_customized}
         }catch(e){return{channel:id,kind:kindById[id]||'builtin',error:String(e.message),modelRows:[],aliases:{}}}
       }));
       if(!chs.value.some(c=>c.channel===activeCh.value))activeCh.value=chs.value.length?chs.value[0].channel:'';
@@ -51,10 +51,11 @@ export default {props:['token','toast'],setup(p){
   function chDefaultText(c){return (c.defaults&&c.defaults.models||[]).join(', ')||'无'}
   function addModelRow(c){c.modelRows.push({id:'',names:'',maxInput:null})}
   function rmModelRow(c,i){c.modelRows.splice(i,1)}
-  // 某模型 id 当前的全部别名（对外名），逗号连接——直接编辑「展示名」列即可改。
+  // 某模型 id 当前的全部别名（对外名），逗号连接——直接编辑"展示名"列即可改。
   function aliasNamesFor(aliases,id){return Object.entries(aliases||{}).filter(([,t])=>t===id).map(([k])=>k).join(', ')}
-  // 保存时把「展示名列」翻回别名表：每行 names 拆成多个别名 → 该行 id；
-  // 再保留"目标不在白名单"的孤儿别名（如 workbuddy 的 gpt-5.5→glm-5.2），避免被静默丢弃。
+  // 保存时把「展示名列」的内容翻回别名表：
+  //   每行 names 拆成多个别名 → 该行 id；再保留"目标不在白名单"的孤儿别名
+  //   （如 workbuddy 的 gpt-5.5→glm-5.2 指向已下架模型），避免被静默丢弃。
   function aliasesFromRows(c){
     const out={};const ids=[];
     (c.modelRows||[]).forEach(r=>{
@@ -75,6 +76,11 @@ export default {props:['token','toast'],setup(p){
       const al=aliasesFromRows(c);
       const body={models,aliases:al};
       if(c.credit_rate!==undefined&&c.credit_rate!==null)body.credit_rate=Number(c.credit_rate)||0;
+      // 会话模式（traework 等支持通道）：仅支持时提交当前选择
+      if(c.sessionModeSupported){
+        const sm=(c.sessionMode||'').trim();
+        if(sm)body.mode=sm;
+      }
       // 按模型思考档位：仅收集显式选了档位的行；通道默认单独写 __default__
       if(c.reasoningSupported){
         const reasoning={};
@@ -100,7 +106,7 @@ export default {props:['token','toast'],setup(p){
     const c=chOf();if(!c||chBusyOf(c))return;
     if(!confirm('将 '+c.channel+' 的模型列表/别名/思考档位/上下文限额重置为内置默认？'))return;
     setChBusy(c,true);
-    try{await api.put('/admin/channels/'+c.channel+'/models',{models:null,aliases:null,credit_rate:null,reasoning:null,model_limits:{},default_max_input_tokens:null},p.token);p.toast(c.channel+' 已重置为默认');await loadAll()}
+    try{await api.put('/admin/channels/'+c.channel+'/models',{models:null,aliases:null,credit_rate:null,reasoning:null,mode:null,model_limits:{},default_max_input_tokens:null},p.token);p.toast(c.channel+' 已重置为默认');await loadAll()}
     catch(e){p.toast('重置失败：'+apiErr(e),'err')}
     setChBusy(c,false);
   }
@@ -243,6 +249,16 @@ export default {props:['token','toast'],setup(p){
           <span v-if="chOf().modelLimitsCustomized" class="tag" style="margin-top:6px">已自定义上下文限额</span>
         </div>
         <div style="font-size:11px;color:var(--fg3);margin-top:6px">留空 = 跟随全局默认（1048576）；每模型列可单独覆盖，空 = 未配置；超限请求会被 400 拒绝。</div>
+      </div>
+      <div v-if="chOf().sessionModeSupported" style="margin-top:14px;border-top:1px dashed var(--border);padding-top:12px">
+        <label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">会话模式（TraeWork）</label>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <select v-model="chOf().sessionMode" class="selectctl" style="padding:4px 6px;font-size:12px">
+            <option v-for="m in chOf().sessionModeChoices" :key="m" :value="m">{{m==='work'?'work（工作）':(m==='code'?'code（代码）':m)}}</option>
+          </select>
+          <span v-if="chOf().sessionModeCustomized" class="tag" style="margin-top:6px">已自定义会话模式</span>
+        </div>
+        <div style="font-size:11px;color:var(--fg3);margin-top:6px">code = 走官方 TRAE Code agent（solo_agent_lite）；work = 官方 TRAE Work（默认）。改动即时生效、无需重启。</div>
       </div>
       <div style="margin-top:14px;border-top:1px dashed var(--border);padding-top:12px"><label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">相对消耗缩放因子（tokens ÷ 该值 × 模型倍率）</label>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">

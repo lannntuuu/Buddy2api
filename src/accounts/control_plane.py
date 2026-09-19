@@ -468,10 +468,17 @@ def channel_model_view(channel: str) -> dict:
         "credit_rate_customized": db.get_setting(f"{channel}.credit_rate") is not None,
         # 按模型思考档位（取代环境变量）
         "reasoning_supported": bool(getattr(provider, "supports_reasoning_effort", False)),
+        # TraeWork 会话模式（work / code）支持位
+        "session_mode_supported": bool(getattr(provider, "supports_session_mode", False)),
         "reasoning": model_config.channel_reasoning(channel),
         "reasoning_default": model_config.channel_reasoning(channel).get("__default__", ""),
         "reasoning_customized": db.get_setting(f"{channel}.reasoning") is not None,
         "reasoning_choices": list(model_config.REASONING_CHOICES),
+        # TraeWork 会话模式（work / code）；缺失/空/非法回退默认 "work"
+        "session_mode": model_config.channel_session_mode(channel),
+        "session_mode_default": model_config.channel_session_mode(channel, "work"),
+        "session_mode_customized": db.get_setting(f"{channel}.mode") is not None,
+        "session_mode_choices": list(model_config.SESSION_MODES),
         # 模型上下文限额（DB settings，不进 JSON）：仅显式配置项 + 通道生效默认
         **model_limits.get_channel_limits(channel),
     }
@@ -516,16 +523,19 @@ def set_channel_models(
     aliases=None,
     credit_rate=None,
     reasoning=None,
+    mode=None,
     model_limits: dict | None = None,
     default_max_input_tokens: int | None = None,
     set_models: bool = False,
     set_aliases: bool = False,
     set_rate: bool = False,
     set_reasoning: bool = False,
+    set_mode: bool = False,
     set_model_limits: bool = False,
     set_default_max_input: bool = False,
 ) -> dict:
-    """设置或重置通道模型列表 / 别名 / credit 换算率 / 按模型思考档位 / 模型上下文限额。
+    """设置或重置通道模型列表 / 别名 / credit 换算率 / 按模型思考档位 /
+    会话模式 / 模型上下文限额。
     None 表示重置为默认。返回最新视图。
 
     model_limits / default_max_input_tokens 写 DB settings（不进 JSON）；
@@ -537,12 +547,12 @@ def set_channel_models(
     if providers.get_provider(channel) is None:
         raise ValueError(f"Channel '{channel}' is not enabled")
     if not (
-        set_models or set_aliases or set_rate or set_reasoning
+        set_models or set_aliases or set_rate or set_reasoning or set_mode
         or set_model_limits or set_default_max_input
     ):
         raise ValueError(
             "Provide 'models' and/or 'aliases' and/or 'credit_rate' and/or "
-            "'reasoning' and/or 'model_limits'/'default_max_input_tokens' (null resets)"
+            "'reasoning' and/or 'mode' and/or 'model_limits'/'default_max_input_tokens' (null resets)"
         )
 
     models_key, aliases_key = _channel_keys(channel)
@@ -578,6 +588,15 @@ def set_channel_models(
         else:
             validated = model_config._validate_reasoning(reasoning)
             db.set_setting(f"{channel}.reasoning", validated)
+    if set_mode:
+        if mode is None:
+            db.delete_setting(f"{channel}.mode")
+        else:
+            validated = model_config._validate_session_mode(mode)
+            if validated is None:
+                db.delete_setting(f"{channel}.mode")
+            else:
+                db.set_setting(f"{channel}.mode", validated)
     if set_model_limits or set_default_max_input:
         _set_model_limits(
             channel,

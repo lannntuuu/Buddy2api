@@ -126,10 +126,11 @@ async def admin_set_channel_models(
     channel: str, request: Request, authorization: str | None = Header(default=None)
 ):
     """Set or reset a channel's model list / aliases / credit rate / per-model reasoning tier
-    / model input-context limits (DB settings, not JSON file).
+    / session mode / model input-context limits (DB settings, not JSON file).
 
     Body: {"models": [...]|null, "aliases": {...}|null, "credit_rate": <num>|null,
             "reasoning": {"model_id": "low", "__default__": ""}|null,
+            "mode": "work"|"code"|null,
             "model_limits": {"<id>": <int|null>},
             "default_max_input_tokens": <int|null>}
     Pass null to reset that field to the built-in default. At least one key
@@ -141,6 +142,7 @@ async def admin_set_channel_models(
     set_aliases = "aliases" in data
     set_rate = "credit_rate" in data
     set_reasoning = "reasoning" in data
+    set_mode = "mode" in data
     set_model_limits = "model_limits" in data
     set_default_max_input = "default_max_input_tokens" in data
     try:
@@ -151,6 +153,7 @@ async def admin_set_channel_models(
             aliases=data.get("aliases") if set_aliases else None,
             credit_rate=data.get("credit_rate") if set_rate else None,
             reasoning=data.get("reasoning") if set_reasoning else None,
+            mode=data.get("mode") if set_mode else None,
             model_limits=data.get("model_limits") if set_model_limits else None,
             default_max_input_tokens=(
                 data.get("default_max_input_tokens") if set_default_max_input else None
@@ -159,6 +162,7 @@ async def admin_set_channel_models(
             set_aliases=set_aliases,
             set_rate=set_rate,
             set_reasoning=set_reasoning,
+            set_mode=set_mode,
             set_model_limits=set_model_limits,
             set_default_max_input=set_default_max_input,
         )

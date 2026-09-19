@@ -268,6 +268,46 @@ def reasoning_for_model(channel: str, model: str) -> str | None:
     return default or None
 
 
+# ============================================================
+# TraeWork 会话模式（work / code）
+#
+# 设置键 <channel>.mode（"work" | "code"）；缺失/空/非法回退默认 "work"。
+# 仅 traework 实际读取（建会话的 mode 字段）；其余通道不会写该键，留空即默认。
+# 注：code 会话是否需要不同的 agent_id / body 结构尚未抓包确认（spec 41 §3），
+# 此处只做 mode 取值，不臆造任何新 body 字段或 agent id（capture-pending TODO）。
+# ============================================================
+
+SESSION_MODES = ("work", "code")
+_DEFAULT_SESSION_MODE = "work"
+
+
+def channel_session_mode(channel: str, default: str = "work") -> str:
+    """该通道当前生效的会话模式；缺失/空/非法一律回退 default（默认 "work"）。
+
+    返回被 SESSION_MODES 夹紧的合法值，绝不抛出。
+    """
+    try:
+        raw = db.get_setting(f"{channel}.mode", None)
+    except Exception:
+        raw = None
+    value = (raw or "").strip() if isinstance(raw, str) else ""
+    if value not in SESSION_MODES:
+        return default
+    return value
+
+
+def _validate_session_mode(mode) -> str | None:
+    """校验 set_channel_models 传入的 mode；None = 删除；空/空白/非法抛 ValueError。"""
+    if mode is None:
+        return None
+    s = str(mode).strip()
+    if s == "":
+        raise ValueError(f"session mode must be one of {SESSION_MODES}")
+    if s not in SESSION_MODES:
+        raise ValueError(f"session mode must be one of {SESSION_MODES}")
+    return s
+
+
 def _validate_reasoning(reasoning) -> dict[str, str]:
     """校验 set_channel_models 传入的 reasoning；非法类型/值抛 ValueError。"""
     if not isinstance(reasoning, dict):

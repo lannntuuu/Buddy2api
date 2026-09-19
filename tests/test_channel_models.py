@@ -318,3 +318,43 @@ def test_reasoning_for_model_resolution(fake_settings):
     del fake_settings["workbuddy.reasoning"]
     assert reasoning_for_model("workbuddy", "glm-5.2") is None
 
+
+# ---------- TraeWork 会话模式（work / code）----------
+
+def test_channel_model_view_session_mode_defaults(fake_settings):
+    view = control_plane.channel_model_view("traework")
+    assert view["session_mode"] == "work"
+    assert view["session_mode_default"] == "work"
+    assert view["session_mode_customized"] is False
+    assert view["session_mode_choices"] == ["work", "code"]
+
+
+def test_channel_model_view_session_mode_supported_bit(fake_settings):
+    # traework 支持会话模式
+    assert control_plane.channel_model_view("traework")["session_mode_supported"] is True
+    # 不支持的通道（如 workbuddy，无 supports_session_mode 能力位）应为 False
+    assert control_plane.channel_model_view("workbuddy")["session_mode_supported"] is False
+
+
+def test_set_channel_models_session_mode_roundtrip_and_reset(fake_settings):
+    view = control_plane.set_channel_models("traework", mode="code", set_mode=True)
+    assert view["session_mode"] == "code"
+    assert view["session_mode_customized"] is True
+    assert fake_settings["traework.mode"] == "code"
+
+    # 显式 work 仍生效
+    view = control_plane.set_channel_models("traework", mode="work", set_mode=True)
+    assert view["session_mode"] == "work"
+
+    # null = 删除该设置，回退默认
+    reset = control_plane.set_channel_models("traework", mode=None, set_mode=True)
+    assert reset["session_mode"] == "work"
+    assert reset["session_mode_customized"] is False
+    assert "traework.mode" not in fake_settings
+
+
+@pytest.mark.parametrize("bad", ["design", "CODE", 123, "", "  "])
+def test_set_channel_models_session_mode_validation(fake_settings, bad):
+    with pytest.raises(ValueError):
+        control_plane.set_channel_models("traework", mode=bad, set_mode=True)
+
