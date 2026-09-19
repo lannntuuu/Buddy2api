@@ -23,10 +23,11 @@ python -m src.gateway.server
 | 千问办公 QwenWork | 开 | `%APPDATA%\QwenWorkCN` |
 | TraeWork | 开 | `%APPDATA%\TRAE SOLO CN\User\globalStorage` |
 | Trae SOLO | 开 | 无（Web 登录回环 / 凭证 JSON 导入） |
+| Qoder | 关（opt-in） | `%APPDATA%\com.qodercn.app.stable` / `%APPDATA%\QoderCN` |
 | GMI | 关（opt-in） | Web 配置：通道管理页选 GMI 通道后粘 API Key 即可 |
 | Bailian | 关(opt-in) | Web 配置：通道管理页选 Bailian 通道后粘贴 API Key 即可 |
 
-路径不对时可用 `CB_AUTH_DIR`、`CB_QCLAW_AUTH_DIR`、`CB_QWENWORK_AUTH_DIR`、`CB_TRAEWORK_AUTH_DIR` 指定。四个通道的登录文件不要混在同一个目录里。Trae SOLO 的凭证 JSON 可用 `CB_TRAESOLO_AUTH_DIR` 指定扫描目录（可选）。GMI 不读本机登录目录，靠管理页导入 API Key。
+路径不对时可用 `CB_AUTH_DIR`、`CB_QCLAW_AUTH_DIR`、`CB_QWENWORK_AUTH_DIR`、`CB_QODERCN_AUTH_DIR`、`CB_TRAEWORK_AUTH_DIR` 指定。各通道的登录文件不要混在同一个目录里。Trae SOLO 的凭证 JSON 可用 `CB_TRAESOLO_AUTH_DIR` 指定扫描目录（可选）。Qoder 默认为 opt-in：本机 Qoder CN 登录缓存可导入、查额度、发起对话（协议已冻结，见设计文档 Appendix A）；机器指纹默认读 `%USERPROFILE%\.qoder-cn\.auth\machine_id`，可用 `CB_QODERCN_MACHINE_ID` 覆盖。GMI 不读本机登录目录，靠管理页导入 API Key。
 
 ## 注意事项
 
@@ -319,6 +320,8 @@ path = "/var/lib/buddy2api/codebuddy_gateway.db"
 | WorkBuddy | `CB_AUTH_DIR` | 本机登录目录 |
 | QClaw | `CB_QCLAW_AUTH_DIR` | 本机登录目录 |
 | QwenWork | `CB_QWENWORK_AUTH_DIR` | 本机登录目录 |
+| Qoder | `CB_QODERCN_AUTH_DIR` | 本机登录目录（默认扫 `%APPDATA%\com.qodercn.app.stable` 与 `%APPDATA%\QoderCN`） |
+| Qoder | `CB_QODERCN_MACHINE_ID` * | 覆盖出站 `Cosy-MachineId`/`Cosy-MachineToken`。默认读 `%USERPROFILE%\.qoder-cn\.auth\machine_id`（缺失也能出站） |
 | TraeWork | `CB_TRAEWORK_AUTH_DIR` | `storage.json` 所在目录 |
 | Trae SOLO | `CB_TRAESOLO_CALLBACK_BASE` | 登录回调基地址（远程部署时指向能从外网访问服务的地址，默认用请求自身地址） |
 | Trae SOLO | `CB_TRAESOLO_AUTH_DIR` * | 凭证 JSON 扫描目录（可选；该通道默认不扫目录，走 Web 登录） |

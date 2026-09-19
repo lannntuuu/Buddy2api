@@ -151,6 +151,31 @@ def test_channel_model_view_defaults(fake_settings):
     assert view["defaults"]["models"] == list(TRAEWORK_DEFAULT_MODELS)
 
 
+def test_qodercn_channel_model_view_exposes_native_keys_with_display_names(fake_settings):
+    """Qoder 通道必须可在「模型配置」页配置：ID 用原生 key，展示名用 display_name。
+
+    回归点：`_CHANNEL_DEFAULTS` 曾漏掉 qodercn，导致 channel_model_view 抛 KeyError，
+    管理页该通道模型配置直接打不开。
+    """
+    from providers.qodercn.constants import STATIC_MODELS
+
+    view = control_plane.channel_model_view("qodercn")
+    assert view["models"] == list(STATIC_MODELS)
+    assert view["defaults"]["models"] == list(STATIC_MODELS)
+
+    details = {d["id"]: d for d in view["model_details"]}
+    # ID 是原生 key；展示名来自目录
+    assert "qmodel_latest" in details
+    assert details["qmodel_latest"]["display_name"] == "Qwen3.7-Max"
+    assert details["dmodel"]["display_name"] == "DeepSeek-V4-Pro"
+    assert details["gfmodel"]["display_name"] == "GLM-5.3-Flash"
+    # 上下文限额随展示一起给出（gfmodel 是 1M 档）
+    assert details["gfmodel"]["context_window"] == 1_000_000
+    assert details["dmodel"]["context_window"] == 96_000
+    # 每个 id 都应有非空展示名
+    assert all(d.get("display_name") for d in view["model_details"])
+
+
 def test_set_channel_models_roundtrip_and_reset(fake_settings):
     view = control_plane.set_channel_models(
         "traework", models=["a", "b"], aliases={"auto": "a"},

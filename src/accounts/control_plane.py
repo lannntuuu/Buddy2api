@@ -24,6 +24,8 @@ from providers.qclaw.constants import ALIASES as _QCLAW_DEFAULT_ALIASES
 from providers.qclaw.constants import STATIC_MODELS as _QCLAW_DEFAULT_MODELS
 from providers.qwenwork.constants import ALIASES as _QWENWORK_DEFAULT_ALIASES
 from providers.qwenwork.constants import STATIC_MODELS as _QWENWORK_DEFAULT_MODELS
+from providers.qodercn.constants import ALIASES as _QODERCN_DEFAULT_ALIASES
+from providers.qodercn.constants import STATIC_MODELS as _QODERCN_DEFAULT_MODELS
 from providers.traework.constants import ALIASES as _TRAEWORK_DEFAULT_ALIASES
 from providers.traework.constants import STATIC_MODELS as _TRAEWORK_DEFAULT_MODELS
 from providers.traesolo.constants import ALIASES as _TRAESOLO_DEFAULT_ALIASES
@@ -361,6 +363,7 @@ _CHANNEL_DEFAULTS: dict[str, tuple[list[str], dict[str, str]]] = {
     ),
     "qclaw": (list(_QCLAW_DEFAULT_MODELS), dict(_QCLAW_DEFAULT_ALIASES)),
     "qwenwork": (list(_QWENWORK_DEFAULT_MODELS), dict(_QWENWORK_DEFAULT_ALIASES)),
+    "qodercn": (list(_QODERCN_DEFAULT_MODELS), dict(_QODERCN_DEFAULT_ALIASES)),
     "traework": (list(_TRAEWORK_DEFAULT_MODELS), dict(_TRAEWORK_DEFAULT_ALIASES)),
     "traesolo": (list(_TRAESOLO_DEFAULT_MODELS), dict(_TRAESOLO_DEFAULT_ALIASES)),
 }
