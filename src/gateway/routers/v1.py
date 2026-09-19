@@ -21,7 +21,7 @@ from gateway.deps import (
     ALLOW_NO_ADMIN_AUTH,
 )
 from gateway.version import VERSION
-from providers.model_config import unified_models
+from providers.model_config import public_model_names, unified_models
 from upstream import proxy, responses
 
 router_obj = APIRouter()
@@ -76,23 +76,30 @@ async def list_models(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
 ):
+    """列出各通道的**对外模型名**。
+
+    列的是「别名」而不是上游原生 id：别名才是客户端该发的东西，bind 时会翻回
+    原生 id（见 `providers.model_config.public_model_names`）。没配别名的 id
+    仍以原生形式列出，所以旧配置不会因为这次改动而失效。
+    """
     await run_in_threadpool(
         lambda: _check_client_auth(authorization, x_api_key, consume_quota=False)
     )
     data = []
     workbuddy = providers.get_provider("workbuddy")
     wb_models = workbuddy.list_models() if workbuddy else db.get_setting("models", proxy.DEFAULT_MODELS)
-    for item in wb_models:
-        mid = item["id"] if isinstance(item, dict) else str(item)
+    wb_ids = [item["id"] if isinstance(item, dict) else str(item) for item in wb_models]
+    wb_aliases = workbuddy.alias_map() if workbuddy else {}
+    for name in public_model_names(wb_ids, wb_aliases):
         data.append({
-            "id": mid,
+            "id": name,
             "object": "model",
             "created": 0,
             "owned_by": "buddy2api",
             "channel": "workbuddy",
         })
         data.append({
-            "id": f"workbuddy/{mid}",
+            "id": f"workbuddy/{name}",
             "object": "model",
             "created": 0,
             "owned_by": "buddy2api",
@@ -104,10 +111,11 @@ async def list_models(
         provider = providers.get_provider(channel)
         if provider is None:
             continue
-        for item in provider.list_models():
-            mid = item["id"] if isinstance(item, dict) else str(item)
+        models = provider.list_models()
+        ids = [item["id"] if isinstance(item, dict) else str(item) for item in models]
+        for name in public_model_names(ids, provider.alias_map()):
             data.append({
-                "id": f"{channel}/{mid}",
+                "id": f"{channel}/{name}",
                 "object": "model",
                 "created": 0,
                 "owned_by": "buddy2api",

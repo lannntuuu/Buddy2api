@@ -151,6 +151,31 @@ def test_channel_model_view_defaults(fake_settings):
     assert view["defaults"]["models"] == list(TRAEWORK_DEFAULT_MODELS)
 
 
+def test_qodercn_channel_model_view_exposes_native_keys_with_display_names(fake_settings):
+    """Qoder 通道必须可在「模型配置」页配置：ID 用原生 key，展示名用 display_name。
+
+    回归点：`_CHANNEL_DEFAULTS` 曾漏掉 qodercn，导致 channel_model_view 抛 KeyError，
+    管理页该通道模型配置直接打不开。
+    """
+    from providers.qodercn.constants import STATIC_MODELS
+
+    view = control_plane.channel_model_view("qodercn")
+    assert view["models"] == list(STATIC_MODELS)
+    assert view["defaults"]["models"] == list(STATIC_MODELS)
+
+    details = {d["id"]: d for d in view["model_details"]}
+    # ID 是原生 key；展示名来自目录
+    assert "qmodel_latest" in details
+    assert details["qmodel_latest"]["display_name"] == "Qwen3.7-Max"
+    assert details["dmodel"]["display_name"] == "DeepSeek-V4-Pro"
+    assert details["gfmodel"]["display_name"] == "GLM-5.3-Flash"
+    # 上下文限额随展示一起给出（gfmodel 是 1M 档）
+    assert details["gfmodel"]["context_window"] == 1_000_000
+    assert details["dmodel"]["context_window"] == 96_000
+    # 每个 id 都应有非空展示名
+    assert all(d.get("display_name") for d in view["model_details"])
+
+
 def test_set_channel_models_roundtrip_and_reset(fake_settings):
     view = control_plane.set_channel_models(
         "traework", models=["a", "b"], aliases={"auto": "a"},
@@ -292,4 +317,44 @@ def test_reasoning_for_model_resolution(fake_settings):
     # 完全没有配置 → None（不注入）
     del fake_settings["workbuddy.reasoning"]
     assert reasoning_for_model("workbuddy", "glm-5.2") is None
+
+
+# ---------- TraeWork 会话模式（work / code）----------
+
+def test_channel_model_view_session_mode_defaults(fake_settings):
+    view = control_plane.channel_model_view("traework")
+    assert view["session_mode"] == "work"
+    assert view["session_mode_default"] == "work"
+    assert view["session_mode_customized"] is False
+    assert view["session_mode_choices"] == ["work", "code"]
+
+
+def test_channel_model_view_session_mode_supported_bit(fake_settings):
+    # traework 支持会话模式
+    assert control_plane.channel_model_view("traework")["session_mode_supported"] is True
+    # 不支持的通道（如 workbuddy，无 supports_session_mode 能力位）应为 False
+    assert control_plane.channel_model_view("workbuddy")["session_mode_supported"] is False
+
+
+def test_set_channel_models_session_mode_roundtrip_and_reset(fake_settings):
+    view = control_plane.set_channel_models("traework", mode="code", set_mode=True)
+    assert view["session_mode"] == "code"
+    assert view["session_mode_customized"] is True
+    assert fake_settings["traework.mode"] == "code"
+
+    # 显式 work 仍生效
+    view = control_plane.set_channel_models("traework", mode="work", set_mode=True)
+    assert view["session_mode"] == "work"
+
+    # null = 删除该设置，回退默认
+    reset = control_plane.set_channel_models("traework", mode=None, set_mode=True)
+    assert reset["session_mode"] == "work"
+    assert reset["session_mode_customized"] is False
+    assert "traework.mode" not in fake_settings
+
+
+@pytest.mark.parametrize("bad", ["design", "CODE", 123, "", "  "])
+def test_set_channel_models_session_mode_validation(fake_settings, bad):
+    with pytest.raises(ValueError):
+        control_plane.set_channel_models("traework", mode=bad, set_mode=True)
 

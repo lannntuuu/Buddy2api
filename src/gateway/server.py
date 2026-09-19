@@ -43,6 +43,7 @@ from storage import database as db
 from accounts import auth_manager
 from accounts import control_plane
 import providers
+from providers.traework.token import adopt_credentials_from_client
 from gateway import router as gateway_router
 from gateway.version import VERSION
 
@@ -108,6 +109,38 @@ async def _traework_sync_loop() -> None:
             sys.stderr.write(f"[traework-sync] error: {exc!r}\n")
         await asyncio.sleep(3600)
         # 若在睡眠期间 traework 被停用，最迟下一个周期开始时退出；不另行实时轮询。
+
+
+def _align_traework_credentials() -> int:
+    """启动时 best-effort 凭据对齐：若客户端 storage.json 的凭据比 DB 新，则采用。
+
+    spec §3.3：网关启动时若拿旧 refresh_token 去刷，会直接把客户端刚刷好的票
+    作废——这正是「重启后客户端掉线」的成因。故在 startup_scan 之后、调度 sync
+    之前做一次对齐。复用 token.adopt_credentials_from_client 的语义
+    （uid 一致 + 路径白名单 + 仅更新时回写 + best-effort），失败必须静默，
+    绝不能阻断启动。返回成功接管的账号数。
+    """
+    try:
+        if not providers.is_channel_enabled("traework"):
+            return 0
+        adopted = 0
+        for account in db.list_accounts(provider="traework"):
+            try:
+                # adopt_credentials_from_client 是异步函数，但本 helper 在
+                # main() 的同步启动路径中调用（尚无运行中的事件循环），故每次
+                # 单独 asyncio.run。DB 写入是线程锁下的同步操作，无协程冲突。
+                # require_newer=True：启动对齐只认 expires_at 更大，
+                # 避免把网关已刷新好的新票换成客户端手里的旧票。
+                if asyncio.run(adopt_credentials_from_client(account, require_newer=True)):
+                    adopted += 1
+            except Exception:  # noqa: BLE001 - 单个账号失败不阻断其余账号/启动
+                continue
+        if adopted:
+            sys.stderr.write(f"[startup] traework: aligned {adopted} account credential(s) from client storage\n")
+        return adopted
+    except Exception as exc:  # noqa: BLE001 - 整体失败也绝不让启动中断
+        sys.stderr.write(f"[startup] traework credential align skipped: {exc!r}\n")
+        return 0
 
 
 def _schedule_traework_sync() -> None:
@@ -491,6 +524,10 @@ def main():
 
     startup = control_plane.startup_scan()
     sys.stderr.write(f"[startup] discover: {startup}\n")
+
+    # TraeWork 启动凭据对齐：在调度 sync 之前，先把客户端可能已更新的凭据
+    # 采用进来，避免拿旧票去刷把客户端刚刷好的票作废（spec §3.3）。
+    _align_traework_credentials()
 
     # TraeWork hourly sync (60s grace before first run)
     _schedule_traework_sync()

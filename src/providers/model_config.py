@@ -97,6 +97,41 @@ def channel_aliases(channel: str, default_aliases) -> dict[str, str]:
     return _aliases_from_raw(raw)
 
 
+def public_model_names(ids, aliases) -> list[str]:
+    """通道「对外模型名」有序列表：别名优先，原生 id 兜底。
+
+    别名是对外公开名（`GET /v1/models` 列的就是它，客户端也用它发请求），
+    bind 时再由 `translate_model` 翻回原生 id。因此：
+
+      * 白名单里每个 id 取「第一个指向它的别名」作为对外名；没有别名就用原生 id；
+      * **目标不在白名单里的别名**（历史遗留，如 workbuddy 的
+        `gpt-5.5 → glm-5.2`）也要保留，否则会从目录里凭空消失；
+      * 结果按 ids 顺序在前、孤儿别名在后，整体去重保序。
+
+    只影响"列出来的名字"，不影响可达性：原生 id 始终可 bind（除非它被别的
+    别名顶替后仍在白名单里 —— 那它依然被 `accepts_model` 接受）。
+    """
+    by_target: dict[str, str] = {}
+    for alias, target in aliases.items():
+        by_target.setdefault(target, alias)
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for mid in ids:
+        name = by_target.get(mid, mid)
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+
+    id_set = set(ids)
+    for alias, target in aliases.items():
+        if target in id_set or alias in seen:
+            continue
+        seen.add(alias)
+        out.append(alias)
+    return out
+
+
 def is_customized(channel: str) -> dict[str, bool]:
     """管理接口用：该通道哪些项设置了自定义值（自定义空也算自定义）。"""
     models_key, aliases_key = _channel_keys(channel)
@@ -231,6 +266,46 @@ def reasoning_for_model(channel: str, model: str) -> str | None:
         return explicit
     default = mapping.get(_DEFAULT_REASONING_KEY)
     return default or None
+
+
+# ============================================================
+# TraeWork 会话模式（work / code）
+#
+# 设置键 <channel>.mode（"work" | "code"）；缺失/空/非法回退默认 "work"。
+# 仅 traework 实际读取（建会话的 mode 字段）；其余通道不会写该键，留空即默认。
+# 注：code 会话是否需要不同的 agent_id / body 结构尚未抓包确认（spec 41 §3），
+# 此处只做 mode 取值，不臆造任何新 body 字段或 agent id（capture-pending TODO）。
+# ============================================================
+
+SESSION_MODES = ("work", "code")
+_DEFAULT_SESSION_MODE = "work"
+
+
+def channel_session_mode(channel: str, default: str = "work") -> str:
+    """该通道当前生效的会话模式；缺失/空/非法一律回退 default（默认 "work"）。
+
+    返回被 SESSION_MODES 夹紧的合法值，绝不抛出。
+    """
+    try:
+        raw = db.get_setting(f"{channel}.mode", None)
+    except Exception:
+        raw = None
+    value = (raw or "").strip() if isinstance(raw, str) else ""
+    if value not in SESSION_MODES:
+        return default
+    return value
+
+
+def _validate_session_mode(mode) -> str | None:
+    """校验 set_channel_models 传入的 mode；None = 删除；空/空白/非法抛 ValueError。"""
+    if mode is None:
+        return None
+    s = str(mode).strip()
+    if s == "":
+        raise ValueError(f"session mode must be one of {SESSION_MODES}")
+    if s not in SESSION_MODES:
+        raise ValueError(f"session mode must be one of {SESSION_MODES}")
+    return s
 
 
 def _validate_reasoning(reasoning) -> dict[str, str]:

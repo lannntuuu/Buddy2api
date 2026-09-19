@@ -17,7 +17,9 @@ export default {props:['token','toast'],setup(p){
     const have=new Set(models);
     c.modelRows=(c.modelRows||[]).filter(x=>have.has((x.id||'').trim()));
     const kept=new Set(c.modelRows.map(x=>(x.id||'').trim()));
-    models.forEach(id=>{if(!kept.has(id))c.modelRows.push({id,rate:null,display_name:'',official:false,reasoning:(r&&r.reasoning&&r.reasoning[id])||'',maxInput:(r&&r.model_limits&&r.model_limits[id]!==undefined)?r.model_limits[id]:null})});
+    models.forEach(id=>{if(!kept.has(id))c.modelRows.push({id,names:'',rate:null,display_name:'',official:false,reasoning:(r&&r.reasoning&&r.reasoning[id])||'',maxInput:(r&&r.model_limits&&r.model_limits[id]!==undefined)?r.model_limits[id]:null})});
+    // 服务端回显的别名表是权威值：整表刷新「展示名」列，避免本地拼接与后端不一致
+    if(r&&typeof r==='object'&&r.aliases){c.aliases=r.aliases;(c.modelRows||[]).forEach(x=>{x.names=aliasNamesFor(c.aliases,(x.id||'').trim())})}
     if(r&&typeof r==='object'&&r.customized)c.customized=r.customized;
     return true;
   }
@@ -34,8 +36,9 @@ export default {props:['token','toast'],setup(p){
         try{
           const v=await api.get('/admin/channels/'+id+'/models',p.token);
           const rateById={};(v.model_details||[]).forEach(d=>{rateById[d.id]=d});
-          return {...v,kind:kindById[id]||'builtin',modelRows:(v.models||[]).map(mid=>{const d=rateById[mid]||{};return{id:mid,rate:d.rate,display_name:d.display_name,official:!!d.official,reasoning:(v.reasoning&&v.reasoning[mid])||'',maxInput:(v.model_limits&&v.model_limits[mid]!==undefined)?v.model_limits[mid]:null}}),aliasRows:Object.entries(v.aliases||{}).map(([k,val])=>({k,v:val})),reasoningDefault:v.reasoning_default||'',reasoningSupported:!!v.reasoning_supported,reasoningCustomized:!!v.reasoning_customized,defaultMaxInput:(v.default_max_input_tokens!==undefined&&v.default_max_input_tokens!==null)?v.default_max_input_tokens:'',modelLimitsCustomized:!!v.model_limits_customized}
-        }catch(e){return{channel:id,kind:kindById[id]||'builtin',error:String(e.message),modelRows:[],aliasRows:[]}}
+          const al=v.aliases||{};
+          return {...v,kind:kindById[id]||'builtin',modelRows:(v.models||[]).map(mid=>{const d=rateById[mid]||{};return{id:mid,names:aliasNamesFor(al,mid),rate:d.rate,display_name:d.display_name,official:!!d.official,reasoning:(v.reasoning&&v.reasoning[mid])||'',maxInput:(v.model_limits&&v.model_limits[mid]!==undefined)?v.model_limits[mid]:null}}),reasoningDefault:v.reasoning_default||'',reasoningSupported:!!v.reasoning_supported,reasoningCustomized:!!v.reasoning_customized,sessionModeSupported:!!v.session_mode_supported,sessionMode:v.session_mode||'work',sessionModeDefault:v.session_mode_default||'work',sessionModeCustomized:!!v.session_mode_customized,sessionModeChoices:v.session_mode_choices||['work','code'],defaultMaxInput:(v.default_max_input_tokens!==undefined&&v.default_max_input_tokens!==null)?v.default_max_input_tokens:'',modelLimitsCustomized:!!v.model_limits_customized}
+        }catch(e){return{channel:id,kind:kindById[id]||'builtin',error:String(e.message),modelRows:[],aliases:{}}}
       }));
       if(!chs.value.some(c=>c.channel===activeCh.value))activeCh.value=chs.value.length?chs.value[0].channel:'';
     }catch(e){umErr.value=apiErr(e,'加载失败')}
@@ -46,10 +49,23 @@ export default {props:['token','toast'],setup(p){
   function chBusyOf(c){return !!chBusy.value[c.channel]}
   function setChBusy(c,b){chBusy.value={...chBusy.value,[c.channel]:b}}
   function chDefaultText(c){return (c.defaults&&c.defaults.models||[]).join(', ')||'无'}
-  function addRow(c){c.aliasRows.push({k:'',v:''})}
-  function rmRow(c,i){c.aliasRows.splice(i,1)}
-  function addModelRow(c){c.modelRows.push({id:'',maxInput:null})}
+  function addModelRow(c){c.modelRows.push({id:'',names:'',maxInput:null})}
   function rmModelRow(c,i){c.modelRows.splice(i,1)}
+  // 某模型 id 当前的全部别名（对外名），逗号连接——直接编辑"展示名"列即可改。
+  function aliasNamesFor(aliases,id){return Object.entries(aliases||{}).filter(([,t])=>t===id).map(([k])=>k).join(', ')}
+  // 保存时把「展示名列」的内容翻回别名表：
+  //   每行 names 拆成多个别名 → 该行 id；再保留"目标不在白名单"的孤儿别名
+  //   （如 workbuddy 的 gpt-5.5→glm-5.2 指向已下架模型），避免被静默丢弃。
+  function aliasesFromRows(c){
+    const out={};const ids=[];
+    (c.modelRows||[]).forEach(r=>{
+      const id=(r.id||'').trim();if(!id)return;ids.push(id);
+      String(r.names||'').split(',').map(s=>s.trim()).filter(Boolean).forEach(n=>{out[n]=id});
+    });
+    const wl=new Set(ids);
+    Object.entries(c.aliases||{}).forEach(([k,v])=>{if(!wl.has(v)&&!(k in out))out[k]=v});
+    return out;
+  }
 
   async function saveChActive(){
     const c=chOf();if(!c||chBusyOf(c))return;
@@ -57,9 +73,14 @@ export default {props:['token','toast'],setup(p){
     if(!models.length&&!confirm('确认保存空白名单？这会让 '+c.channel+' 的所有模型请求都 400。点「重置默认」可恢复内置列表。'))return;
     setChBusy(c,true);
     try{
-      const al={};(c.aliasRows||[]).forEach(r=>{const k=(r.k||'').trim(),v=(r.v||'').trim();if(k&&v)al[k]=v});
+      const al=aliasesFromRows(c);
       const body={models,aliases:al};
       if(c.credit_rate!==undefined&&c.credit_rate!==null)body.credit_rate=Number(c.credit_rate)||0;
+      // 会话模式（traework 等支持通道）：仅支持时提交当前选择
+      if(c.sessionModeSupported){
+        const sm=(c.sessionMode||'').trim();
+        if(sm)body.mode=sm;
+      }
       // 按模型思考档位：仅收集显式选了档位的行；通道默认单独写 __default__
       if(c.reasoningSupported){
         const reasoning={};
@@ -85,7 +106,7 @@ export default {props:['token','toast'],setup(p){
     const c=chOf();if(!c||chBusyOf(c))return;
     if(!confirm('将 '+c.channel+' 的模型列表/别名/思考档位/上下文限额重置为内置默认？'))return;
     setChBusy(c,true);
-    try{await api.put('/admin/channels/'+c.channel+'/models',{models:null,aliases:null,credit_rate:null,reasoning:null,model_limits:{},default_max_input_tokens:null},p.token);p.toast(c.channel+' 已重置为默认');await loadAll()}
+    try{await api.put('/admin/channels/'+c.channel+'/models',{models:null,aliases:null,credit_rate:null,reasoning:null,mode:null,model_limits:{},default_max_input_tokens:null},p.token);p.toast(c.channel+' 已重置为默认');await loadAll()}
     catch(e){p.toast('重置失败：'+apiErr(e),'err')}
     setChBusy(c,false);
   }
@@ -134,7 +155,7 @@ export default {props:['token','toast'],setup(p){
     umBusy.value=false;
   }
 
-  onMounted(loadAll);return{um,umLd,umErr,umBusy,channels,addUM,rmUM,umCell,umSet,umWarn,saveUM,chs,chLoaded,chErr,activeCh,chOf,chBusyOf,addRow,rmRow,addModelRow,rmModelRow,chDefaultText,saveChActive,resetChActive,canRefreshOfficial,refreshOfficialModels,I}
+  onMounted(loadAll);return{um,umLd,umErr,umBusy,channels,addUM,rmUM,umCell,umSet,umWarn,saveUM,chs,chLoaded,chErr,activeCh,chOf,chBusyOf,addModelRow,rmModelRow,chDefaultText,saveChActive,resetChActive,canRefreshOfficial,refreshOfficialModels,I}
 },template:`
 <div>
   <div class="phead"><h1>模型配置</h1><p>统一模型翻译 · 各通道白名单与别名 · 改动即时生效</p></div>
@@ -172,13 +193,14 @@ export default {props:['token','toast'],setup(p){
         </div>
       </div>
       <div style="margin-bottom:14px"><label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">模型白名单（保存 = 按列表整体保存；空白名单保存 = 该平台所有模型请求 400；列表外的模型 400）<span v-if="canRefreshOfficial(chOf())&&chOf().channel==='traesolo'" style="margin-left:8px;color:var(--fg3)">· 倍率来自官方 consumption_rate（原值）</span><span v-else-if="canRefreshOfficial(chOf())" style="margin-left:8px;color:var(--fg3)">· 倍率来自上游 /v1/models</span><span v-else style="margin-left:8px;color:var(--fg3)">· 该通道上游不提供倍率，显示「-」</span></label>
+        <div class="hint" style="margin:0 0 8px">「展示名」就是 <code>GET /v1/models</code> 列出的名字，也是客户端该请求的名字（保存后即时生效）；留空则直接用模型 ID。多个名字用英文逗号分隔。</div>
         <div v-if="chOf().modelRows.length" class="table-scroll" style="margin-bottom:8px">
           <table style="font-size:12px">
             <thead><tr><th style="text-align:left;padding:4px 8px">模型 ID</th><th style="text-align:left;padding:4px 8px;min-width:90px">展示名</th><th style="text-align:right;padding:4px 8px;min-width:90px">倍率</th><th style="text-align:left;padding:4px 8px;min-width:130px">最大输入上下文</th><th v-if="chOf().reasoningSupported" style="text-align:left;padding:4px 8px;min-width:118px">思考档位</th><th style="width:56px"></th></tr></thead>
             <tbody>
               <tr v-for="(r,i) in chOf().modelRows" :key="i">
                 <td><input class="tcell" v-model="r.id" placeholder="模型 ID"/></td>
-                <td style="padding:3px 8px;color:var(--fg3);font-family:var(--mono)">{{r.display_name&&r.display_name!==r.id?r.display_name:''}}</td>
+                <td><input class="tcell" v-model="r.names" :placeholder="r.display_name&&r.display_name!==r.id?r.display_name:r.id" style="font-family:var(--mono)"/></td>
                 <td style="padding:3px 8px;text-align:right;font-family:var(--mono)">
                   <span v-if="r.rate!==null&&r.rate!==undefined">{{r.rate}}</span>
                   <span v-else style="color:var(--fg3)">-</span>
@@ -228,17 +250,15 @@ export default {props:['token','toast'],setup(p){
         </div>
         <div style="font-size:11px;color:var(--fg3);margin-top:6px">留空 = 跟随全局默认（1048576）；每模型列可单独覆盖，空 = 未配置；超限请求会被 400 拒绝。</div>
       </div>
-      <div><label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">别名（别名 → 模型 ID；保存 = 按列表整体保存；删空后保存 = 该平台无任何别名）</label>
-        <div v-for="(r,i) in chOf().aliasRows" :key="i" style="display:flex;gap:8px;margin-bottom:6px;align-items:center">
-          <input v-model="r.k" placeholder="别名 (如 auto)" style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:4px;font:inherit;font-size:12px;font-family:var(--mono);background:#fff;outline:none"/>
-          <span style="color:var(--fg3)">→</span>
-          <input v-model="r.v" placeholder="模型 ID" style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:4px;font:inherit;font-size:12px;font-family:var(--mono);background:#fff;outline:none"/>
-          <button class="btn s danger" @click="rmRow(chOf(),i)">删除</button>
+      <div v-if="chOf().sessionModeSupported" style="margin-top:14px;border-top:1px dashed var(--border);padding-top:12px">
+        <label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">会话模式（TraeWork）</label>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <select v-model="chOf().sessionMode" class="selectctl" style="padding:4px 6px;font-size:12px">
+            <option v-for="m in chOf().sessionModeChoices" :key="m" :value="m">{{m==='work'?'work（工作）':(m==='code'?'code（代码）':m)}}</option>
+          </select>
+          <span v-if="chOf().sessionModeCustomized" class="tag" style="margin-top:6px">已自定义会话模式</span>
         </div>
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-          <button class="btn s" @click="addRow(chOf())" style="font-size:11px;padding:3px 10px"><span v-html="I.plus"></span>添加别名</button>
-          <div class="hint" style="margin:0">内置默认别名：{{Object.entries((chOf().defaults&&chOf().defaults.aliases)||{}).map(([k,v])=>k+'→'+v).join(', ')||'无'}}</div>
-        </div>
+        <div style="font-size:11px;color:var(--fg3);margin-top:6px">code = 走官方 TRAE Code agent（solo_agent_lite）；work = 官方 TRAE Work（默认）。改动即时生效、无需重启。</div>
       </div>
       <div style="margin-top:14px;border-top:1px dashed var(--border);padding-top:12px"><label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">相对消耗缩放因子（tokens ÷ 该值 × 模型倍率）</label>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">

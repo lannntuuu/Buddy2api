@@ -42,6 +42,7 @@ def test_channel_host_fields():
     `channel_hosts` settings blob."""
     assert CHANNEL_HOST_FIELDS == {
         "qwenwork": ("gateway",),
+        "qodercn": ("gateway", "openapi"),
         "qclaw": ("jprx_gateway", "aizone_base"),
         "traesolo": ("oauth_host", "console_host", "agent_host"),
         "traework": ("agent_host", "ug_host"),

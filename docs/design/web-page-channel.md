@@ -246,7 +246,7 @@ ALIASES = {
 
 ```python
 ChannelId = Literal[
-    "workbuddy", "qclaw", "qwenwork", "qoderwork",
+    "workbuddy", "qclaw", "qwenwork", "qodercn",
     "traework", "traesolo", "gmi",
     "webdeepseek",        # ← 新增
     # "webchatgpt",       # ← 暂不启用
@@ -255,7 +255,7 @@ ChannelId = Literal[
 
 ```python
 KNOWN_CHANNEL_IDS: tuple[ChannelId, ...] = (
-    "workbuddy", "qclaw", "qwenwork", "qoderwork",
+    "workbuddy", "qclaw", "qwenwork", "qodercn",
     "traework", "traesolo", "gmi",
     "webdeepseek",        # ← 新增
 )

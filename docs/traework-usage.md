@@ -130,6 +130,49 @@ curl -X PUT -H "Authorization: Bearer <admin-token>" -H "Content-Type: applicati
 - 网页管理页：「模型配置」页的「统一模型」宽表；格子填该平台内部名，留空 = 该平台没有；
   红框 = 内部名不在该平台当前白名单内（提醒你会被 400）。
 
+### 4.4 会话模式：work / code（v2.3 新增）
+
+TraeWork 上游是多模式产品线（Work / Code / Design）。本通道默认走 **Work 模式**
+（`mode="work"` + agent `solo_work_lite`，与历史行为逐字节一致）；
+可以切换成 **Code 模式**（`mode="code"` + agent `solo_agent_lite`，即官方客户端的 TRAE Code）。
+
+**方式一（推荐）：网页管理页**
+
+「模型配置」页 → 右上角通道下拉选 **traework** → 「会话模式（TraeWork）」下拉里选
+`work（工作）` 或 `code（代码）` → 点「保存」。想恢复内置默认就点「重置默认」。
+下拉只在支持的通道（目前只有 traework）出现，选中后会显示「已自定义会话模式」标记。
+
+> 注意：前端是静态资源，改完刷新页面即可；但**后端新增的字段需要重启一次网关**
+> （`python -m src.gateway.server`）才会吐出 `session_mode_supported`，下拉才会出现。
+
+**方式二：管理 API**
+
+```bash
+# 查看当前模式（session_mode / session_mode_customized / session_mode_supported 字段）
+curl -H "Authorization: Bearer <admin-token>" \
+  http://127.0.0.1:8787/admin/channels/traework/models
+
+# 切到 code 模式（改完立即生效，无需重启）
+curl -X PUT -H "Authorization: Bearer <admin-token>" -H "Content-Type: application/json" \
+  http://127.0.0.1:8787/admin/channels/traework/models -d '{"mode":"code"}'
+
+# 切回 work，或重置为默认（null）
+curl -X PUT ... -d '{"mode":"work"}'
+curl -X PUT ... -d '{"mode":null}'
+```
+
+规则与说明：
+
+- 设置键 `traework.mode`，合法值只有 `"work"` / `"code"`；非法值 API 返回 400，读取侧一律回退 `"work"`。
+- **mode 与 agent 联动**：`code` 会同时把发消息的 `agent_id` / `agent_type` 换成 `solo_agent_lite`；
+  其余情况（含未配置）保持 `solo_work_lite`。两者取值来自同一次解析，不会不一致。
+- 依据：官方客户端（TraeWork CN）的映射为 `Work→SoloWorkLite`、`Code→SoloAgentLite`、
+  `Design→SoloDesignLite`（逆向自客户端 bundle，详见 `redesign-audit/41-traework-code-mode-spec.md`）。
+- 未纳入：`design` 模式（未实现）。
+- ✅ **已用真实账号端到端实测通过**（2026-09-19）：`mode=work` 与 `mode=code` 在
+  `/v1/chat/completions`（非流式 + 流式）与 `/v1/responses`（Codex）均正常返回；
+  两种模式的 SSE 事件集一致。详见 `redesign-audit/41a-traework-code-mode-evidence.md`。
+
 ## 5. 客户端接入
 
 ### 5.1 通用 OpenAI 兼容客户端（Cherry Studio / NextChat / OpenCode / 自研代码）
@@ -222,9 +265,63 @@ python -c "import sqlite3,time; db=sqlite3.connect(r'C:\Usr\Code\etc\Buddy2api\c
 | 400 `unknown_model` | 模型名不在当前生效列表（大小写敏感），或模型属于别的通道 | 用列表内名字；自定义列表见第 4 节 |
 | 403 `key_channel_mismatch` | 模型前缀的通道 ≠ Key 绑定的通道 | 去掉前缀，或换对应通道的 Key |
 | 429 `daily limit` | Key 的每日请求上限 | 调大上限或换 Key |
-| 503 `channel_unavailable` / `No available accounts` | traework 无 active 账号，或 token 过期且刷新失败 | 管理页导入/重新导入账号，点「测试」；确认 TRAE SOLO CN 已登录 |
+| 503 `channel_unavailable` / `No available accounts` | traework 无 active 账号，或 token 过期且刷新失败 | 先看是不是"自动退出登录"（见下方说明）；仍不行则管理页导入/重新导入账号，点「测试」；确认 TRAE SOLO CN 已登录 |
 | 502 / 上游报错（含 `code:6004` 频率限制） | 上游（WorkBuddy/Trae）限流 | WorkBuddy 限流会提示恢复时间；期间把客户端切到 Trae Key + traework 模型 |
 | 200 但回答是"复述你问题"的思考文本 | 旧代码提取 bug | 重启服务加载新代码 |
+
+### 6.1 关于「自动退出登录」（v2.3 起有自愈）
+
+**根因**：TRAE 的 `refresh_token` 是**轮换制（单次票据）**——调用一次 `ExchangeToken`
+就换发新值，旧值立刻作废。网关与官方客户端**共用同一账号**时，谁后刷新谁赢，
+另一方手里的旧票变废。实测上游会明确返回：
+
+```
+401 {"Code":"20101","Data":{"__Message.error":"refresh token is invalid"}}
+```
+
+**网关的行为（v2.3 起）**：
+
+1. **启动对齐**：网关启动时会检查客户端 `storage.json` 的凭据是否比库里的新；
+   是则采用（只认 `expires_at` 更大，不会把好票换成旧票），避免"拿旧票去刷"
+   把客户端刚刷好的票作废。
+2. **请求时自愈**：token 过期且刷新被上游拒绝时，网关会**自动从客户端
+   `storage.json` 重读**客户端刷新过的最新凭据并接管，无需人工重新导入。
+   三条入口都接了这一逻辑：正常请求（`/v1/...` 选号路径）、管理页账号行的
+   **「测试」**、以及 `_turn` 内部重试。
+
+自愈生效时，启动日志/错误输出可见：
+
+```
+[startup] traework: aligned N account credential(s) from client storage
+[traework-adopt] 已从客户端 storage.json 接管更新后的凭据（账号 <id>），状态置回 active
+```
+
+放弃自愈时会打印**具体原因和下一步动作**（v2.3 起改为中文，不再是一句笼统的 "unreadable"）：
+
+| 日志 | 含义 | 该做什么 |
+|---|---|---|
+| `放弃自救：客户端当前未登录（storage.json 里没有 iCubeAuthInfo 凭据）…` | 客户端自己处于登出态，网关没有素材可接管 | **先在 TRAE SOLO CN 客户端登录**，之后请求时自动接管 |
+| `放弃自救：客户端凭据属于另一个账号（…uid…），拒绝接管` | 客户端登录的是别的账号 | 确认客户端登录的账号；或到管理页重新导入正确账号 |
+| `放弃自救：客户端凭据里没有可用的 token` | 文件可读但没有 token 字段 | 重新登录客户端 |
+| `放弃自救：路径不在允许的扫描范围内…` | 记录了 `auth_path` 但不在白名单内 | 用 `CB_TRAEWORK_AUTH_DIR` 指定，或管理页重新导入 |
+| `放弃自救：无法读取客户端凭据文件（…）` | 真的读不了/解密失败 | 按括号内异常排查（权限、文件损坏等） |
+| `放弃：账号 <id> 未记录客户端 storage.json 路径` | 该账号是粘贴导入的，没有路径 | 管理页重新导入一次以记录路径 |
+
+> **无需动作的分支不打日志**：若客户端凭据与库里一致（没有更新），自愈会静默跳过。
+> 通道正常工作时也不会打印 `[traework-adopt]`——它只在**凭据失效需要救**时才出现。
+
+
+**边界（重要）**：
+
+- 如果你**仍在官方客户端用同一个账号**，客户端刷新仍会作废网关的票 → 网关仍可能掉，
+  但现在**能自动恢复**，不必再手动重导。要彻底避免互顶，就别在客户端里用这个账号。
+- 若 refresh_token 已被服务端**彻底吊销**（异地风控、账号状态异常等），任何自愈都无效，
+  必须人工重新登录客户端后重导。这是上游策略，网关无法绕过。
+- 自愈只在**读**客户端 `storage.json`，绝不回写，不会干扰官方客户端。
+
+**怎么判断是否真失效**：DB 里的 `refresh_expires_at` 显示到未来年份也**不代表有效**——
+轮换会让它提前作废，以实际上游返回（401 / `20101`）为准。
+
 
 **第二步：curl 通但客户端不通** → 客户端配置问题：对比 5.1/5.3 检查
 Base URL、Key、模型名、以及客户端用的是 chat 接口还是 responses 接口。

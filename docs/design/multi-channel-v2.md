@@ -19,7 +19,7 @@ Buddy2api 今天是单一厂商网关：`server.py` 把 `/v1/chat/completions` �
 
 2.0 的产品差异化不是再做一个单厂商 2api clone，而是：**扫描本机已登录的消费级 AI 客户端 → 领取免费额度 → 暴露一个 OpenAI `/v1`**，同时 **绝不把不同厂商的请求指纹、TLS、HTTP 版本、签名算法混在同一条出站链路上**。控制面允许一次操作覆盖多个通道（预览后导入、按通道再按账号顺序领取）；数据面在请求开始时绑定通道，该通道没有可用账号时返回明确的 `channel_unavailable`，**禁止静默 failover 到另一家厂商**。把未加前缀的 `qwork-advanced` 送到腾讯 Copilot 也算静默错厂商，必须 400。
 
-第一波产品意图：腾讯 **WorkBuddy/CodeBuddy** 与 **QClaw**（请求面互相隔离，不是同一网关），以及钉钉 **QwenWork（千问办公）**。阿里 **QoderWork CN** 仍因 Encode 事实不足，**不在 2.0.0 必合并火车上**。ByteDance Trae、通义 **Lingma / Qoder CN**、国际 Qoder、chat.qwen.ai、iFlow、悟空 DEAP **不做**。QwenWork adapter 可在 flag 默认关闭时合入；README / 默认 registry 必须等作者机器 `qwork-advanced` 200。发布版本字符串 **2.0.0**。每把 API Key **必须**绑定一个通道，管理页用下拉框切换。
+第一波产品意图：腾讯 **WorkBuddy/CodeBuddy** 与 **QClaw**（请求面互相隔离，不是同一网关），以及钉钉 **QwenWork（千问办公）**。阿里 **Qoder CN** 的 chat 明文路径已抓包冻结（Appendix A），作为 opt-in 通道合入。ByteDance Trae、通义 **Lingma**、国际 Qoder、chat.qwen.ai、iFlow、悟空 DEAP **不做**。QwenWork adapter 可在 flag 默认关闭时合入；README / 默认 registry 必须等作者机器 `qwork-advanced` 200。发布版本字符串 **2.0.0**。每把 API Key **必须**绑定一个通道，管理页用下拉框切换。
 
 ---
 
@@ -31,8 +31,8 @@ Buddy2api 今天是单一厂商网关：`server.py` 把 `/v1/chat/completions` �
 |---|---|---|---|
 | **WorkBuddy / CodeBuddy** | 腾讯消费级客户端 | `copilot.tencent.com`；`%LOCALAPPDATA%\CodeBuddyExtension\...\*.info` | Wave 1，已生产 |
 | **QwenWork** | 钉钉「千问办公」桌面端，**不是**通义 Lingma | `gateway.qwenwork.cn`；`%APPDATA%\QwenWorkCN\auth-v2.dat`；`Cosy-Business-Product=qoder_work`，clienttype **6** | Wave 1，flag + 0.1.8 冒烟门闩 |
-| **QoderWork CN** | 阿里 Qoder 办公中国站 | `gateway.qoder.com.cn` / `openapi.qoder.com.cn`；`dt-`/`drt-`；clienttype **5**；`Encode=1` | **不在 2.0.0 必做火车**（Encode 事实不足）；2.0.x 可选 |
-| **Lingma / Qoder CN** | 通义灵码 / Qoder 国内 IDE | `~/.lingma`、`~/.qoder-cn`、`%APPDATA%/QoderCN` | **Out（2.0 不做）** |
+| **Qoder CN** | 阿里 Qoder 中国站（前端显示名 **Qoder**） | `gateway.qoder.com.cn` / `openapi.qoder.com.cn`；`dt-`/`drt-`；clienttype **10**；**明文 body（无 `Encode=1`）** | **已冻结**：抓包 + 冒烟通过，见 Appendix A |
+| **Lingma** | 通义灵码（**不是** Qoder CN） | `~/.lingma` | **Out（2.0 不做）** |
 | **Qoder International** | `qoder.sh` 国际站 | 不同 host / COSY | **Out** |
 | **Trae** | ByteDance | 设备绑定风控、协议碎片 | **Out** |
 | **QClaw** | 腾讯电脑管家 OpenClaw | `jprx.m.qq.com` 登录/额度；对话 `mmgrcalltoken.3g.qq.com/aizone/v1/chat/completions`；**不是** `copilot.tencent.com` | **Wave 1**，与 WorkBuddy 隔离 |
@@ -129,7 +129,7 @@ OpenCode 实际线上的 HTTP `model` 是 **models 对象的 key**，不是 `-m 
 - 默认 cron。
 - spawn `qoderclicn`。
 - 1.4.11 半套 QwenWork。
-- 在 Encode/UMID 事实写进 Appendix A 之前实现 `providers/qoderwork/encode.py`。
+- 在 Encode/UMID 事实写进 Appendix A 之前实现 `providers/qodercn/encode.py`（已判定为**不必要**：明文路径可用，见 Appendix A）。
 - 公网多租户。
 
 ---
@@ -173,8 +173,8 @@ OpenCode 实际线上的 HTTP `model` 是 **models 对象的 key**，不是 `-m 
 这是 2.0 数据面的唯一 bind 规则，取代「裸 id 永远 WorkBuddy」与「bound key 覆盖一切裸 id」之间的矛盾。
 
 **已知 ChannelId 集合（硬编码，与 registry 是否启用来源不同）：**  
-`workbuddy` | `qclaw` | `qwenwork` | `qoderwork`  
-`qoderwork` 仅占位：2.0.0 默认不加载模块。`lingma` **不是** ChannelId。  
+`workbuddy` | `qclaw` | `qwenwork` | `qodercn`  
+`qodercn` 已实现（opt-in，默认不加载）；前端显示名 **Qoder**。`lingma` **不是** ChannelId。  
 用户别名的 key **禁止**以这些段开头。只在第一段 ∈ 该集合时拆前缀；`foo/bar` 当作一个未加前缀 id。单独的 `workbuddy`（无第二段）是 400 `invalid_model`。
 
 **通道内模型资格：** `inner` 合法 ⇔ `inner ∈ list_models()` 的 id 集合 **∪** 该 provider 的别名表 key（WorkBuddy = `_BUILTIN_ALIASES` ∪ 用户 `model_aliases`）。因此 `workbuddy/gpt-5.5` 合法（别名），尽管 `gpt-5.5` 不在 `DEFAULT_MODELS`。禁止用 WorkBuddy 别名去验证 QwenWork inner。
@@ -252,9 +252,10 @@ OpenCode 实际线上的 HTTP `model` 是 **models 对象的 key**，不是 `-m 
 - 前缀与当前 `default_channel` 不一致 → 403（KD-4 步骤 2）。
 - 一把 Key 同一时刻只服务一个通道。要同时打两家，建两把 Key（方案 B）或先切下拉再发请求。
 
-### KD-14 QoderWork Encode 不在 2.0.0 必做火车
+### KD-14 Qoder CN Encode 不在必做范围（已由抓包消解）
 
-- 产品仍把 QoderWork CN 列为拟支持通道，但 **PR6 不是 2.0.0 合并条件**。在 Appendix A 补齐可测向量（来自官方客户端抓包或作者 HTTP 冒烟，**不是**抄 `encoding.go`）之前，禁止提交 `encode.py`。失败时推迟通道，不 spawn CLI。
+- 该通道的 chat 明文路径已用官方客户端抓包 + HTTP 冒烟冻结（Appendix A）。**结论是不需要 `Encode=1` 密文 body，因此永久不实现 `encode.py`**：那不是"待补"，而是"不需要"。
+- 冻结向量来自作者本机对官方客户端的 MITM 抓包与逐字验签（`tests/test_qodercn.py::test_cosy_header_reproduces_captured_bytes`），**不是**抄 `encoding.go`。
 
 ---
 
@@ -284,7 +285,7 @@ flowchart TB
     subgraph providers [Data plane]
         WB["workbuddy.chat_completions"]
         QW["qwenwork.chat_completions"]
-        QD["qoderwork.chat_completions"]
+        QD["qodercn.chat_completions"]
     end
 
     OC --> SRV
@@ -324,7 +325,7 @@ buddy2api/
 │   ├── workbuddy/__init__.py # 具名 import 现有模块，无 import *
 │   ├── qclaw/                # Wave 1；flag 可先关后开
 │   ├── qwenwork/             # PR5，flag 默认关
-│   └── qoderwork/            # 仅当 Appendix A 齐（非 2.0.0 必做）
+│   └── qodercn/            # Qoder CN（前端显示名 Qoder）
 
 └── docs/design/multi-channel-v2.md
 ```
@@ -337,7 +338,7 @@ Router / 控制面只依赖下列 **对外** 方法。`build_chat` / `new_client
 from typing import Literal, Protocol, runtime_checkable
 from dataclasses import dataclass, field
 
-ChannelId = Literal["workbuddy", "qclaw", "qwenwork", "qoderwork"]
+ChannelId = Literal["workbuddy", "qclaw", "qwenwork", "qodercn"]
 
 @dataclass(frozen=True)
 class DiscoveredFile:
@@ -570,9 +571,21 @@ Cherry / curl / Codex：存量 Key 升级后仍绑 `workbuddy`，`model: auto` �
 ### `GET /v1/models`
 
 - `owned_by` **保持** `"buddy2api"`（避免只读 `owned_by` 的客户端破碎）。增加非破坏字段 `"channel": "<ChannelId>"`。
+- **列的是「对外模型名」= 别名**，不是上游原生 id。别名才是客户端该请求的东西，bind 时
+  由 `provider.translate_model()` 翻回原生 id 发往上游。规则见
+  `providers.model_config.public_model_names(ids, aliases)`：
+  - 白名单里每个 id 取「第一个指向它的别名」；没有别名就沿用原生 id（故旧配置不会因本改动失效）；
+  - **目标不在白名单里的别名**（历史遗留，如 WorkBuddy 的 `gpt-5.5 → glm-5.2`）**保留**，
+    否则会从目录里凭空消失；
+  - 顺序 = ids 顺序在前、孤儿别名在后，整体去重保序。
+- **不变量：目录里列出的每个名字都必须能 bind 成功**（否则客户端照着目录发请求直接 400）。
+  有回归测试覆盖。
+- **别名可改：** 管理 API `PUT /admin/channels/{ch}/models` 的 `aliases` 字段，
+  或管理页「模型配置」的**展示名列**（多个别名用英文逗号分隔）。改完即时生效。
+  别名只改「对外叫什么」，**原生 id 始终照旧可 bind**。
 - **WorkBuddy 目录：** 若 `settings.models` 存在且为非空数组，用它 **替换** WorkBuddy `list_models()`（与今天替换 `DEFAULT_MODELS` 相同）。条目必须是 **裸** WorkBuddy id；保存时拒绝第一段为 ChannelId 的 id。
-- 为每个 WorkBuddy id 同时输出裸 id 与 `workbuddy/<id>` 镜像。
-- 其他 **已启用** 通道：只输出 `channel/<id>`，**不**输出裸 `qwork-advanced`（防止被塞进 WorkBuddy 的 OpenCode 块）。
+- 为每个 WorkBuddy 名字同时输出裸名与 `workbuddy/<name>` 镜像。
+- 其他 **已启用** 通道：只输出 `channel/<name>`，**不**输出裸 `qwork-advanced`（防止被塞进 WorkBuddy 的 OpenCode 块）。
 - 未启用通道不出现。
 - **`/v1/models` = 方案 A 目录。** 方案 B 的 HTTP id（绑定 key 上的裸 `auto` / `qwork-advanced`）有意不出现。OpenCode 方案 B 从本文复制 JSON，不从本接口生成。
 
@@ -925,7 +938,7 @@ CB_GATEWAY_PROVIDERS=workbuddy,qclaw,qwenwork    # QwenWork 仅冒烟后
 | PR0–PR4 | WorkBuddy 隔离壳，registry 仅 workbuddy | 不打 1.4.11；可选 2.0.0-rc |
 | QClaw 最小 chat 200 | 可选启用 qclaw | 2.0.0 可宣传「可选 qclaw」 |
 | PR5 冒烟 200 | QwenWork flag 可用 | 2.0.0 可宣传「可选 qwenwork」 |
-| Appendix A + PR6 | QoderWork | 2.0.x，**不是** 2.0.0 必做 |
+| Appendix A + PR6 | Qoder CN | 已完成（opt-in，前端显示名 Qoder） |
 
 **QwenWork 代码不得出现在 PR0–PR3。** registry 在 PR2 认识 `qwenwork` 这个 ChannelId（用于 400），但不加载模块。
 
@@ -955,7 +968,7 @@ PR-QClaw  QClaw adapter（flag；冒烟前不进默认 registry）
     │
 PR5  QwenWork adapter（依赖 0.1.8 冒烟记录；默认 flag 关）
     │
-PR6  QoderWork —— 非 2.0.0 必做；依赖 Appendix A 向量
+PR6  Qoder CN —— 已完成（明文 body，无 Encode；见 Appendix A）
     │
 PR7  Keys 页通道下拉（列已在 PR1）
     ▼
@@ -1013,11 +1026,11 @@ PR8  2.0.0 发布
 - **文件：** `providers/qwenwork/*`；**不**改默认 `CB_GATEWAY_PROVIDERS`
 - **禁止：** 宣称默认支持；抄 PEM；`os.urandom(16)` 当 AES key
 
-### PR6 — QoderWork（可选，非 2.0.0）
+### PR6 — Qoder CN（已合入，opt-in）
 
-- **标题：** `feat(qoderwork): HTTP/1.1 adapter after protocol facts`
-- **依赖：** Appendix A 测试向量 + 作者 HTTP 冒烟；**不是**「PR5 的 COSY 经验」
-- **合并条件：** 事实附录已写入本文或后续修订，且 CI 标识符扫描绿
+- **标题：** `feat(qodercn): HTTP/1.1 adapter after protocol facts`
+- **依赖：** Appendix A 测试向量（抓包 + 冒烟，已验证）
+- **状态：** 已完成。明文 body（**不带** `Encode=1`）、cosy 逐字复现抓包、SSE 双层信封剥离、14 个模型键（含免费档 `qfmodel`）、额度查询；`COSY_VERSION_FROZEN=True`
 
 ### PR7 — Key 通道下拉
 
@@ -1029,7 +1042,7 @@ PR8  2.0.0 发布
 ### PR8 — 发布
 
 - **标题：** `release: Buddy2api 2.0.0`
-- **依赖：** PR0–PR4 + PR7 必做；PR-QClaw / PR5 仅当冒烟且文档诚实；PR6 非必须
+- **依赖：** PR0–PR4 + PR7 必做；PR-QClaw / PR5 仅当冒烟且文档诚实；PR6 已完成
 - **描述：** 版本字符串 **2.0.0**。Breaking：`channel_unavailable`；启动默认不入库；裸外通道 id 400；Key 必绑通道（存量视为 workbuddy）。
 
 **不要：** 1.4.11 夹带 QwenWork。
@@ -1083,36 +1096,160 @@ PR8  2.0.0 发布
 
 ---
 
-## Appendix A — QoderWork CN 协议事实状态
+## Appendix A — Qoder CN 协议事实状态（已冻结）
 
-**本附录故意不包含 Encode 的字节算法。** 在作者用官方客户端抓包或成功 HTTP 冒烟写出 **可独立复现的测试向量** 之前，不实现 `encode.py`。
+**状态：已冻结。** 2026-09 用本机 MITM 抓到官方桌面端 `com.qodercn.app.stable` 的真实 chat 请求，
+并用成功 HTTP 冒烟验证；`COSY_VERSION_FROZEN=True`，adapter 已可出站。
+**不使用 `Encode=1`**：明文 JSON body 冒烟返回真实内容，客户端那套 65 字符密文 body 不必要，故**不实现 `encode.py`**。
 
-### 已可作为常量的公开事实（README / 产品锁定）
+### 冻结常量（来自抓包 + 冒烟实测）
 
 | 项 | 值 |
 |---|---|
 | OAuth host | `https://openapi.qoder.com.cn` |
 | Chat gateway | `https://gateway.qoder.com.cn` |
-| Token 前缀 | `dt-` / `drt-` |
+| Token 前缀 | `dt-`（access）/ `drt-`（refresh） |
 | Chat path | `/algo/api/v2/service/pro/sse/agent_chat_generation` |
-| Query | `FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`（与 QwenWork Wave 1 明文相反） |
-| HTTP | **1.1**（HTTP/2 `INTERNAL_ERROR`） |
-| 签到 | `POST /sash/api/v1/me/daily-check-in/claim` |
-| 额度 | `GET /api/v2/quota/usage` |
-| COSY 差异 | 文档值 version `0.1.43`，clienttype **5**（QwenWork 为 6 / 1.0.47） |
-| 模型 key 示例 | `qmodel_latest`、`qmodel_preview`、`dmodel`、`gm51model`、`auto` — 客户端必须 `qoderwork/<id>` |
+| Query | `FetchKeys=llm_model_result&AgentId=agent_common`（**不带** `Encode=1`） |
+| HTTP | HTTP/1.1 |
+| 额度 | `GET /api/v2/quota/usage`（额度在 `addOnQuota`/`userQuota.remaining`） |
+| cosyVersion | `1.1.53`（抓包 `cosy-version` 头；COSY header 内 `cosyVersion` 同值） |
+| ideVersion | `""`（空串，抓包值） |
+| clienttype | `10`（抓包 `cosy-clienttype`；**非** 5） |
+| scene | `app`（抓包 `cosy-scene`） |
+| business | `Cosy-Business-Product=app`、`Cosy-Business-Type=agent` |
+| User-Agent | `undici`（桌面 worker 走 Node undici 出站） |
+| session_type | `qoderclicn`（body 内；`qodercli`/`qoder_work` 亦可） |
+| 机器指纹 | `%USERPROFILE%\.qoder-cn\.auth\machine_id` → `Cosy-MachineId`/`Cosy-MachineToken`；`Cosy-MachineType=5`。**实测可省略**（冒烟验证），有则发送 |
 
-### 尚未写清（PR6 阻塞）
+### COSY 签名（抓包逐字复现）
 
-- `Encode=1` 请求体：输入字节 → 输出字节的逐步运算与 **测试向量**（ASCII 明文 ↔ 密文）。
-- `Cosy-MachineToken` / UMID：是否可从已登录凭据派生，或必须硬件指纹。
-- 与 QwenWork 相同的 RSA+MD5 COSY 是否字节兼容（预期：**不**兼容，必须独立实现/独立常量）。
+与 QwenWork 同族：同一 RSA 公钥、同一 aes-128-cbc user-envelope、同一 `Bearer COSY.{o}.{md5}`。
 
-补齐方式：作者环境对官方客户端抓一条 chat；在本文增加「输入 / 输出 / 不可变常量」表；单测只使用这些向量。仍然禁止粘贴参考 Go。
+```
+header  = {"version":"v1","requestId":…,"info":…,"cosyVersion":"1.1.53","ideVersion":""}   # 键序不可变
+o       = base64(compact_json(header))          # 紧凑分隔符，无空格
+path    = URL pathname 去 "/algo" 前缀、去 query
+signStr = f"{o}\n{cosyKey}\n{timestamp}\n{body}\n{path}"
+Authorization = f"Bearer COSY.{o}.{md5_hex(signStr)}"
+```
 
-### CI 拒绝标识符（示例，实现时写入扫描脚本）
+`header` 的 base64 被签名覆盖，故**键序、`cosyVersion`、`ideVersion` 任一改动都会验签失败**。
+单测 `test_cosy_header_reproduces_captured_bytes` 用抓包值逐字比对。
+
+### 响应（SSE，双层 JSON 信封）
+
+```
+data:{"headers":{…},"body":"<内层 OpenAI chunk 的 JSON 字符串>","statusCodeValue":200,"statusCode":"OK"}
+```
+
+1. 外层 `data:` 是 envelope；内层 `body` 是**字符串**，须二次 `json.loads`。
+2. 内层就是标准 OpenAI `chat.completion.chunk`，`delta.reasoning_content` 承载思考增量。
+3. 内层 `model` **恒为 `"auto"`**（与请求键无关）→ 适配器用请求键覆盖。
+4. `finish_reason` 在 `choices[].finish_reason`（delta 同级），独立空 delta chunk，值 `"stop"`。
+5. `usage` 在 `choices:[]` 的独立 chunk，含 `completion_tokens_details.reasoning_tokens`。
+6. 结束标志：内层 body 为字面量 **`"[DONE]"`**（非法 JSON，须先判字面量）——不是裸 `data:[DONE]`。
+7. 末尾另有 `event:finish`（`firstTokenDuration`/`totalDuration`），与 OpenAI 兼容无关，忽略。
+8. 错误在 envelope 内表达（HTTP 仍 200）：`statusCodeValue=400` → 模型键错；`403` + `code=10605` = `modelQueued`（**可重试**，带 `retryAfterSeconds`）。
+
+### 模型表（解密客户端 `catalog-v6` 得到，逐个实测）
+
+客户端缓存 `%USERPROFILE%\.qoder-cn\.models\<uid>\catalog-v6` 为 AES-256-GCM，**密钥 = 账号 uid**。
+解出 14 个 key，其中 **13 个**进 `STATIC_MODELS`（14 个都可实测跑通；
+`qfmodel` 需额外的 `business` 块，见下一节）：
+
+| key | 展示名 | reasoning | vl | max_input_tokens |
+|---|---|---|---|---|
+| `auto` | Auto | ✓ | ✓ | 180000 |
+| `qmodel_38max` | Qwen3.8-Max | ✓ | ✓ | 180000 |
+| `qfmodel` | **Qwen3.8-Flash**（真免费档） | ✓ | ✓ | 180000 |
+| `qmodel_latest` | Qwen3.7-Max | ✓ | ✓ | 180000 |
+| `qmodel` | Qwen3.7-Plus | ✓ | ✓ | 180000 |
+| `q37fmodel` | Qwen3.7-Flash | ✓ | ✓ | 180000 |
+| `dmodel` | DeepSeek-V4-Pro | ✓ | ✓ | 96000 |
+| `dfmodel` | DeepSeek-Flash | — | ✓ | 180000 |
+| `gmodel` | GLM-5.3 | ✓ | ✓ | 180000 |
+| `gfmodel` | GLM-5.3-Flash | ✓ | ✓ | 1000000 |
+| `gm51model` | GLM-5.2 | ✓ | ✓ | 180000 |
+| `kmodel_latest` | Kimi-K3 | — | ✓ | 180000 |
+| `kmodel` | Kimi-K2.8-Preview | ✓ | ✓ | 180000 |
+| `mmodel` | MiniMax-M2.7 | — | **✗** | 180000 |
+
+> 14 个 key 中，`qmodel_preview` **不在官方目录里**（实测 400），故不入表；
+> 上表 14 个即目录全集。
+
+每个模型在目录里还带 `display_name`（上表「展示名」，如 `qfmodel` → **Qwen3.8-Flash**）、
+`is_free` / `is_new` / `is_default` / `is_sensitive` / `price_factor` / `promotion`（错峰折扣）、
+`context_config`（如 `200K`/`400K`/`1M` 三档，`200K` 为默认）、`thinking_config`（思考档位）。
+`list_models()` 已把 `display_name` / `is_reasoning` / `is_vl` / `max_input_tokens` 暴露出去。
+
+**注意**：网关 SSE 内层 chunk 的 `model` 字段**恒为 `"auto"`**，不回传请求键，也不回传 `display_name`——
+所以展示名只能来自这个客户端目录，adapter 用请求键覆盖 `model`。
+
+### `qfmodel`（Qwen3.8-Flash）：已可用，关键是顶层 `business` 块
+
+这是**唯一 `price_factor = 0.0` 的真免费档**（`qmodel_38max` 标 `is_free` 但实测仍计费
+约 0.0266 credits/次，而 qfmodel 约 0.0043）。
+
+**曾经的 400 及真因**：`qfmodel` 走明文路径稳定返回
+`400 [FAIL]node:oa_qwen-plus-main msg:Execution failed: null`。真因**不是**编码、头部或认证，
+而是请求体缺少顶层 `business` 对象：
+
+```json
+"business":{"product":"app","version":"1.1.53","type":"agent",
+            "stage":"start","sub_task":"chat_recap_generation"}
+```
+
+- 加上 `business` → **立即可用**（流式/非流式实测正常，连续 3/3 成功）。
+- 只删 `business` 里**任意单个字段** → 仍可用（只要对象存在）。故实现只保证对象存在。
+- 其余模型加不加 `business` 结果一致 → 无条件发送，零副作用。
+
+**定位过程**（记录以免重走）：
+1. 抓包确认客户端 chat 全程用 `Encode=1` + 自定义 base64 body，从不用明文。
+2. 服务端 oracle 还原出完整 64 符号双射表，样本 2 逐字节往返相等
+   → 证明是**纯编码**（自定义 base64），不是加密。
+3. 决定性对照：**抓包 body 原样重放 → 成功**；我们 wasm 编码的 body → 400
+   → 差异在 body **内容**而非编码。
+4. 改写抓包 body 10 个字符仍成功、截断到 40K 才报 base64 错
+   → 服务端不校验内容语义，只做结构检查。
+5. 用还原的字母表解码抓包 body，在明文区读出 `parameters`
+   （`reasoning_effort`/`enable_thinking`/`max_tokens`/`context_length:1000000`）
+   及其后的 **`business`** 对象 → 补上即通。
+
+**已排除**（均非原因）：`dt-`/`jt-` 两种 token、`Encode=1`、`agent_id`（`agent_chat`）、
+`session_type`（`qodercli`/`qoder_work`）、`is_reasoning`、`source`（user/system/inner/free）、
+`version` 2/3、`machinetype` 5/10、`model_config` 扩展字段、各类请求头
+（`cosy-data-policy`/`traceparent`/`machinehostname`/`Accept-Encoding`）、body 体量、
+单独设置 `context_length`。
+> 早期「官方客户端也失败」的旁证产生于 MITM 代理生效期间，**不可作为独立证据**；
+> 真正依据是无代理直连下的对照实验。
+
+实现：`constants.BUSINESS` + `constants.PARAMETERS_EXTRA`，`chat.build_body` 无条件带上。
+
+附带确认：网关**不校验未知模型键**（乱写的键会回落到兜底回声，`credits=0`、仅约 16 tokens），
+所以判断「某 key 是否真的可用」必须看 `reasoning_content` / `total_tokens`，不能只看 HTTP 200。
+
+### 与旧文档的差异（已修正）
+
+- 旧文档写 clienttype **5**、cosyVersion `0.1.43`、`Encode=1` —— 抓包实测为 clienttype **10**、cosyVersion **1.1.53**、**无 Encode**。
+- 旧文档把「UMID 硬件指纹」列为阻塞 —— `<uid>` 与 machine_id 实测均可获取；且 machine_id **可省略**。
+- 旧文档的签到端点 `/sash/api/v1/me/daily-check-in/claim` 未纳入本通道（`checkin_supported=False`）。
+
+### CI 拒绝标识符
 
 `QoderEncode` `QoderDecode` `CosySession` `ParseNestedSSE` `AggregateNested` `StreamAsOpenAI` `NewCosySession`
+
+### 附：`Encode=1` 编码已定性（用服务端当 oracle）
+
+虽然本通道**不使用** `Encode=1`，但其性质已探明，供日后参考：
+
+- 服务端解码在 `EncryptUtil.decode` → `CustomBase64Util$CustomBase64.decode0`
+  （由一次 `Encode=1` 请求返回的 Java 堆栈泄露）。
+- 逐字符二分探测（发 4 连字符 body，看服务端是否报 `Illegal base64 character XX`）
+  还原出**合法字母表恰为 65 字符**，与抓包字母表**完全一致**：
+  `!#$%&()*,.@A-Z^_a-zA-Z`（即 ASCII 33..122 去掉 `" + - / 0-9 : ; < = > ? [ \ ] ` 等）。
+- 因此它是**自定义 base64 变体（编码，非加密）**；`+ / =` 及数字均为非法字符，
+  故抓包 body 里看不到它们。字母表顺序与 6bit 值的映射仍需实测（本文不写死）。
 
 ---
 

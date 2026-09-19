@@ -31,7 +31,7 @@ CORE_METHODS = [
 ]
 CORE_ASYNC = {"pick_account_with_fallback", "has_usable_account", "chat_completions"}
 
-ALL_PROVIDERS = ["workbuddy", "qclaw", "qwenwork", "traework", "traesolo"]
+ALL_PROVIDERS = ["workbuddy", "qclaw", "qwenwork", "qodercn", "traework", "traesolo"]
 
 
 def _instance(channel: str, monkeypatch=None):
@@ -71,6 +71,7 @@ def test_capability_matrix(monkeypatch):
         "workbuddy": set(),
         "qclaw": {"store", "refresh", "test_chat", "quota", "qclaw_login"},
         "qwenwork": {"store", "refresh", "test_chat", "quota", "upsert"},
+        "qodercn": {"store", "refresh", "test_chat", "quota", "upsert"},
         "traework": {"store", "refresh", "test_chat", "quota", "upsert", "checkin"},
         "traesolo": {"store", "refresh", "test_chat", "quota", "upsert", "checkin",
                      "solo_login", "dynamic_models"},
