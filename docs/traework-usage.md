@@ -169,9 +169,33 @@ curl -X PUT ... -d '{"mode":null}'
 - 依据：官方客户端（TraeWork CN）的映射为 `Work→SoloWorkLite`、`Code→SoloAgentLite`、
   `Design→SoloDesignLite`（逆向自客户端 bundle，详见 `redesign-audit/41-traework-code-mode-spec.md`）。
 - 未纳入：`design` 模式（未实现）。
+- **code 模式真正生效靠 `is_in_code_mode` 标记（不止 agent 名）**：官方客户端（TraeWork CN）
+  在 code 模式下会向上游注入 `is_in_code_mode=true`——`createSession` 将其嵌套进
+  `initial_message`，`sendMessage` 放在 body 顶层（逆向自客户端 bundle
+  `976.f593cb93.mjs` 的 `applyCodeModeFlagIfNeeded`）。网关现已对齐这两处：配 `mode=code`
+  时建会话与发消息都带该标记，上游才真正按 TRAE Code 处理；只改 `mode`+`agent` 而不带此
+  标记，上游仍视为普通 work 会话（这正是早期"code 模式形同虚设"的根因）。`work` 模式
+  不发送该字段（与官方一致，行为逐字节不变）。
 - ✅ **已用真实账号端到端实测通过**（2026-09-19）：`mode=work` 与 `mode=code` 在
   `/v1/chat/completions`（非流式 + 流式）与 `/v1/responses`（Codex）均正常返回；
   两种模式的 SSE 事件集一致。详见 `redesign-audit/41a-traework-code-mode-evidence.md`。
+
+### 4.5 已知限制：不保留多轮上下文 / system / tools（当前边界，非 bug）
+
+TraeWork 通道每收到一个请求都会**新建一个上游会话、用完即删**（见 `chat.py` 的 `_turn`）：
+网关只把 OpenAI 请求里**最后一条 user 消息**抽取出来发给上游（`query` 为单轮对话体），
+**不转发** system prompt、历史多轮 messages、tools、temperature 等参数。
+
+这意味着：
+
+- 同一把 Key 的连续对话在 TraeWork 通道**没有"记忆"**：每轮都是全新会话，上游看不到上一轮；
+- 客户端下发的 system 指令、工具调用、采样参数在 TraeWork 通道**不生效**；
+- 这是该通道当前的**设计边界**（上游历史事件由服务端会话持有，而网关不复用会话），
+  **不是故障**，请勿据此误判通道异常。
+
+对照：同样的请求走其它通道（如 `qwenwork` / `qclaw`）会保留完整上下文与 system/tools，
+表现符合预期时应参考那些通道。若需要多轮 / 带上下文的 TraeWork 对话，目前只能由你在每轮
+把历史拼进 user 消息里（上下文由客户端自行维护）。
 
 ## 5. 客户端接入
 

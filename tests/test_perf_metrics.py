@@ -947,10 +947,10 @@ def test_traework_run_turn_fills_first_token_fallback(monkeypatch, isolated_db):
         pass
 
     on_thinking.first_token_cell = cell
-    status, result = asyncio.run(
+    status, *rest = asyncio.run(
         traework_chat._run_turn("hi", "m", "auto", None, True, on_thinking)
     )
-    assert status == "ok" and result == "answer"
+    assert status == "ok" and rest[0] == "answer"
     # 无思考片段：_run_turn 在回合结束时补记首帧时刻
     assert isinstance(cell.get("ms"), int)
     assert logged and logged[0][1]["first_token_ms"] == cell["ms"]

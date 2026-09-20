@@ -20,7 +20,9 @@ from providers.traework.constants import (
     agent_id_for_mode,
     ALIASES,
     CHANNEL_ID,
+    CODE_MODE_FLAG,
     SESSION_MODE,
+    SESSION_MODE_CODE,
     SESSIONS_PATH,
     STATIC_MODELS,
 )
@@ -161,7 +163,6 @@ _SKIP_EVENTS = {
     "status_changed",
     "platform_timing",
     "timing_events",
-    "token_usage",
     "model_config",
     "project_name_message",
     "session_title_message",
@@ -175,8 +176,12 @@ def _split_event(event: str, payload: dict) -> tuple[str, list[str]]:
 
     思考片段来自 reasoning_content / thought（如 plan_item 事件），
     供流式请求提前转发；回答文本只用于事件兜底拼接。
+
+    token_usage / done 不携带可见文本：前者是用量统计（单独解析后透传到
+    usage，绝不并入回答），后者是终止信号，二者都不走 _walk_text，避免
+    数值/状态字段被误当正文拼进答案。
     """
-    if event in _SKIP_EVENTS:
+    if event in _SKIP_EVENTS or event in ("token_usage", "done"):
         return "", []
     answer: list[str] = []
     thinking: list[str] = []
@@ -187,6 +192,61 @@ def _split_event(event: str, payload: dict) -> tuple[str, list[str]]:
 def _text_from_event(event: str, payload: dict) -> str:
     answer, _thinking = _split_event(event, payload)
     return answer
+
+
+def _parse_token_usage(payload: dict | None) -> dict | None:
+    """解析上游 token_usage 事件（input_tokens / output_tokens）。
+
+    与兄弟通道 traesolo 同族约定：只认 input_tokens / output_tokens 两组键名
+    （含 input_token / output_token 简写），其余未知字段丢弃。缺失 / 非整数
+    / None 一律按 0 处理；两组都为空则不返回 usage（保持旧语义）。
+    """
+    if not isinstance(payload, dict):
+        return None
+    candidates = (
+        ("input_tokens", "output_tokens"),
+        ("input_token", "output_token"),
+    )
+    inp = out = None
+    for k_in, k_out in candidates:
+        if payload.get(k_in) is not None or payload.get(k_out) is not None:
+            inp = payload.get(k_in)
+            out = payload.get(k_out)
+            break
+    if inp is None and out is None:
+        return None
+    try:
+        inp_i = int(inp) if isinstance(inp, (int, float, str)) and inp not in ("", None) else 0
+    except (TypeError, ValueError):
+        inp_i = 0
+    try:
+        out_i = int(out) if isinstance(out, (int, float, str)) and out not in ("", None) else 0
+    except (TypeError, ValueError):
+        out_i = 0
+    return {
+        "prompt_tokens": inp_i,
+        "completion_tokens": out_i,
+        "total_tokens": inp_i + out_i,
+    }
+
+
+def _finish_reason_from_done(payload: dict | None) -> str | None:
+    """上游 done 事件携带 status：完成类映射 stop，失败/取消类映射 error。
+
+    无证据支持 length 这类截断态，故不臆造；status 缺失或非预期值回退 None
+    （调用方按既有默认 stop 处理）。
+    """
+    if not isinstance(payload, dict):
+        return None
+    status = payload.get("status")
+    if status is None:
+        return None
+    status = str(status).lower()
+    if status in ("completed", "complete", "done", "success", "ok", "finished", "succeed"):
+        return "stop"
+    if status in ("error", "failed", "failure", "cancel", "cancelled", "canceled", "abort", "aborted"):
+        return "error"
+    return None
 
 
 def extract_assistant_text(items: list) -> str:
@@ -202,7 +262,9 @@ def extract_assistant_text(items: list) -> str:
     return _join(answer) or _join(thinking)
 
 
-def _openai_json(model: str, text: str, finish: str = "stop") -> dict:
+def _openai_json(model: str, text: str, finish: str = "stop", usage: dict | None = None) -> dict:
+    # 上游 token_usage 事件拿到真值则回填，否则保持 0（向后兼容）。
+    usage = usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     return {
         "id": f"traework-{uuid.uuid4().hex[:12]}",
         "object": "chat.completion",
@@ -215,7 +277,7 @@ def _openai_json(model: str, text: str, finish: str = "stop") -> dict:
                 "finish_reason": finish,
             }
         ],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "usage": usage,
     }
 
 
@@ -225,15 +287,29 @@ async def _pick(tried: set[int]) -> dict | None:
 
 
 async def _log(api_key_info, account, model_name, stream, finish, status, error, t0,
-               first_token_ms=None):
+               first_token_ms=None, usage=None):
     # 落库线程化 + 语义收敛：见 store_common.log_request（三家 _log 的一份实现）。
-    # TraeWork 上游不回报 token，usage 传 None（tokens/credit 记 0）。
+    # usage 仅在拿到上游 token_usage 真值时传真实 dict，否则传 None（tokens/credit 记 0）。
+    #
+    # 注意：log_request 的 prompt_tokens / completion_tokens / total_tokens 三列读的是
+    # 独立 kwargs，**不会**从 usage 里推导；credit 又只按 total_tokens 计算。只传 usage
+    # 的话 usage_json 有真值而三列与 credit 仍恒 0（与 qclaw/qwenwork 的 _log 不一致）。
+    # 故拿到真值时显式把 usage 拆成三个 kwargs 一并透传；没拿到时**一个都不传**，
+    # 保持与改造前完全一致的行为（log_request 侧默认取 0）。
+    token_kwargs = {}
+    if isinstance(usage, dict) and usage:
+        token_kwargs = {
+            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+            "completion_tokens": int(usage.get("completion_tokens") or 0),
+            "total_tokens": int(usage.get("total_tokens") or 0),
+        }
     await store_common.log_request(
         api_key_info, account,
-        channel=CHANNEL_ID, model=model_name, stream=stream, usage=None,
+        channel=CHANNEL_ID, model=model_name, stream=stream, usage=usage,
         finish_reason=finish, status_code=status,
         duration_ms=int((time.time() - t0) * 1000), error_msg=error,
         created_at=int(t0), first_token_ms=first_token_ms,
+        **token_kwargs,
     )
 
 
@@ -276,14 +352,22 @@ async def _turn(
     try:
         # 建会话与发消息共用同一个 mode，确保两者取值一致（只解析一次）。
         mode = channel_session_mode(CHANNEL_ID, SESSION_MODE)
+        # code 模式：官方 client 在 createSession 把 is_in_code_mode 嵌套进
+        # initial_message（976.f593cb93.mjs applyCodeModeFlagIfNeeded）；work 模式
+        # 不发送该字段，body 与此前逐字段一致。
+        create_json: dict = {
+            "mode": mode,
+            "auto_create_project": True,
+            "origin": "web",
+        }
+        if mode == SESSION_MODE_CODE:
+            init_msg = dict(create_json.get("initial_message") or {})
+            init_msg[CODE_MODE_FLAG] = True
+            create_json["initial_message"] = init_msg
         created = await client.post(
             session_url,
             headers=headers,
-            json={
-                "mode": mode,
-                "auto_create_project": True,
-                "origin": "web",
-            },
+            json=create_json,
             timeout=timeout,
         )
         if created.status_code >= 400:
@@ -295,9 +379,12 @@ async def _turn(
         if not sid:
             raise TraeWorkAuthError("create session missing chat_session_id")
         pieces: list[str] = []
+        usage: dict | None = None  # 上游 token_usage 事件解析出的真实用量（无则 None）
+        finish_reason: str | None = None  # 上游 done.status 映射出的终止原因（无则 None）
         finished = asyncio.Event()
 
         async def read_events() -> None:
+            nonlocal usage, finish_reason
             event_name = "message"
             seen_thinking: set[str] = set()
             try:
@@ -321,10 +408,21 @@ async def _turn(
                             event_payload = json.loads(raw)
                         except json.JSONDecodeError:
                             continue
-                        answer_text, thinking_frags = _split_event(
-                            event_name,
-                            event_payload if isinstance(event_payload, dict) else {},
-                        )
+                        event_payload = event_payload if isinstance(event_payload, dict) else {}
+                        # token_usage 单独解析：拿到真值用量，且不并入可见回答文本。
+                        if event_name == "token_usage":
+                            parsed = _parse_token_usage(event_payload)
+                            if parsed is not None:
+                                usage = parsed
+                            continue
+                        if event_name == "done":
+                            # 终端事件：读取 status 映射 finish_reason（R5）。
+                            mapped = _finish_reason_from_done(event_payload)
+                            if mapped is not None:
+                                finish_reason = mapped
+                            finished.set()
+                            return
+                        answer_text, thinking_frags = _split_event(event_name, event_payload)
                         if answer_text:
                             pieces.append(answer_text)
                         if on_thinking is not None:
@@ -332,9 +430,6 @@ async def _turn(
                                 if frag and frag not in seen_thinking:
                                     seen_thinking.add(frag)
                                     await on_thinking(frag)
-                        if event_name == "done":
-                            finished.set()
-                            return
             except httpx.HTTPError:
                 finished.set()
 
@@ -348,17 +443,22 @@ async def _turn(
                 ensure_ascii=False,
             )
             agent = agent_id_for_mode(mode)
+            # code 模式：官方 client 在 sendMessage 把 is_in_code_mode 放在 body 顶层
+            # （976.f593cb93.mjs applyCodeModeFlagIfNeeded）；work 模式不发送该字段。
+            msg_json: dict = {
+                "chat_session_id": sid,
+                "content": [],
+                "query": query,
+                "model_name": model,
+                "agent_id": agent,
+                "agent_type": agent,
+            }
+            if mode == SESSION_MODE_CODE:
+                msg_json[CODE_MODE_FLAG] = True
             sent = await client.post(
                 f"{session_url}/{sid}/messages",
                 headers=headers,
-                json={
-                    "chat_session_id": sid,
-                    "content": [],
-                    "query": query,
-                    "model_name": model,
-                    "agent_id": agent,
-                    "agent_type": agent,
-                },
+                json=msg_json,
                 timeout=timeout,
             )
             payload = sent.json() if sent.content else {}
@@ -382,7 +482,9 @@ async def _turn(
             except BaseException:
                 pass
             _spawn_bg_close(_close_client())
-            return text
+            # 透传真实用量与终止原因：usage 仅在拿到 token_usage 真值时非空，
+            # finish_reason 仅在 done.status 命中映射时非空（缺省回退 "stop"）。
+            return text, usage, finish_reason
         except BaseException:
             # 失败路径：同步清理，会话删除尽量做到，再抛出。
             task.cancel()
@@ -401,8 +503,8 @@ async def _turn(
 
 async def _adopt_and_retry(
     account: dict, prompt: str, model: str, *, timeout: float = 90.0, on_thinking=None
-) -> str | None:
-    """鉴权失效后的「凭据自救 + 重试一次」；返回回答文本，未接管或重试失败返回 None。
+) -> tuple | None:
+    """鉴权失效后的「凭据自救 + 重试一次」；返回 (text, usage, finish_reason)，未接管/失败返回 None。
 
     `_run_turn`（选号链路）与 `test_chat`（管理页「测试」直调账号）共用这一份实现：
     后者绕过 _pick，若不自救则凭据被客户端轮换后「测试」永远失败，而它恰是
@@ -421,9 +523,13 @@ async def _adopt_and_retry(
     if not fresh:
         return None
     try:
-        return await _turn(fresh, prompt, model, timeout=timeout, on_thinking=on_thinking)
+        result = await _turn(fresh, prompt, model, timeout=timeout, on_thinking=on_thinking)
     except Exception:  # noqa: BLE001 - 重试失败同样收敛为 None（调用方按 503 降级）
         return None
+    # 保留 _turn 的完整三元组，让调用方能一并落库 usage/finish_reason；兼容只返回文本的替身。
+    if isinstance(result, tuple):
+        return result
+    return result, None, None
 
 
 async def _run_turn(
@@ -435,12 +541,16 @@ async def _run_turn(
     on_thinking=None,
     timeout: float = 90.0,
 ) -> tuple:
-    """账号重试循环。返回 ("ok", text) 或 ("error", (status, detail))。
+    """账号重试循环。返回 ("ok", text, usage, finish_reason) 或 ("error", (status, detail))。
+
+    成功路径多带回 usage / finish_reason（供非流式 JSON 与流式末帧共用，二者此前
+    取不到上游真值）；失败路径仍是 ("error", (status, detail)) 两元组，调用方按
+    原语义解包，签名（入参）保持不变以兼容既有测试替身
+    （tests/test_perf_providers.py 的 fake _run_turn）。
 
     流式路径在 on_thinking 回调上挂 first_token_cell（{"t0": 起点}）：
     思考帧在 _stream_chat 侧打点；回合结束时若还没有内容帧（最终回答
-    才出的场景），由这里补记一次，避免漏采。签名保持不变以兼容既有
-    测试替身（tests/test_perf_providers.py 的 fake _run_turn）。
+    才出的场景），由这里补记一次，避免漏采。
     """
     first_token_cell = getattr(on_thinking, "first_token_cell", None)
     tried: set[int] = set()
@@ -454,17 +564,25 @@ async def _run_turn(
         tried.add(int(account["id"]))
         t0 = time.time()
         try:
-            text = await _turn(account, prompt, model, timeout=timeout, on_thinking=on_thinking)
+            turn_result = await _turn(account, prompt, model, timeout=timeout, on_thinking=on_thinking)
+            # _turn 返回 (text, usage, finish_reason)；用法兼容旧返回纯文本的场景。
+            if isinstance(turn_result, tuple):
+                text, turn_usage, turn_finish = turn_result
+            else:
+                text, turn_usage, turn_finish = turn_result, None, None
+            finish = turn_finish or "stop"
             auth_manager.mark_account_success(account["id"])
             if first_token_cell is not None and "ms" not in first_token_cell:
                 first_token_cell["ms"] = int(
                     (time.monotonic() - first_token_cell.get("t0", time.monotonic())) * 1000
                 )
             await _log(
-                api_key_info, account, client_model, stream, "stop", 200, "", t0,
+                api_key_info, account, client_model, stream, finish, 200, "", t0,
                 first_token_ms=(first_token_cell or {}).get("ms"),
+                usage=turn_usage,
             )
-            return "ok", text
+            # 返回 (text, usage, finish_reason)；非流式 _openai_json 与流式末帧共用。
+            return "ok", text, turn_usage, finish
         except TraeWorkAuthError as exc:
             auth_manager.mark_account_failure(account["id"], 503)
             last_error = ("error", (503, {"error": {"message": str(exc)[:240], "type": "server_error"}}))
@@ -479,15 +597,22 @@ async def _run_turn(
                     adopted_once.add(account_id)
                     fresh = db.get_account(account_id) or account
                     auth_manager.mark_account_success(account_id)
+                    # 自救重试同样产出 (text, usage, finish_reason)；兼容只返回文本的替身。
+                    retry_usage: dict | None = None
+                    retry_finish = "stop"
+                    if isinstance(retried, tuple):
+                        retried, retry_usage, retry_finish = retried
+                        retry_finish = retry_finish or "stop"
                     if first_token_cell is not None and "ms" not in first_token_cell:
                         first_token_cell["ms"] = int(
                             (time.monotonic() - first_token_cell.get("t0", time.monotonic())) * 1000
                         )
                     await _log(
-                        api_key_info, fresh, client_model, stream, "stop", 200, "", t0,
+                        api_key_info, fresh, client_model, stream, retry_finish, 200, "", t0,
                         first_token_ms=(first_token_cell or {}).get("ms"),
+                        usage=retry_usage,
                     )
-                    return "ok", retried
+                    return "ok", retried, retry_usage, retry_finish
             continue
         except httpx.HTTPError as exc:
             auth_manager.mark_account_failure(account["id"], 503)
@@ -524,22 +649,40 @@ async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
         # 流式：立即返回生成器。首包马上发出，思考文本随事件提前转发，
         # 回合跑完后再补最终回答，避免客户端干等十几秒。
         return ("stream", _stream_chat(prompt, model, client_model, api_key_info))
-    status, result = await _run_turn(prompt, model, client_model, api_key_info, stream=False)
+    status, *rest = await _run_turn(prompt, model, client_model, api_key_info, stream=False)
     if status == "ok":
-        return ("json", _openai_json(client_model, result))
-    status_code, detail = result
+        text = rest[0]
+        usage = rest[1] if len(rest) > 1 else None
+        finish = rest[2] if len(rest) > 2 else None
+        return ("json", _openai_json(client_model, text, finish or "stop", usage))
+    status_code, detail = rest[0]
     return ("error", (status_code, detail))
 
 
 def _new_piece(prev: str, frag: str) -> str:
-    """上游 plan_item 常把累计思考整段重发；只转发相对上一段的新增量。"""
+    """上游 plan_item 常把累计思考整段重发；只转发相对上一段的新增量。
+
+    两种情况保持旧行为：
+      - 累积重发（frag 是 prev 的扩展）：返回新增尾部；
+      - 收缩（frag 是 prev 的严格前缀）：返回 ""（fragment 已被显示过，无新内容）。
+    其余情形（既非扩展也非收缩，例如重叠但并不对齐的两段）：去掉 prev
+    尾部与 frag 头部的最大重叠部分再转发，避免把已显示内容重复拼一遍，也不
+    因误判为收缩而把真正的新文字吞掉。
+    """
     if not prev or not frag:
         return frag
     if frag.startswith(prev):
         return frag[len(prev):]
     if prev.startswith(frag):
         return ""
-    return frag
+    # 非前缀重叠：找 prev[-k:] == frag[:k] 的最长 k，剥离这段重复。
+    max_k = min(len(prev), len(frag))
+    overlap = 0
+    for k in range(max_k, 0, -1):
+        if prev[-k:] == frag[:k]:
+            overlap = k
+            break
+    return frag[overlap:]
 
 
 async def _stream_chat(
@@ -557,14 +700,17 @@ async def _stream_chat(
             "ms", int((time.monotonic() - first_token_cell["t0"]) * 1000)
         )
 
-    def sse(delta: dict, finish: str | None = None) -> str:
+    def sse(delta: dict, finish: str | None = None, usage: dict | None = None) -> str:
         body = {
             "id": chunk_id,
             "object": "chat.completion.chunk",
             "created": created,
             "model": client_model,
+            # 末帧的 usage 放在 chunk 顶层（与 OpenAI 流式一致），不塞进 delta。
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
         }
+        if usage is not None:
+            body["usage"] = usage
         return f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
 
     # 立即首包：客户端马上有 TTFB，不再是干等 10s+ 毫无输出。
@@ -619,26 +765,32 @@ async def _stream_chat(
             turn_task.cancel()
 
     try:
-        status, result = turn_task.result()
+        res = turn_task.result()
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        status, result = (
+        res = (
             "error",
             (500, {"error": {"message": f"internal error: {exc}"[:240], "type": "server_error"}}),
         )
+    # 容忍测试替身（仅返回 ("ok", text) 两元组），真实 _run_turn 返回四元组。
+    status = res[0]
     if status == "ok":
-        text = result
+        text = res[1]
+        usage = res[2] if len(res) > 2 else None
+        finish = res[3] if len(res) > 3 else None
+        finish = finish or "stop"
         # 最终回答若已包含在转发过的思考文本里就不重复发，避免正文出现两遍。
         if text and text not in "".join(emitted):
             mark_first_token()
             yield sse({"content": ("\n" if emitted else "") + text})
-        yield sse({}, "stop")
+        # 末帧带 usage（上游 token_usage 真实值，无则省略）与 finish_reason。
+        yield sse({}, finish, usage=usage)
         yield "data: [DONE]\n\n"
     else:
         # 流内错误：发 OpenAI 兼容的 error 对象 + [DONE]，不伪造 stop 结束的
         # 正常回答（客户端会把错误文案当答案存下来，也无法感知失败）。
-        status_code, detail = result
+        status_code, detail = res[1]
         msg = str(detail.get("error", {}).get("message", ""))[:300]
         error_payload = {
             "error": {"message": f"upstream failed: {msg}", "type": "server_error", "code": status_code}
@@ -650,15 +802,19 @@ async def _stream_chat(
 async def test_chat(account: dict, model: str = "qwen-3.7-plus", prompt: str = "请回复：pong") -> dict:
     async def send(_payload: dict) -> tuple:
         try:
-            text = await _turn(account, prompt or "请回复：pong", translate_model(model or "auto"), timeout=90.0)
+            result = await _turn(account, prompt or "请回复：pong", translate_model(model or "auto"), timeout=90.0)
         except TraeWorkAuthError as exc:
             # 「测试」按钮直接拿账号调 _turn，绕过了 _pick/_run_turn 的选号链路，
             # 因此自愈必须在这里也接一次：否则凭据被客户端轮换后，测试永远失败，
-            # 而这条路径恰是用户判断通道是否可用的主要入口。
+            # 而这条路径恰是用户判断通道可用性的主要入口。
             healed = await _adopt_and_retry(account, prompt, model)
             if healed is None:
                 return 503, str(exc)[:400], None
-            return 200, None, healed
+            # _adopt_and_retry 返回 (text, usage, finish_reason)；测试只取文本。
+            healed_text = healed[0] if isinstance(healed, tuple) else healed
+            return 200, None, healed_text
+        # _turn 返回 (text, usage, finish_reason)；测试只取文本。
+        text = result[0] if isinstance(result, tuple) else result
         return 200, None, text
 
     return await store_common.run_test_chat(model or "auto", prompt or "请回复：pong", send, limit=400)

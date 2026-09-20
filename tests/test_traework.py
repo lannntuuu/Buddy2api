@@ -11,6 +11,7 @@ import providers
 from gateway import router
 from gateway import server as tw_server
 from providers.protocol import UnknownModel
+from providers import store_common
 from providers.traework import chat as tw
 from providers.traework import token as tw_token
 from providers.traework.chat import _split_event, _text_from_event, extract_assistant_text, translate_model
@@ -257,7 +258,8 @@ def test_turn_creates_session_with_default_mode(isolated_db, monkeypatch):
     monkeypatch.setattr(tw, "get_client", lambda: fake)
 
     account = {"access_token": "tok", "extra": {}}
-    text = asyncio.run(tw._turn(account, "hi", "qwen-3.7-plus", timeout=90.0))
+    # _turn 现返回 (text, usage, finish_reason)
+    text, _usage, _finish = asyncio.run(tw._turn(account, "hi", "qwen-3.7-plus", timeout=90.0))
     assert text == "pong"
     # 建会话 POST 的 body 与改造前逐字段一致
     create_body = _post_body(fake, "/chat_sessions")
@@ -461,6 +463,288 @@ def test_stream_chat_error_surfaces_in_band(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 新增回归：R2 is_in_code_mode / R4 token_usage / R5 finish_reason / R6 _new_piece
+# ---------------------------------------------------------------------------
+
+
+def test_r2_code_mode_sends_flag_both_places(isolated_db, monkeypatch):
+    """R2：code 模式在 createSession(initial_message) 与 sendMessage(顶层) 都带
+    is_in_code_mode=True；work 模式两处都不带。"""
+    db.set_setting("traework.mode", "code")
+    fake = _FakeTraeClient()
+    monkeypatch.setattr(tw, "get_client", lambda: fake)
+    asyncio.run(tw._turn({"access_token": "tok", "extra": {}}, "hi", "qwen-3.7-plus", timeout=90.0))
+
+    create_body = _post_body(fake, "/chat_sessions")
+    assert create_body["initial_message"] == {"is_in_code_mode": True}
+    msg_body = _post_body(fake, "/messages")
+    assert msg_body["is_in_code_mode"] is True
+
+
+def test_r2_work_mode_sends_flag_nowhere(isolated_db, monkeypatch):
+    """R2：work 模式（默认）不发送 is_in_code_mode 字段，body 逐字段与改造前一致。"""
+    db.set_setting("traework.mode", "work")
+    fake = _FakeTraeClient()
+    monkeypatch.setattr(tw, "get_client", lambda: fake)
+    asyncio.run(tw._turn({"access_token": "tok", "extra": {}}, "hi", "qwen-3.7-plus", timeout=90.0))
+
+    create_body = _post_body(fake, "/chat_sessions")
+    assert "initial_message" not in create_body
+    assert "is_in_code_mode" not in create_body
+    msg_body = _post_body(fake, "/messages")
+    assert "is_in_code_mode" not in msg_body
+
+
+def test_r4_token_usage_parsed_into_openai_json(isolated_db, monkeypatch):
+    """R4：上游 token_usage 事件被解析进非流式 usage（input→prompt，output→completion，
+    total=两者和）。"""
+    db.set_setting("traework.mode", "work")
+    _add_one_traework_account()
+    events = [
+        "event: token_usage",
+        'data: {"input_tokens": 12, "output_tokens": 34}',
+        "event: done",
+        "data: {}",
+    ]
+    fake = _FakeTraeClientEvents(events)
+    monkeypatch.setattr(tw, "get_client", lambda: fake)
+
+    status, body = asyncio.run(
+        tw.chat_completions(
+            {"model": "qwen-3.7-plus", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+            None,
+        )
+    )
+    assert status == "json", body
+    usage = body["usage"]
+    assert usage["prompt_tokens"] == 12
+    assert usage["completion_tokens"] == 34
+    assert usage["total_tokens"] == 46
+
+
+def test_r4_token_usage_absent_keeps_zeros(isolated_db, monkeypatch):
+    """R4：无 token_usage 事件时 usage 仍是全 0（向后兼容，不破坏既有客户端）。"""
+    db.set_setting("traework.mode", "work")
+    _add_one_traework_account()
+    events = ["event: done", "data: {}"]
+    fake = _FakeTraeClientEvents(events)
+    monkeypatch.setattr(tw, "get_client", lambda: fake)
+
+    status, body = asyncio.run(
+        tw.chat_completions(
+            {"model": "qwen-3.7-plus", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+            None,
+        )
+    )
+    assert status == "json"
+    assert body["usage"] == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
+def test_r4_token_usage_logged_real_tokens(isolated_db, monkeypatch):
+    """R4：拿到 token_usage 真值时 _log 收到真实 usage（而非 None）。"""
+    db.set_setting("traework.mode", "work")
+    _add_one_traework_account()
+    events = [
+        "event: token_usage",
+        'data: {"input_tokens": 7, "output_tokens": 9}',
+        "event: done",
+        "data: {}",
+    ]
+    fake = _FakeTraeClientEvents(events)
+    monkeypatch.setattr(tw, "get_client", lambda: fake)
+
+    logged = []
+    real_log = store_common.log_request
+
+    async def spy_log(*a, **k):
+        logged.append(k)
+        await real_log(*a, **k)
+
+    # 注意 spy 挂在 store_common.log_request 上（而非 tw._log）：token 三列 kwargs 是在
+    # tw._log 内部拆出来再传给 log_request 的，只有在这一层才观察得到。
+    monkeypatch.setattr(store_common, "log_request", spy_log)
+
+    asyncio.run(
+        tw.chat_completions(
+            {"model": "qwen-3.7-plus", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+            None,
+        )
+    )
+    assert logged, "应写入一条请求日志"
+    # usage 透传进 log_request（非 None，且为真实 token 数）
+    usage = logged[0].get("usage")
+    assert isinstance(usage, dict)
+    assert usage["prompt_tokens"] == 7
+    assert usage["completion_tokens"] == 9
+    # 关键：token 还要**拆成独立 kwargs** 透传。log_request 的 prompt/completion/total
+    # 三列只读 kwargs，credit 又只由 total_tokens 推导；只传 usage 会让 usage_json 有真值
+    # 而三列与 credit 恒 0（与 qclaw/qwenwork 行为不一致）。
+    assert logged[0].get("prompt_tokens") == 7
+    assert logged[0].get("completion_tokens") == 9
+    assert logged[0].get("total_tokens") == 16
+
+
+def test_r4_token_usage_lands_in_db_columns_and_credit(isolated_db, monkeypatch):
+    """R4 端到端：上游真值确实落进 logs 表的 token 三列，并据此算出 credit。"""
+    db.set_setting("traework.mode", "work")
+    _add_one_traework_account()
+    events = [
+        "event: token_usage",
+        'data: {"input_tokens": 1000, "output_tokens": 2000}',
+        "event: done",
+        "data: {}",
+    ]
+    fake = _FakeTraeClientEvents(events)
+    monkeypatch.setattr(tw, "get_client", lambda: fake)
+
+    asyncio.run(
+        tw.chat_completions(
+            {"model": "qwen-3.7-plus", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+            None,
+        )
+    )
+    rows = db.list_recent_logs(limit=5) if hasattr(db, "list_recent_logs") else []
+    if not rows:
+        import sqlite3
+
+        con = sqlite3.connect(db.DB_PATH)
+        con.row_factory = sqlite3.Row
+        rows = [dict(r) for r in con.execute(
+            "select prompt_tokens, completion_tokens, total_tokens, credit, usage_json "
+            "from logs order by id desc limit 1"
+        )]
+        con.close()
+    row = rows[0]
+    assert row["prompt_tokens"] == 1000
+    assert row["completion_tokens"] == 2000
+    assert row["total_tokens"] == 3000
+    # credit = total_tokens / channel_credit_rate(traework)；traework 默认 1000 token/credit
+    assert row["credit"] == 3.0
+    assert row["usage_json"]
+
+
+def test_r4_token_usage_not_in_answer_text(isolated_db, monkeypatch):
+    """R4：token_usage 事件不得被当正文拼进回答（含 payload 里的伪装字符串）。"""
+    db.set_setting("traework.mode", "work")
+    _add_one_traework_account()
+    events = [
+        "event: token_usage",
+        'data: {"input_tokens": 5, "output_tokens": 6, "note": "LEAK_MARKER"}',
+        "event: done",
+        'data: {"status": "completed"}',
+    ]
+    fake = _FakeTraeClientEvents(events)
+    monkeypatch.setattr(tw, "get_client", lambda: fake)
+
+    result = asyncio.run(tw._turn({"access_token": "tok", "extra": {}}, "hi", "qwen-3.7-plus", timeout=90.0))
+    text = result[0] if isinstance(result, tuple) else result
+    assert "LEAK_MARKER" not in text
+    # 回答仍来自 GET /messages 的 pong（token_usage 未污染 pieces）
+    assert text == "pong"
+
+
+def test_r5_finish_reason_maps_from_done_status(isolated_db, monkeypatch):
+    """R5：done.status 映射 finish_reason（completed→stop，error→error）。"""
+    db.set_setting("traework.mode", "work")
+    _add_one_traework_account()
+
+    captured = {}
+    real_log = tw._log  # 捕获原始实现，避免 spy 自递归
+
+    async def spy_log(*a, **k):
+        # _log(api_key_info, account, model_name, stream, finish, status, error, t0, ...)
+        # finish 是位置参数（第 5 个），不是关键字 finish_reason。
+        captured["finish"] = a[4]
+        await real_log(*a, **k)
+
+    monkeypatch.setattr(tw, "_log", spy_log)
+
+    for status, expect in (("completed", "stop"), ("error", "error"), ("cancelled", "error")):
+        events = ["event: done", f'data: {{"status": "{status}"}}']
+        fake = _FakeTraeClientEvents(events)
+        monkeypatch.setattr(tw, "get_client", lambda: fake)
+        st, body = asyncio.run(
+            tw.chat_completions(
+                {"model": "qwen-3.7-plus", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+                None,
+            )
+        )
+        assert st == "json", body
+        assert body["choices"][0]["finish_reason"] == expect, (status, body)
+        assert captured["finish"] == expect
+
+
+def test_r5_finish_reason_default_stop_when_absent(isolated_db, monkeypatch):
+    """R5：done 事件缺 status（或不识别值）时回退默认 stop。"""
+    db.set_setting("traework.mode", "work")
+    _add_one_traework_account()
+    events = ["event: done", "data: {}"]
+    fake = _FakeTraeClientEvents(events)
+    monkeypatch.setattr(tw, "get_client", lambda: fake)
+
+    st, body = asyncio.run(
+        tw.chat_completions(
+            {"model": "qwen-3.7-plus", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+            None,
+        )
+    )
+    assert st == "json"
+    assert body["choices"][0]["finish_reason"] == "stop"
+
+
+def test_r6_new_piece_overlapping_fragment(isolated_db):
+    """R6：非前缀重叠片段既不被重复拼出，也不被吞掉新文字。
+
+    上游先发完整段 'ABCDEF'，再发 'CDEFGH'（重叠 'CDEF'）：应只转发尾部 'GH'，
+    而非重发整段，也不因误判为收缩而丢弃 'GH'。
+    """
+    # 标准累计扩展：应只返回新增尾部
+    assert tw._new_piece("ABC", "ABCDEFG") == "DEFG"
+    # 标准收缩：返回空（已显示过）
+    assert tw._new_piece("ABCDEFG", "ABC") == ""
+    # 非前缀重叠：去掉最大重叠 CDEF 后转发 GH
+    assert tw._new_piece("ABCDEF", "CDEFGH") == "GH"
+    # 不重复：拼接结果不含两段重叠区
+    assert ("ABCDEF" + tw._new_piece("ABCDEF", "CDEFGH")).count("CDEF") == 1
+
+
+def test_r4_stream_terminal_chunk_carries_usage(isolated_db, monkeypatch):
+    """R4：流式末帧在拿到 token_usage 时带 usage（非流式之外也要覆盖流路径）。"""
+    db.set_setting("traework.mode", "work")
+    _add_one_traework_account()
+    events = [
+        "event: token_usage",
+        'data: {"input_tokens": 3, "output_tokens": 4}',
+        "event: done",
+        'data: {"status": "completed"}',
+    ]
+    fake = _FakeTraeClientEvents(events)
+    monkeypatch.setattr(tw, "get_client", lambda: fake)
+
+    async def consume():
+        out = []
+        async for chunk in tw._stream_chat("hi", "qwen-3.7-plus", "auto", None):
+            out.append(chunk)
+        return out
+
+    chunks = asyncio.run(consume())
+    terminal = None
+    for chunk in chunks:
+        if chunk.startswith("data:") and chunk[5:].strip() != "[DONE]":
+            payload = json.loads(chunk[5:].strip())
+            if payload.get("choices", [{}])[0].get("finish_reason"):
+                terminal = payload
+    assert terminal is not None, "应有带 finish_reason 的末帧"
+    assert terminal["usage"] == {
+        "prompt_tokens": 3,
+        "completion_tokens": 4,
+        "total_tokens": 7,
+    }
+    assert terminal["choices"][0]["finish_reason"] == "stop"
+
+
+
+# ---------------------------------------------------------------------------
 # 测试替身：自包含跑完 _turn（建会话 → 发消息 → 收流 → GET /messages）
 # ---------------------------------------------------------------------------
 
@@ -474,22 +758,31 @@ class _FakeTraeResponse:
     def json(self):
         return self._payload
 
+    async def aiter_lines(self):
+        """SSE 行迭代器：与 _turn 里 `async for line in response.aiter_lines()` 契约一致。"""
+        yield "event: done"
+        yield "data: {}"
+
 
 class _FakeTraeStream:
-    """模拟 client.stream("GET", .../events) 的异步行迭代器：发一条 done 事件即结束。"""
+    """模拟 client.stream("GET", .../events) 的异步上下文管理器：发一条 done 事件即结束。
+
+    契约必须是 `async def __aenter__` 且返回带 `status_code` / `aiter_lines()` 的
+    响应对象（对应 `_turn` 中的 `async with client.stream(...) as response`）。
+    旧实现把 `__aenter__` 写成同步并返回 self：既不是 awaitable，也没有
+    `aiter_lines`，于是 read_events 抛 TypeError/AttributeError（不是
+    httpx.HTTPError，不会被吞掉），`finished` 永不置位，每个用例只能硬等满
+    90s 超时——整个文件看起来像"卡死"。
+    """
 
     def __init__(self, response):
         self._response = response
 
-    def __aenter__(self):
-        return self
+    async def __aenter__(self):
+        return self._response
 
     async def __aexit__(self, *exc):
         return False
-
-    async def __aiter__(self):
-        yield "event: done"
-        yield "data: {}"
 
 
 class _FakeTraeClient:
@@ -524,6 +817,52 @@ class _FakeTraeClient:
 
     async def delete(self, url, *, headers=None, timeout=None):
         return _FakeTraeResponse()
+
+
+class _FakeTraeResponseEvents(_FakeTraeResponse):
+    """SSE 响应：按给定事件行序列迭代（event:/data: 成对出现）。"""
+
+    def __init__(self, events):
+        super().__init__()
+        self._events = events
+
+    async def aiter_lines(self):
+        for ev in self._events:
+            yield ev
+
+
+class _FakeTraeClientEvents(_FakeTraeClient):
+    """建会话/发消息走 happy path，SSE 流由传入的 events 决定内容。"""
+
+    def __init__(self, events):
+        super().__init__()
+        self._events = events
+
+    def stream(self, method, url, *, headers=None, timeout=None):
+        return _FakeTraeStream(_FakeTraeResponseEvents(self._events))
+
+
+class _FakeTraeClientEventsFailOnce(_FakeTraeClientEvents):
+    """首个建会话 POST 返回 401（触发凭据自愈），其后按 events 正常返回。
+
+    用于验证自愈重试成功时，usage / finish_reason 仍能透传（见
+    test_run_turn_selfheal_retry_keeps_usage_and_finish）。
+    """
+
+    def __init__(self, events):
+        super().__init__(events)
+        self.fail_next_session = True
+
+    async def post(self, url, *, headers=None, json=None, timeout=None):
+        if url.endswith("/chat_sessions") and self.fail_next_session:
+            self.posts.append((url, json))
+            self.fail_next_session = False
+            return _FakeTraeResponse(status_code=401, payload={})
+        return await super().post(url, headers=headers, json=json, timeout=timeout)
+
+
+def _add_one_traework_account() -> int:
+    return _add_traework()
 
 
 # ---------------------------------------------------------------------------
@@ -668,7 +1007,8 @@ def test_run_turn_self_heals_and_retries(isolated_db, monkeypatch, client_auth_d
     fake = _FakeTraeClientFailOnce()
     monkeypatch.setattr(tw, "get_client", lambda: fake)
 
-    status, text = asyncio.run(
+    # _run_turn 现返回 ("ok", text, usage, finish_reason)
+    status, text, _usage, _finish = asyncio.run(
         tw._run_turn("hi", "qwen-3.7-plus", "auto", None, stream=False)
     )
 
@@ -680,6 +1020,53 @@ def test_run_turn_self_heals_and_retries(isolated_db, monkeypatch, client_auth_d
     after = db.get_account(aid)
     assert after["status"] == "active"
     assert after["access_token"] == "healed-access"
+
+
+def test_run_turn_selfheal_retry_keeps_usage_and_finish(isolated_db, monkeypatch, client_auth_dir):
+    """自愈重试成功时，usage / finish_reason 不得被丢成 (None, stop)。
+
+    回归点：_adopt_and_retry 早期只回传 text，导致「自愈成功」这一分支落库与响应都拿不到
+    上游 token 真值。返回三元组后，usage 应一路透传到 _log。
+    """
+    path = _write_storage(
+        client_auth_dir,
+        uid="3577",
+        access="healed-access",
+        refresh="healed-refresh",
+        expired_at_iso="2099-01-01T00:00:00Z",
+    )
+    _add_traework(extra={"auth_path": str(path)})
+    events = [
+        "event: token_usage",
+        'data: {"input_tokens": 11, "output_tokens": 22}',
+        "event: done",
+        'data: {"status": "completed"}',
+    ]
+    fake = _FakeTraeClientEventsFailOnce(events)
+    monkeypatch.setattr(tw, "get_client", lambda: fake)
+
+    logged = []
+    real_log = store_common.log_request
+
+    async def spy_log(*a, **k):
+        logged.append(k)
+        await real_log(*a, **k)
+
+    monkeypatch.setattr(store_common, "log_request", spy_log)
+
+    status, text, usage, finish = asyncio.run(
+        tw._run_turn("hi", "qwen-3.7-plus", "auto", None, stream=False)
+    )
+
+    assert status == "ok", text
+    assert text == "pong"
+    assert usage == {"prompt_tokens": 11, "completion_tokens": 22, "total_tokens": 33}
+    assert finish == "stop"
+    # 成功落库那一条必须带真实 token 三列
+    ok_rows = [k for k in logged if k.get("status_code") == 200]
+    assert ok_rows, "应有一条 200 落库"
+    assert ok_rows[-1].get("total_tokens") == 33
+    assert ok_rows[-1].get("usage") == usage
 
 
 # ---------------------------------------------------------------------------
