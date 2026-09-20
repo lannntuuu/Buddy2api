@@ -249,6 +249,7 @@ export default {props:['token','toast'],setup(p){
           <input class="tcell" style="width:120px" v-model="chOf().credit_rate" type="number" min="0" step="1"/>
           <span class="hint" style="margin:0" v-if="chOf().channel==='traesolo'">TRAE SOLO 已改用<strong>官方三档标价公式</strong>（input/cache_read/output 分别计价，反解自官方 session 真值，46/51 行误差<1%，见 pricing.py）。本栏缩放因子仅在请求无 token 数据时兜底使用。注意：标价≠实际扣费，订阅内官方实际扣费远低于标价（见 docs §10.5）。</span>
           <span class="hint" style="margin:0" v-else-if="chOf().channel==='traework'">TraeWork 消耗已改用<strong>官方 session 真值</strong>（query_user_usage_group_by_session，每小时自动同步），不再走 token 估算。本栏缩放因子对 TraeWork 不生效；dashboard 的 TraeWork 每日 credit 显示的是官方真积分。</span>
+          <span class="hint" style="margin:0" v-else-if="chOf().channel==='qodercn'">Qoder <strong>不需要倍率</strong>：上游每次都在 usage 里回报本次真实扣费（<code style="font:inherit">credits</code>）与是否计费（<code style="font:inherit">billable</code>），消耗统计直接取真值。免费档（Qwen3.8-Flash）<code style="font:inherit">billable=false</code> → 记 0，不再按 token 估算。本栏缩放因子仅在该通道没有 usage 时才兜底。</span>
           <span class="hint" style="margin:0" v-else>上游不回报 credit 的通道（qclaw/qwenwork）用「token 数 ÷ 该值」近似统计消耗；留 0 或不填 = 不做估算。内置默认 {{chOf().credit_rate_default}}。</span>
         </div>
         <div v-if="chOf().credit_rate_customized" class="tag" style="margin-top:6px">已自定义换算率</div>

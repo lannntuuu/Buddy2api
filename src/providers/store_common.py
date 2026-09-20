@@ -329,6 +329,33 @@ def credit_source_of(usage) -> str | None:
     return None
 
 
+# 上游直接回报"本次扣多少 credit"的字段（Qoder CN 实测：`credits` + `billable`）。
+_UPSTREAM_CREDIT_KEYS = ("credits", "credit")
+
+
+def upstream_credit(usage) -> float | None:
+    """上游回报的本次 credit 真值；上游没报则返回 None（调用方退回 token 估算）。
+
+    Qoder CN 每次都在 usage 里给 `credits`（本次计费额）与 `billable`
+    （是否真扣费）。**`billable=False` 是免费档**（如 Qwen3.8-Flash/qfmodel），
+    此时 `credits` 只是"标价参考"、并未扣费，必须记 0 —— 否则免费档会被
+    token 估算凭空记出消耗（实测 51 次免费档请求曾记出 4612.70 假 credit）。
+    """
+    if not isinstance(usage, dict):
+        return None
+    if usage.get("billable") is False:
+        return 0.0
+    for key in _UPSTREAM_CREDIT_KEYS:
+        value = usage.get(key)
+        if value is None:
+            continue
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def enqueue_record_request(row: dict) -> None:
     """把日志行放入默认线程池 fire-and-forget 落库；无运行 loop 时同步兜底。
 
@@ -403,8 +430,9 @@ async def log_request(
     """写一条请求日志并更新账号/密钥用量计数，sqlite 写放 worker 线程执行。
 
     qclaw / qwenwork / traework 三家 chat 的 _log 收敛为这一份实现，
-    字段语义逐字对齐 qclaw 版（含 extract_cache_tokens 与 usage_json 截断）；
-    credit = round(total_tokens / channel_credit_rate(channel), 6)。
+    字段语义逐字对齐 qclaw 版（含 extract_cache_tokens 与 usage_json 截断）。
+    credit 优先取上游真值（usage.billable / usage.credits，见 upstream_credit）；
+    上游没报才退回 token 估算 round(total_tokens / channel_credit_rate)。
     extra 透传 prompt_tokens / completion_tokens / total_tokens /
     increment_usage 及其他 record_request 覆盖字段；first_token_ms
     （流式首帧毫秒，非流式 None）与 created_at（请求起点秒级时间戳，
@@ -415,8 +443,10 @@ async def log_request(
 
     cache_read, cache_creation = extract_cache_tokens(usage if isinstance(usage, dict) else None)
     total_tokens = int(extra.pop("total_tokens", 0) or 0)
-    rate = channel_credit_rate(channel)
-    credit = round(total_tokens / rate, 6) if rate else 0
+    credit = upstream_credit(usage)
+    if credit is None:
+        rate = channel_credit_rate(channel)
+        credit = round(total_tokens / rate, 6) if rate else 0
     row = {
         "api_key_id": api_key_info["id"] if api_key_info else None,
         "api_key_name": api_key_info["name"] if api_key_info else None,
