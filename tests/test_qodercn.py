@@ -241,6 +241,31 @@ def test_collect_drops_empty_delta_without_finish():
     assert chat._collect({"choices": [{"delta": {}, "index": 0}]}, state) is None
 
 
+def test_upstream_credit_is_used_instead_of_token_estimate():
+    """回归：Qoder 上游回报的真值必须进 logs.credit，免费档记 0。
+
+    免费档 `billable=false` 时 `credits` 只是标价参考（Qwen3.8-Flash 实测
+    0.36 credits/次却分文未扣）。旧实现整包 usage 只存证据、一律按 token
+    估算，51 次免费档请求被记出 4612.70 假 credit。
+    """
+    from providers.store_common import upstream_credit
+
+    # 真免费档：billable=false → 0（不是 credits 里的 0.36）
+    assert upstream_credit(
+        {"total_tokens": 108920, "credits": 0.361833813, "billable": False}) == 0.0
+    # 计费档：用上游原值（不是 108920/1000）
+    assert upstream_credit(
+        {"total_tokens": 320, "credits": 0.023446544, "billable": True}) == 0.023446544
+    # 上游没报 → None，调用方回落 token 估算（qclaw/qwenwork 行为不变）
+    assert upstream_credit({"total_tokens": 150}) is None
+    assert upstream_credit(None) is None
+    # 无 billable 但有 credits：按真值用（billable 缺省视为已计费）
+    assert upstream_credit({"credits": 1.5}) == 1.5
+    # 脏值不炸
+    assert upstream_credit({"credits": "abc"}) is None
+    assert upstream_credit({"credits": -3}) == 0.0
+
+
 def test_openai_chunk_overrides_untrusted_model():
     """上游内层 model 恒为 'auto'，必须用请求模型键覆盖。"""
     state = {"id": "chatcmpl-x", "created": 5}

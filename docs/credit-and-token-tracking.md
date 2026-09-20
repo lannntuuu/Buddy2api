@@ -19,6 +19,7 @@
 | TraeWork | ❌ token_usage 事件被丢（`_SKIP_EVENTS`），只记 0 | ❌ 同上 | ❌ **需要先修 SSE 解析再能估算**（见 §6） |
 | QClaw | ✅ | ❌ 上游不报 → `0` | ✅ 网关侧估算（qclaw 默认 1000 token / 1 credit） |
 | QwenWork | ✅ | ❌ 上游不报 → `0` | ✅ 网关侧估算（qwenwork 默认 1000 token / 1 credit） |
+| Qoder CN | ✅ | ✅ **上游直接报** `usage.credits` + `usage.billable`（v2.2.0 时误走估算，见 §11） | ✅ 不变（仍走上游真值；`billable=false` 免费档记 0） |
 
 ## 3. 为什么 SOLO / TraeWork 没有 credit
 
@@ -295,4 +296,147 @@ agent 循环流量被严重高估。
 - 分析脚本留档：`_analysis_harvest.py`（采集）、`_analysis_fit*.py`（拟合四轮）、
   `_analysis_match.py`（时间对账）、`_backfill_formula.py`（重填），
   数据快照 `_analysis_data.json`。
+
+## 11. 上游真值优先：Qoder 免费档曾被记成消耗（2026-09-19 修）
+
+**问题**：Qoder CN 每次请求都在 usage 里回报本次真实扣费，但 `store_common.log_request`
+一律走 `credit = total_tokens / channel_credit_rate` 估算，**整包 usage 只当证据存下来不用**。
+后果：`Qwen3.8-Flash`（上游 key `qfmodel`）是 `billable=false` 的**真免费档**，
+51 次请求被估算记出 **4612.70 假 credit**；该通道全部 66 行合计 4669.66，
+而上游 `billable` 合计真值仅 **0.267**（差 17000 倍）。
+
+**上游真值字段**（Qoder CN，实测 66/66 行都有）：
+
+| 字段 | 含义 |
+|---|---|
+| `credits` | 本次扣费额（credit） |
+| `billable` | `false` = 本次未扣费（免费档）/ `true` = 真扣 |
+| `original_credits` | 折扣前原价（错峰促销用，不参与记账） |
+| `prompt_tokens_details.cached_tokens` | cache 命中（已有 `extract_cache_tokens` 覆盖） |
+
+**修法**：`store_common.upstream_credit(usage)` —— 上游有真值就用真值，没有才回落估算：
+
+```
+billable is False          -> 0.0                    # 免费档，记 0（不是 credits 的值）
+credits / credit 存在      -> 原值                    # 计费档，用真值
+都没有                      -> None -> token/rate 估算 # qclaw / qwenwork 行为不变
+```
+
+因此**「免费档」不再依赖倍率**：Qoder 的 `fetch_model_rates` 仍返回 `rate=None`
+（上游只给绝对价、不给 per-model 倍率），但消耗统计不再需要倍率——真值直取。
+`<channel>.credit_rate` 对该通道降级为「没有 usage 时的兜底」。
+
+**历史数据重算**：`ops/scripts/oneoff/backfill-upstream-credit.py`（只改 usage_json 里有
+真值的行，再重算 `accounts.total_credits`）。实测 qodercn 4669.662 → **0.267**。
+
+**为什么之前没发现**：`credit_source` 只按「有没有 cache 键」判 `live`，
+而 Qoder 的 `usage_json` 里明明躺着 `credits`/`billable` 却没人读——判据看的是 cache，
+不是「有没有真值」。这是一个**信号在手上但没接线**的 bug，不是上游不报。
+
+## 12. Qwen3.8-Flash 现在到底计不计费（实机复核 2026-09-19 深夜）
+
+上面 §11 证明了「历史上记错了」，但**没有**回答「现在扣不扣」。实测结论：**不计费，现在仍是免费档。**
+
+> **证据强度**：主证据 = 上游响应里的 `billable=false` 原文（连跑 3 轮 + 垃圾 token
+> 控制实验证明 200 非回声）；旁证 = 账户 `used` 计数器的上界排除（§12.3）。
+> 余额 delta 因精度不足**不构成证据**（§12.6）。
+
+### 12.1 方法
+
+历史日志停在当天 21:13（约 3 小时前），**不能代表"现在"**。所以直接打上游：
+
+1. 从**官方客户端登录缓存**读真 token（`store.read_official_session()`），
+   绕开网关 DB 的 master key/解密链路，避免凭据问题污染结论；
+2. `chat.test_chat` 发极小请求，读上游 usage 原文；
+3. **控制实验**：把 token 换成垃圾值，必须失败——否则 200 可能是兜底回声，不能采信。
+
+### 12.2 结果（连跑 3 轮，稳定复现）
+
+| 模型 | `billable` | `credits` |
+|---|---|---|
+| `qfmodel`（Qwen3.8-Flash） | **False** ×3 | 0.0031~0.0032 |
+| `auto`（对照） | True ×3 | 0.0023~0.0042 |
+| `qmodel_38max`（Qwen3.8-Max） | True | 0.0133 |
+| `qmodel_latest`（Qwen3.7-Max） | True | 0.0116 |
+
+**控制实验**：垃圾 token → `403 Login expired`（`ok=False`），
+证明上面的 200 是真实上游响应，不是回声。
+
+### 12.3 交叉验证：账户计数器（上界排除法）
+
+额度接口 `GET /api/v2/quota/usage`（**bearer 即可**，不签名）：
+
+```
+addOnQuota: {"total": 200.0, "used": 12.0, "remaining": 188.0, "unit": "credits"}
+```
+
+历史 59 次免费档请求（`billable=false` 全部行）**名义** credits 合计 **33.09**
+（其中 `qodercn/Qwen3.8-Flash` 51 行 = 32.21）。
+若这些真被扣过，`used` 必然 ≥33.09；实测 `used = 12.0`
+（且这 12.0 主要不是网关流量——网关整条通道总共才 66 次请求）。
+
+**33.09 > 12.0 ⇒ 免费档那部分不可能按标价扣过。**
+
+> **该上界论证的假设**：`used` 计数在数小时延迟后是准的（这 59 次发生在 18:41–21:13，
+> 我 23:57 才读，间隔 2.7h+）。需要注意 `used` 明显**有延迟**——连发 40 次计费档
+> （`auto`，名义 0.15）当场也没推动它（见 §12.6），所以**主证据是上游 `billable` flag 本身**
+> （响应原文 + 垃圾 token 控制实验），`used` 只作旁证。
+
+### 12.4 关键含义：`billable=false` 时 `credits` 不是 0
+
+`billable=false` 的响应里 `credits` **仍有值**（0.0032）——那是**标价参考，不是扣费额**。
+即 3.8-Flash **有价、只是现在不收**：`price_factor=0` 的**限时促销档**，Qoder 随时可结束。
+
+这对本项目的意义（也是选"真值优先"而非"配倍率"的理由）：
+
+- 促销结束那天上游 `billable` 翻成 `true`，**网关自动开始记真值，零代码改动**；
+- 若当初按倍率写死 `qfmodel: 0`，促销一结束就会**持续漏记**，而倍率方案无法自愈。
+
+### 12.4b qfmodel 的**名义**标价结构（不是扣费，是"若要收费会收多少"）
+
+从 59 条历史 usage + 活体剂量实验反解，名义价 = `in_nc×p_in + cached×p_cache + out×p_out`：
+
+| 项 | 单价（每 1M token） | 说明 |
+|---|---|---|
+| `cached`（cache 命中） | **2.22** | 命中价极稳（2.218~2.243），任一样本都能标定 |
+| `out`（输出） | **59.96 ≈ 60.0** | 与三档结构一致（输出约为输入 2~3.4×） |
+| `in_nc`（新建输入）**≤1024** | **17.77** | 小请求档 |
+| `in_nc`（新建输入）**>1024** | **27.77** | 长上下文档 |
+
+即**输入价有长度分档**：`in_nc≤1024` 时 17.77，超过则整体按 27.77。
+两档分别对 36/23 行拟合：高档中位误差 **0.003%**、低档 **0.70%**（低档行全是 in_nc≈65 的
+短请求，绝对值极小 → **相对误差被放大**；其 `credits` 只有 0.002~0.005，末位抖动即可占几个百分点）。
+
+> ⚠️ **诚实标注两处不确定性**：
+> 1. **分档的键**有两种可能，历史数据无法区分——按 `in_nc` 分（step_in）与按
+>    `prompt` 分（step_prompt），59 行里 45 行 `cached/in_nc ≥ 0.5`（最高 1361×），
+>    此时隐含输入价对 `p_cache` 极度敏感（分母 `in_nc` 近 0），**这些行不能定档**。
+>    只有 14 行 `cached/in_nc<0.5` 可靠，它们全部一致支持分档存在（in_nc 65→低档、
+>    26k~301k→高档），但**不足以区分键是 in_nc 还是 prompt**。
+> 2. **分档点 1024 是实测夹出来的**（活体：prompt=965 → 低档；prompt=1025 → 高档），
+>    不是官方文档值，促销/调价可能变。
+>
+> 结论：**别把这两个数字写进代码当倍率**——这正是本项目走"真值优先"的原因。
+> 上面只用于解释"为什么 3.8-Flash 看起来有价"。
+
+### 12.5 顺带纠正
+
+- `qmodel_38max`（Qwen3.8-Max）在目录里带 `is_free` 标记，但**实测 `billable=true`、在计费**。
+  **真免费只有 `qfmodel` 一个**。之前文档把两者并提，易误读（见 `multi-channel-v2.md` §模型表）。
+- 判"是否免费"**必须看 `billable`**，不能看目录的 `is_free`/`price_factor` 标记。
+
+### 12.6 两个已排除的假象（免得后人重走）
+
+- **额度接口"坏了一直 401"**：假象。真因是探针复制的 DB 与 master key 不匹配，
+  `access_token` 解出来是空串 → 上游自然 401。用真 token 复测即 `ok=true, remaining=188.0`。
+  （`fetch_quota` 的 bearer 路径**本来就是对的**，不要"修"它。）
+- **用余额 delta 验证单次请求**：不可行。`used`/`remaining` 只有 1 位小数，
+  单次约 0.003 credits 落在显示精度之下；40 次连发（名义约 0.15）也**没推动计数器**
+  （对照组 `auto` 同样没动）——该接口对账粒度太粗，**不能用作单请求级证据**。
+  本节的结论来自 `billable` flag + `used` 上界排除，不依赖 delta。
+
+### 12.7 复测建议
+
+促销可能结束，结论有时效性。复查只要跑一次：看 `billable` 是否仍为 `false`，
+以及 §11 的 `upstream_credit` 是否已自动改记真值（无需改代码）。
 

@@ -31,6 +31,10 @@ class QoderCnProvider:
         ]
 
     def fetch_model_rates(self) -> list[dict]:
+        """Qoder 上游**不提供 per-model 倍率**（只有绝对价），但每次请求都在
+        usage 里回报本次真实扣费 `credits` + 是否计费 `billable` —— 消耗统计走
+        真值（见 `store_common.upstream_credit`），不依赖这里的倍率。
+        """
         return [
             {"id": m["id"], "display_name": m["display_name"], "rate": None,
              "context_window": m["max_input_tokens"], "official": False}

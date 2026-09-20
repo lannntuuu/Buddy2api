@@ -1191,6 +1191,14 @@ data:{"headers":{…},"body":"<内层 OpenAI chunk 的 JSON 字符串>","statusC
 这是**唯一 `price_factor = 0.0` 的真免费档**（`qmodel_38max` 标 `is_free` 但实测仍计费
 约 0.0266 credits/次，而 qfmodel 约 0.0043）。
 
+> **判据是 `billable`，不是目录里的 `is_free`/`price_factor`。** 上游每次响应都在
+> usage 里回报 `billable`（是否真扣费）与 `credits`。2026-09-19 实机复核：`qfmodel`
+> 仍 `billable=false`（免费），`qmodel_38max`/`auto`/`qmodel_latest` 均为 `true`（计费）。
+> 注意免费档的 `credits` **不是 0**（约 0.003/次）——那是**标价参考，不是扣费额**；
+> qfmodel 属**限时促销档**，Qoder 可随时结束，届时 `billable` 翻 `true`，
+> 网关会自动改记真值（无需改码）。完整实测方法与已排除假象见
+> `docs/credit-and-token-tracking.md` §12。
+
 **曾经的 400 及真因**：`qfmodel` 走明文路径稳定返回
 `400 [FAIL]node:oa_qwen-plus-main msg:Execution failed: null`。真因**不是**编码、头部或认证，
 而是请求体缺少顶层 `business` 对象：

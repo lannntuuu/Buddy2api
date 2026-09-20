@@ -402,6 +402,46 @@ def test_log_request_records_from_worker_thread(monkeypatch, isolated_db):
     assert json.loads(row["usage_json"]) == usage
 
 
+def test_log_request_prefers_upstream_credit_over_estimate(monkeypatch, isolated_db):
+    """回归：Qoder CN 这类上游**回报真值**的通道不能再走 token 估算。
+
+    Qwen3.8-Flash（qfmodel）是 `billable=false` 的免费档，上游 `credits` 只是标价
+    参考、并未扣费。旧实现一律 `total_tokens / credit_rate`，把 51 次免费档请求
+    记出 4612.70 假 credit（上游 billable 合计实为 0.267）。
+    """
+    rows = []
+    monkeypatch.setattr(db, "record_request", lambda row: rows.append(row))
+
+    # 免费档：billable=false → 记 0，不管 tokens 多大
+    asyncio.run(store_common.log_request(
+        None, None, channel="qodercn", model="qfmodel", stream=True,
+        usage={"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150,
+               "credits": 0.36, "billable": False},
+        finish_reason="stop", status_code=200, duration_ms=1,
+        prompt_tokens=100, completion_tokens=50, total_tokens=150,
+    ))
+    assert rows[0]["credit"] == 0.0
+
+    # 计费档：billable=true → 用上游 credits 原值，不用 150/1000
+    asyncio.run(store_common.log_request(
+        None, None, channel="qodercn", model="qmodel", stream=True,
+        usage={"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150,
+               "credits": 0.21, "billable": True},
+        finish_reason="stop", status_code=200, duration_ms=1,
+        prompt_tokens=100, completion_tokens=50, total_tokens=150,
+    ))
+    assert rows[1]["credit"] == 0.21
+
+    # 上游没报 credit 的通道（qclaw/qwenwork）保持 token 估算不变
+    asyncio.run(store_common.log_request(
+        None, None, channel="qclaw", model="m", stream=True,
+        usage={"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        finish_reason="stop", status_code=200, duration_ms=1,
+        prompt_tokens=100, completion_tokens=50, total_tokens=150,
+    ))
+    assert rows[2]["credit"] == round(150 / 1000.0, 6)
+
+
 def test_log_request_usage_json_truncated(monkeypatch, isolated_db):
     captured = {}
 

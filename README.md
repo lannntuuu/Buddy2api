@@ -38,6 +38,31 @@ python -m src.gateway.server
 3. **某个通道返回 503 `channel_unavailable`：** 这个通道还没导入可用账号。
 4. **QClaw / QwenWork 请在 Windows 上直接跑 `python -m src.gateway.server`。** Linux Docker 读不了这两家用了 DPAPI 加密的本机文件；管理页会写明这一点。WorkBuddy 可以继续用 Docker。
 5. 本项目和聊天客户端最好在同一台电脑。客户端如果跑在 Docker 里，Base URL 填 `http://host.docker.internal:8787/v1`，不要填容器自己的 `127.0.0.1`。
+6. **本机同时跑着 dev 和 prod 两个实例，端口号不能用来推断"这是谁的"。** 见下面《多实例与 worktree 边界》。
+
+### 多实例与 worktree 边界（dev / prod）
+
+同一条机器上并存两个 checkout，**各自独立数据库、独立端口**：
+
+| checkout | 角色 | 端口 | 数据库 |
+|---|---|---|---|
+| `Buddy2api` | 开发 | **8787** | `Buddy2api/data/codebuddy_gateway.db` |
+| `Buddy2api-prod` | 生产 | **8788** | `Buddy2api-prod/data/codebuddy_gateway.db` |
+
+判定"某个端口 / 进程属于谁"，**只认该 checkout 里的 `config.toml`**（`[gateway] port` +
+`[database] path`，两边都写死了绝对路径与注释），别靠端口号猜、也别靠"我记得我起过一个"猜。
+一个可交叉验证的信号：两个实例的 `/health` 返回的 `accounts` / `active_keys` 数量不同，
+同一把 API Key 打两个端口通常一边 200、另一边 401 —— 那正说明它们是**两套库**。
+
+硬性边界：
+
+- **不要按端口直接杀进程**（`netstat -ano` 拿到 PID 就 `taskkill`）。动手前必须确认该 PID 的
+  `CommandLine` 与它使用的 `config.toml` / DB 路径；确认不了就别动，交给人来判。
+- **不要跨 checkout 读写数据目录。** `data/` 与各实例的 `config.toml` 属于那个实例。
+- **多个 worktree 共用同一个 `.git`**（`git worktree list` 可查）。所以在别人的 worktree 里
+  做 `git add` / `stash` / `reset` / `update-index` 会**直接改动共享的 index 与 HEAD**，
+  很容易吃掉对方未提交的在途工作。每条工作线用自己独立的 worktree + 独立分支，
+  需要拆分离时优先"新建分支/worktree 承载"，不要在对方 lane 里做索引手术。
 
 ## 安装与启动
 
