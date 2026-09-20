@@ -28,7 +28,8 @@ class TraeWorkProvider:
         return [{"id": item} for item in channel_model_ids(CHANNEL_ID, STATIC_MODELS)]
 
     def fetch_model_rates(self) -> list[dict]:
-        """TraeWork 上游 SSE 连 token 都不报，更无 per-model 倍率；仅返回生效白名单。"""
+        """TraeWork 上游 SSE 会经 token_usage 事件回报真实 token（已解析回填 usage），
+        但无 per-model 倍率；仅返回生效白名单。"""
         return [
             {"id": m["id"], "display_name": m["id"], "rate": None, "context_window": None, "official": False}
             for m in self.list_models()

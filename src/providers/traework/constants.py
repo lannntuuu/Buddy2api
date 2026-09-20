@@ -38,6 +38,11 @@ AGENT_ID_CODE = "solo_agent_lite"
 SESSION_MODE = "work"
 SESSION_MODE_CODE = "code"
 
+# code 模式标记（官方 client 在 code 模式下注入；见 976.f593cb93.mjs
+# applyCodeModeFlagIfNeeded）：createSession 嵌套进 initial_message，sendMessage
+# 放 body 顶层。work 模式不发送该字段。
+CODE_MODE_FLAG = "is_in_code_mode"
+
 
 def agent_id_for_mode(mode: str) -> str:
     """随 mode 联动的 agent：code -> solo_agent_lite，其余（含 work/未配置）-> solo_work_lite。"""

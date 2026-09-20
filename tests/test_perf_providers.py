@@ -258,7 +258,8 @@ def test_traework_turn_reuses_shared_pool(monkeypatch, isolated_db):
     account = {"id": 1, "access_token": "tk", "extra": {"device_id": "d"}}
 
     async def scenario():
-        text = await traework_chat._turn(account, "hi", "m", timeout=5.0)
+        # _turn 现返回 (text, usage, finish_reason, reasoning)
+        text, _usage, _finish, _reasoning = await traework_chat._turn(account, "hi", "m", timeout=5.0)
         assert text == "pong"
         await asyncio.sleep(0.05)  # 等后台收尾任务跑完
         return text
