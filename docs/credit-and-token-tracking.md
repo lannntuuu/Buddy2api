@@ -16,7 +16,7 @@
 |---|---|---|---|
 | WorkBuddy | ✅ 上游直接报 | ✅ 上游 `usage.credit` 字段 | ✅ 不变（仍走上游） |
 | Trae SOLO | ✅ `token_usage` 事件 | ❌ 上游不报 → `total_credits=0` | ✅ 网关侧 token→credit 估算（traesolo 默认 1000 token / 1 credit） |
-| TraeWork | ❌ token_usage 事件被丢（`_SKIP_EVENTS`），只记 0 | ❌ 同上 | ❌ **需要先修 SSE 解析再能估算**（见 §6） |
+| TraeWork | ✅ 现已解析 `token_usage`（input/output 真值回写 `usage` 与 `usage_json`）；无事件时回退 0 | ❌ 上游不报 credit | ✅ 网关侧估算（traework 默认 1000 token / 1 credit） |
 | QClaw | ✅ | ❌ 上游不报 → `0` | ✅ 网关侧估算（qclaw 默认 1000 token / 1 credit） |
 | QwenWork | ✅ | ❌ 上游不报 → `0` | ✅ 网关侧估算（qwenwork 默认 1000 token / 1 credit） |
 | Qoder CN | ✅ | ✅ **上游直接报** `usage.credits` + `usage.billable`（v2.2.0 时误走估算，见 §11） | ✅ 不变（仍走上游真值；`billable=false` 免费档记 0） |
@@ -109,12 +109,19 @@ curl -X PUT -H "Authorization: Bearer <admin-token>" -H "Content-Type: applicati
 
 ## 6. TraeWork 的特殊情况
 
-TraeWork 的 `_log` 把 `total_tokens=0` 写死——`token_usage` 事件在它的 `SKIP_EVENTS` 里被直接丢了
-（`providers/traework/chat.py:142-153`）。所以：
+TraeWork 现已**解析**上游 `token_usage` 事件（`providers/traework/chat.py` 的
+`_parse_token_usage`，从 `_SKIP_EVENTS` 移出 `token_usage`）：`input_tokens` / `output_tokens`
+映射成 `prompt_tokens` / `completion_tokens`，回写给客户端 `usage`，并写入请求日志的
+`usage_json` 字段；无该事件时回退全 0（向后兼容）。旧文档"TraeWork 上游不报 token"的结论
+已作废——上游确实回报 token 真值，只是此前被丢弃。
 
-- **token 统计就**没有**（不只是 credit）**——A 估出来也是 0。
-- 要给 TraeWork 也算上 credit，需要先单独修它的 SSE 解析把 `token_usage` 解析出来（参考
-  `solosse.go:88-89` 的做法）。这是另一个改动，牵动它现有工作流，**当前未做**。
+- **token 统计不再恒 0**：拿到事件时 `usage` 与 `usage_json` 都是真实值（这也是 chat 响应里
+  `usage` 字段现在能显示真实 token 数的原因）。
+- **credit 也能估算了**：`_log` 把解析出的 token 一并作为
+  `prompt_tokens` / `completion_tokens` / `total_tokens` 独立 kwargs 透传给
+  `store_common.log_request`（这三列只读 kwargs，不会从 `usage` 推导），因此请求日志的 token
+  三列与 `credit = total_tokens / rate` 都按真值落库，与 QClaw / QwenWork 行为一致。
+  无 `token_usage` 事件时三者都不传，保持全 0 的旧语义。
 
 ## 7. 调优建议
 

@@ -169,9 +169,38 @@ curl -X PUT ... -d '{"mode":null}'
 - 依据：官方客户端（TraeWork CN）的映射为 `Work→SoloWorkLite`、`Code→SoloAgentLite`、
   `Design→SoloDesignLite`（逆向自客户端 bundle，详见 `redesign-audit/41-traework-code-mode-spec.md`）。
 - 未纳入：`design` 模式（未实现）。
+- **code 模式真正生效靠 `is_in_code_mode` 标记（不止 agent 名）**：官方客户端（TraeWork CN）
+  在 code 模式下会向上游注入 `is_in_code_mode=true`——`createSession` 将其嵌套进
+  `initial_message`，`sendMessage` 放在 body 顶层（逆向自客户端 bundle
+  `976.f593cb93.mjs` 的 `applyCodeModeFlagIfNeeded`）。网关现已对齐这两处：配 `mode=code`
+  时建会话与发消息都带该标记，上游才真正按 TRAE Code 处理；只改 `mode`+`agent` 而不带此
+  标记，上游仍视为普通 work 会话（这正是早期"code 模式形同虚设"的根因）。`work` 模式
+  不发送该字段（与官方一致，行为逐字节不变）。
 - ✅ **已用真实账号端到端实测通过**（2026-09-19）：`mode=work` 与 `mode=code` 在
   `/v1/chat/completions`（非流式 + 流式）与 `/v1/responses`（Codex）均正常返回；
   两种模式的 SSE 事件集一致。详见 `redesign-audit/41a-traework-code-mode-evidence.md`。
+
+### 4.5 上下文与思考的呈现方式（v2.4 起已对齐其它通道）
+
+TraeWork 通道每收到一个请求都会**新建一个上游会话、用完即删**（见 `chat.py` 的 `_turn`），
+上游协议是「会话 + 单条 `query` 文本」而非 `messages` 数组。因此网关会把 OpenAI 请求里的
+**system prompt 与全部历史轮次压平成一段文本**塞进那条 `query`——效果上等价于其它通道
+「转发 system + 历史」，模型能看到完整的对话上下文。
+
+- **system / 多轮历史：已转发**（压平进单条 `query`，相邻段落空行分隔）。
+  无 system 且只有一条 user 消息时，发送内容与该 user 原文**逐字节相同**（不加任何前缀或标记）。
+- **思考（reasoning）走独立的 `reasoning_content` 字段**：流式响应的 delta 为
+  `reasoning_content`，最终答案走 `content`；非流式的 `message.reasoning_content` 也会带上。
+  这与 `qodercn` / `traesolo` / `qwenwork` / workbuddy 一致。
+  > 注意：**不渲染 `reasoning_content` 的客户端只会看到最终答案**，这属于预期行为
+  > （思考不再混进正文，所以不会再出现"先自言自语再回答"）。
+- **仍然不生效**：`tools` / 函数调用、`temperature` 等采样参数（上游该协议不接受）；
+  图片等多模态零件无法放进单轮文本，会被忽略。
+- **仍不保留跨请求记忆**：网关不复用上游会话，每轮都是新会话。多轮上下文靠客户端把历史
+  带在 `messages` 里（这也是把历史压平转发的原因）。
+
+对照：`qwenwork` / `qodercn` / `qclaw` / `traesolo` 直接转发 `messages` 数组，语义与
+上面「压平转发」一致，行为表现应当对齐。若需要真正的上游会话复用（方案 B），目前未实现。
 
 ## 5. 客户端接入
 
