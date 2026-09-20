@@ -60,7 +60,9 @@ def test_present_custom_wins_even_when_empty_or_invalid(fake_settings):
     for bad in ("garbage", [], ["a"]):
         fake_settings["traework.aliases"] = bad
         assert TRAEWORK.alias_map() == {}
-        assert TRAEWORK.translate_model("auto") == "auto"  # 无别名可翻译
+        # 保留字 "auto" 仍有兜底：管理员表为空/非法时不得把 "auto" 原样透传给上游
+        # （上游不认识该保留字；管理页「测试」按钮硬编码 model="auto"）。
+        assert TRAEWORK.translate_model("auto") == "qwen-3.7-plus"
 
 
 def test_absent_key_still_uses_defaults(fake_settings):
@@ -79,7 +81,8 @@ def test_empty_custom_via_set_roundtrip(fake_settings):
     assert view["aliases"] == {}
     assert view["customized"] == {"models": True, "aliases": True}
     assert TRAEWORK.accepts_model("qwen-3.7-plus") is False
-    assert TRAEWORK.translate_model("auto") == "auto"
+    # 保留字 auto 兜底为内置具体模型（见上一条用例的说明）
+    assert TRAEWORK.translate_model("auto") == "qwen-3.7-plus"
 
     # qclaw 自定义（含空白名单）后，pool-* 前缀不再旁路闸门
     view2 = control_plane.set_channel_models("qclaw", models=[], set_models=True)
