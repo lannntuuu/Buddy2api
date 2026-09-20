@@ -39,8 +39,10 @@ SESSION_MODE = "work"
 SESSION_MODE_CODE = "code"
 
 # code 模式标记（官方 client 在 code 模式下注入；见 976.f593cb93.mjs
-# applyCodeModeFlagIfNeeded）：createSession 嵌套进 initial_message，sendMessage
-# 放 body 顶层。work 模式不发送该字段。
+# applyCodeModeFlagIfNeeded）：对 chat.sendMessage 是 body 顶层字段。
+# 对 chat.createSession 官方是塞进 initial_message —— 但那是**完整的发消息对象**，
+# 本网关首轮走独立的 sendMessage、不发送 initial_message，故这里只用于 sendMessage。
+# work 模式不发送该字段。
 CODE_MODE_FLAG = "is_in_code_mode"
 
 

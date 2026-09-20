@@ -484,15 +484,27 @@ async def log_request(
 # 其他跨通道小工具
 # ============================================================
 
-def make_translator(aliases_fn, default_model: str):
+def make_translator(aliases_fn, default_model: str, *, reserved: dict[str, str] | None = None):
     """生成 translate_model：inner 模型名经通道别名表映射，未命中原样返回。
 
     aliases_fn 每次调用时求值，保证管理员热更新别名表后立即生效。
     收敛 qclaw / qwenwork / traework 三份逐字相同的单行拷贝。
+
+    reserved：可选「保留字 → 内置默认具体模型」表（通常直接传该通道的内置
+    ALIASES）。`channel_aliases` 的既有语义是「管理员表存在即整体替换内置默认」，
+    于是管理员若自定义了别名却没带上 `auto`，`auto` 就会**原样透传给上游**——
+    而上游并不认识这个保留字，会直接报错（traework 实测为 500/`internal server
+    error`，因为管理页「测试」按钮硬编码 `model:"auto"`）。
+    这里补一层兜底：**仅当**映射结果仍等于某个保留字时，才退到 `reserved` 里的
+    具体模型；管理员显式配了 `auto` 时仍以管理员为准（不改变既有优先级语义）。
+    默认 None = 完全保持旧行为，其余通道不受影响。
     """
     def translate_model(model: str) -> str:
         inner = (model or default_model).strip() or default_model
-        return aliases_fn().get(inner, inner)
+        mapped = aliases_fn().get(inner, inner)
+        if reserved and mapped in reserved:
+            return reserved[mapped]
+        return mapped
     return translate_model
 
 
