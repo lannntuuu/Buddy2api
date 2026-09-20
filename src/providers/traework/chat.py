@@ -12,18 +12,24 @@ import httpx
 
 from accounts import auth_manager
 from storage.http_pool import get_client
+from storage import database as db
 from providers import store_common
-from providers.model_config import channel_aliases, channel_model_ids
+from providers.model_config import channel_aliases, channel_model_ids, channel_session_mode
 from providers.traework.constants import (
     AGENT_API,
-    AGENT_ID,
+    agent_id_for_mode,
     ALIASES,
     CHANNEL_ID,
     SESSION_MODE,
     SESSIONS_PATH,
     STATIC_MODELS,
 )
-from providers.traework.token import TraeWorkAuthError, auth_headers, refresh_account
+from providers.traework.token import (
+    TraeWorkAuthError,
+    adopt_credentials_from_client,
+    auth_headers,
+    refresh_account,
+)
 from providers.trae_shared import pick_with_refresh_fallback
 from providers.host_override import channel_host
 
@@ -268,10 +274,16 @@ async def _turn(
         await _close_session()
 
     try:
+        # 建会话与发消息共用同一个 mode，确保两者取值一致（只解析一次）。
+        mode = channel_session_mode(CHANNEL_ID, SESSION_MODE)
         created = await client.post(
             session_url,
             headers=headers,
-            json={"mode": SESSION_MODE, "auto_create_project": True, "origin": "web"},
+            json={
+                "mode": mode,
+                "auto_create_project": True,
+                "origin": "web",
+            },
             timeout=timeout,
         )
         if created.status_code >= 400:
@@ -335,6 +347,7 @@ async def _turn(
                 [{"type": "text", "data": {"content": prompt}}],
                 ensure_ascii=False,
             )
+            agent = agent_id_for_mode(mode)
             sent = await client.post(
                 f"{session_url}/{sid}/messages",
                 headers=headers,
@@ -343,8 +356,8 @@ async def _turn(
                     "content": [],
                     "query": query,
                     "model_name": model,
-                    "agent_id": AGENT_ID,
-                    "agent_type": AGENT_ID,
+                    "agent_id": agent,
+                    "agent_type": agent,
                 },
                 timeout=timeout,
             )
@@ -386,6 +399,33 @@ async def _turn(
         raise
 
 
+async def _adopt_and_retry(
+    account: dict, prompt: str, model: str, *, timeout: float = 90.0, on_thinking=None
+) -> str | None:
+    """鉴权失效后的「凭据自救 + 重试一次」；返回回答文本，未接管或重试失败返回 None。
+
+    `_run_turn`（选号链路）与 `test_chat`（管理页「测试」直调账号）共用这一份实现：
+    后者绕过 _pick，若不自救则凭据被客户端轮换后「测试」永远失败，而它恰是
+    用户判断通道可用性的主要入口。收敛为一份，避免两处漂移。
+
+    注：重试阶段的异常在此吞掉并返回 None —— 调用方本就把该回合记为 503，
+    故不影响既有降级语义。
+    """
+    try:
+        adopted = await adopt_credentials_from_client(account)
+    except Exception:  # noqa: BLE001 - 自救链路须 best-effort，绝不外抛
+        adopted = False
+    if not adopted:
+        return None
+    fresh = db.get_account(int(account.get("id") or 0))
+    if not fresh:
+        return None
+    try:
+        return await _turn(fresh, prompt, model, timeout=timeout, on_thinking=on_thinking)
+    except Exception:  # noqa: BLE001 - 重试失败同样收敛为 None（调用方按 503 降级）
+        return None
+
+
 async def _run_turn(
     prompt: str,
     model: str,
@@ -404,6 +444,8 @@ async def _run_turn(
     """
     first_token_cell = getattr(on_thinking, "first_token_cell", None)
     tried: set[int] = set()
+    # 每个账号最多自救重试一次，避免死循环（与失败标 expired 的次数解耦）。
+    adopted_once: set[int] = set()
     last_error = None
     for _ in range(3):
         account = await _pick(tried)
@@ -427,6 +469,25 @@ async def _run_turn(
             auth_manager.mark_account_failure(account["id"], 503)
             last_error = ("error", (503, {"error": {"message": str(exc)[:240], "type": "server_error"}}))
             await _log(api_key_info, account, client_model, stream, "error", 503, str(exc)[:240], t0)
+            # 鉴权失效：尝试从客户端 storage.json 自救；成功则拿新凭据重试本回合一次。
+            account_id = int(account["id"])
+            if account_id not in adopted_once:
+                retried = await _adopt_and_retry(
+                    account, prompt, model, timeout=timeout, on_thinking=on_thinking
+                )
+                if retried is not None:
+                    adopted_once.add(account_id)
+                    fresh = db.get_account(account_id) or account
+                    auth_manager.mark_account_success(account_id)
+                    if first_token_cell is not None and "ms" not in first_token_cell:
+                        first_token_cell["ms"] = int(
+                            (time.monotonic() - first_token_cell.get("t0", time.monotonic())) * 1000
+                        )
+                    await _log(
+                        api_key_info, fresh, client_model, stream, "stop", 200, "", t0,
+                        first_token_ms=(first_token_cell or {}).get("ms"),
+                    )
+                    return "ok", retried
             continue
         except httpx.HTTPError as exc:
             auth_manager.mark_account_failure(account["id"], 503)
@@ -591,7 +652,13 @@ async def test_chat(account: dict, model: str = "qwen-3.7-plus", prompt: str = "
         try:
             text = await _turn(account, prompt or "请回复：pong", translate_model(model or "auto"), timeout=90.0)
         except TraeWorkAuthError as exc:
-            return 503, str(exc)[:400], None
+            # 「测试」按钮直接拿账号调 _turn，绕过了 _pick/_run_turn 的选号链路，
+            # 因此自愈必须在这里也接一次：否则凭据被客户端轮换后，测试永远失败，
+            # 而这条路径恰是用户判断通道是否可用的主要入口。
+            healed = await _adopt_and_retry(account, prompt, model)
+            if healed is None:
+                return 503, str(exc)[:400], None
+            return 200, None, healed
         return 200, None, text
 
     return await store_common.run_test_chat(model or "auto", prompt or "请回复：pong", send, limit=400)

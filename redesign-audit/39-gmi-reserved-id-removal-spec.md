@@ -10,8 +10,8 @@
 
 ```python
 # src/providers/protocol.py L8-L18
-ChannelId = Literal["workbuddy","qclaw","qwenwork","qoderwork","traework","traesolo","gmi"]
-KNOWN_CHANNEL_IDS = ("workbuddy","qclaw","qwenwork","qoderwork","traework","traesolo","gmi")
+ChannelId = Literal["workbuddy","qclaw","qwenwork","qodercn","traework","traesolo","gmi"]
+KNOWN_CHANNEL_IDS = ("workbuddy","qclaw","qwenwork","qodercn","traework","traesolo","gmi")
 ```
 
 而 `known_channel_ids()` 是「内置 ∪ 自定义」：

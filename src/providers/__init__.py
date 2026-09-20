@@ -15,6 +15,7 @@ from providers.protocol import (
 )
 from providers.qclaw import PROVIDER as QCLAW_PROVIDER
 from providers.qwenwork import PROVIDER as QWENWORK_PROVIDER
+from providers.qodercn import PROVIDER as QODERCN_PROVIDER
 from providers.traework import PROVIDER as TRAEWORK_PROVIDER
 from providers.traesolo import PROVIDER as TRAESOLO_PROVIDER
 from providers.workbuddy import PROVIDER as WORKBUDDY_PROVIDER
@@ -32,6 +33,7 @@ _LOADED: dict[str, Provider] = {
     "workbuddy": WORKBUDDY_PROVIDER,
     "qclaw": QCLAW_PROVIDER,
     "qwenwork": QWENWORK_PROVIDER,
+    "qodercn": QODERCN_PROVIDER,
     "traework": TRAEWORK_PROVIDER,
     "traesolo": TRAESOLO_PROVIDER,
 }

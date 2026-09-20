@@ -9,7 +9,11 @@ from providers.model_config import channel_aliases, channel_model_ids
 from providers.protocol import ChannelId, QuotaSnapshot
 from providers.traework import chat, quota, store
 from providers.traework.constants import ALIASES, CHANNEL_ID, DISPLAY_NAME, STATIC_MODELS
-from providers.traework.token import TraeWorkAuthError, refresh_account
+from providers.traework.token import (
+    TraeWorkAuthError,
+    adopt_credentials_from_client,
+    refresh_account,
+)
 from providers.trae_shared import pick_with_refresh_fallback
 
 
@@ -17,6 +21,8 @@ class TraeWorkProvider:
     id: ChannelId = CHANNEL_ID
     display_name = DISPLAY_NAME
     checkin_supported = True
+    # 该通道支持会话模式（work / code）控制
+    supports_session_mode = True
 
     def list_models(self) -> list[dict]:
         return [{"id": item} for item in channel_model_ids(CHANNEL_ID, STATIC_MODELS)]
@@ -45,8 +51,12 @@ class TraeWorkProvider:
     ) -> Optional[dict]:
         # 收敛到共享实现(负缓存/异常域见 trae_shared);
         # proactive 语义:选中的过期账号先尝试原地刷新。
+        # adopt_fn:refresh 因鉴权失效失败时，先试「从客户端 storage.json 重读
+        # 被客户端刷新过的凭据」，成功即就地自愈 —— 修复「自动退出登录」后
+        # 必须人工重导的主症状。
         return await pick_with_refresh_fallback(
             self.id, refresh_account, exclude_ids=exclude_ids,
+            adopt_fn=adopt_credentials_from_client,
         )
 
     async def has_usable_account(self) -> bool:

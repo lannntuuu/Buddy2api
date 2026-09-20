@@ -23,10 +23,11 @@ python -m src.gateway.server
 | 千问办公 QwenWork | 开 | `%APPDATA%\QwenWorkCN` |
 | TraeWork | 开 | `%APPDATA%\TRAE SOLO CN\User\globalStorage` |
 | Trae SOLO | 开 | 无（Web 登录回环 / 凭证 JSON 导入） |
+| Qoder | 关（opt-in） | `%APPDATA%\com.qodercn.app.stable` / `%APPDATA%\QoderCN` |
 | GMI | 关（opt-in） | Web 配置：通道管理页选 GMI 通道后粘 API Key 即可 |
 | Bailian | 关(opt-in) | Web 配置：通道管理页选 Bailian 通道后粘贴 API Key 即可 |
 
-路径不对时可用 `CB_AUTH_DIR`、`CB_QCLAW_AUTH_DIR`、`CB_QWENWORK_AUTH_DIR`、`CB_TRAEWORK_AUTH_DIR` 指定。四个通道的登录文件不要混在同一个目录里。Trae SOLO 的凭证 JSON 可用 `CB_TRAESOLO_AUTH_DIR` 指定扫描目录（可选）。GMI 不读本机登录目录，靠管理页导入 API Key。
+路径不对时可用 `CB_AUTH_DIR`、`CB_QCLAW_AUTH_DIR`、`CB_QWENWORK_AUTH_DIR`、`CB_QODERCN_AUTH_DIR`、`CB_TRAEWORK_AUTH_DIR` 指定。各通道的登录文件不要混在同一个目录里。Trae SOLO 的凭证 JSON 可用 `CB_TRAESOLO_AUTH_DIR` 指定扫描目录（可选）。Qoder 默认为 opt-in：本机 Qoder CN 登录缓存可导入、查额度、发起对话（协议已冻结，见设计文档 Appendix A）；机器指纹默认读 `%USERPROFILE%\.qoder-cn\.auth\machine_id`，可用 `CB_QODERCN_MACHINE_ID` 覆盖。GMI 不读本机登录目录，靠管理页导入 API Key。
 
 ## 注意事项
 
@@ -37,6 +38,31 @@ python -m src.gateway.server
 3. **某个通道返回 503 `channel_unavailable`：** 这个通道还没导入可用账号。
 4. **QClaw / QwenWork 请在 Windows 上直接跑 `python -m src.gateway.server`。** Linux Docker 读不了这两家用了 DPAPI 加密的本机文件；管理页会写明这一点。WorkBuddy 可以继续用 Docker。
 5. 本项目和聊天客户端最好在同一台电脑。客户端如果跑在 Docker 里，Base URL 填 `http://host.docker.internal:8787/v1`，不要填容器自己的 `127.0.0.1`。
+6. **本机同时跑着 dev 和 prod 两个实例，端口号不能用来推断"这是谁的"。** 见下面《多实例与 worktree 边界》。
+
+### 多实例与 worktree 边界（dev / prod）
+
+同一条机器上并存两个 checkout，**各自独立数据库、独立端口**：
+
+| checkout | 角色 | 端口 | 数据库 |
+|---|---|---|---|
+| `Buddy2api` | 开发 | **8787** | `Buddy2api/data/codebuddy_gateway.db` |
+| `Buddy2api-prod` | 生产 | **8788** | `Buddy2api-prod/data/codebuddy_gateway.db` |
+
+判定"某个端口 / 进程属于谁"，**只认该 checkout 里的 `config.toml`**（`[gateway] port` +
+`[database] path`，两边都写死了绝对路径与注释），别靠端口号猜、也别靠"我记得我起过一个"猜。
+一个可交叉验证的信号：两个实例的 `/health` 返回的 `accounts` / `active_keys` 数量不同，
+同一把 API Key 打两个端口通常一边 200、另一边 401 —— 那正说明它们是**两套库**。
+
+硬性边界：
+
+- **不要按端口直接杀进程**（`netstat -ano` 拿到 PID 就 `taskkill`）。动手前必须确认该 PID 的
+  `CommandLine` 与它使用的 `config.toml` / DB 路径；确认不了就别动，交给人来判。
+- **不要跨 checkout 读写数据目录。** `data/` 与各实例的 `config.toml` 属于那个实例。
+- **多个 worktree 共用同一个 `.git`**（`git worktree list` 可查）。所以在别人的 worktree 里
+  做 `git add` / `stash` / `reset` / `update-index` 会**直接改动共享的 index 与 HEAD**，
+  很容易吃掉对方未提交的在途工作。每条工作线用自己独立的 worktree + 独立分支，
+  需要拆分离时优先"新建分支/worktree 承载"，不要在对方 lane 里做索引手术。
 
 ## 安装与启动
 
@@ -195,6 +221,12 @@ QwenWork、QClaw、TraeWork、Trae SOLO 各用自己那把 Key，不要混用。
 
 各通道的模型列表 / 别名可通过管理 API 配置（改完立即生效，无需重启）；不配置时用内置默认。
 
+**别名就是 `GET /v1/models` 列出的名字**，也是客户端应当请求的名字。给模型配了别名后，
+该通道的模型目录里显示的是别名而非上游内部 key（例如 Qoder 通道默认把
+`qfmodel` 显示为 `Qwen3.8-Flash`）；没有别名的模型仍按内部 id 列出。
+别名只改「对外叫什么」，原生 key 始终照旧可请求。管理页「模型配置」页的
+**展示名列**可直接改这些名字（多个别名用英文逗号分隔）。
+
 ```bash
 # 查看（含生效值、内置默认、是否自定义）
 curl -H "Authorization: Bearer <admin-token>" http://127.0.0.1:8787/admin/channels/traework/models
@@ -319,6 +351,8 @@ path = "/var/lib/buddy2api/codebuddy_gateway.db"
 | WorkBuddy | `CB_AUTH_DIR` | 本机登录目录 |
 | QClaw | `CB_QCLAW_AUTH_DIR` | 本机登录目录 |
 | QwenWork | `CB_QWENWORK_AUTH_DIR` | 本机登录目录 |
+| Qoder | `CB_QODERCN_AUTH_DIR` | 本机登录目录（默认扫 `%APPDATA%\com.qodercn.app.stable` 与 `%APPDATA%\QoderCN`） |
+| Qoder | `CB_QODERCN_MACHINE_ID` * | 覆盖出站 `Cosy-MachineId`/`Cosy-MachineToken`。默认读 `%USERPROFILE%\.qoder-cn\.auth\machine_id`（缺失也能出站） |
 | TraeWork | `CB_TRAEWORK_AUTH_DIR` | `storage.json` 所在目录 |
 | Trae SOLO | `CB_TRAESOLO_CALLBACK_BASE` | 登录回调基地址（远程部署时指向能从外网访问服务的地址，默认用请求自身地址） |
 | Trae SOLO | `CB_TRAESOLO_AUTH_DIR` * | 凭证 JSON 扫描目录（可选；该通道默认不扫目录，走 Web 登录） |

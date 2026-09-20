@@ -33,7 +33,15 @@ AUTH_DEVICE_PREFIX = "iCubeAuthInfo://icube-dc:"
 STORAGE_FILENAME = "storage.json"
 
 AGENT_ID = "solo_work_lite"
+# code 模式联动的 agent（官方 client 映射 mode=Code -> SoloAgentLite / solo_agent_lite）
+AGENT_ID_CODE = "solo_agent_lite"
 SESSION_MODE = "work"
+SESSION_MODE_CODE = "code"
+
+
+def agent_id_for_mode(mode: str) -> str:
+    """随 mode 联动的 agent：code -> solo_agent_lite，其余（含 work/未配置）-> solo_work_lite。"""
+    return AGENT_ID_CODE if mode == SESSION_MODE_CODE else AGENT_ID
 
 STATIC_MODELS = (
     "qwen-3.7-plus",

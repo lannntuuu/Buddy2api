@@ -109,6 +109,7 @@ async def pick_with_refresh_fallback(
     exclude_ids=None,
     refresh_errors: type[BaseException] | tuple = Exception,
     sticky: bool = False,
+    adopt_fn=None,
 ) -> dict | None:
     """pick_account + expired 账号逐个 refresh 兜底(五家 facade 共用)。
 
@@ -118,9 +119,26 @@ async def pick_with_refresh_fallback(
     refresh_errors 指定哪些异常按"刷新失败"处理（负缓存 + 尝试下一个），
     其余异常照常向上抛（qclaw 只把 JprxError 当刷新失败）。
     sticky=True 时刷新成功后把该账号设为通道粘住项(workbuddy 正典语义)。
+
+    adopt_fn：可选的「凭据自救」回调（async，签名 (account) -> bool）。
+    refresh 因鉴权失效而失败时先尝试它（如 traework 从客户端 storage.json
+    重读被客户端刷新过的凭据），成功则用新凭据重新走一遍选号。
+    这是「自动退出登录」的主修复点：token 过期 → refresh 401 → 以前只会进
+    负缓存然后一路 503，现在就地把凭据换成客户端的最新版本即可自愈。
+    默认 None = 不启用，五家既有语义不受影响。
     """
     from accounts import auth_manager
     from storage import database as db
+
+    async def _try_adopt(account: dict) -> bool:
+        """best-effort 自救；任何异常/未配置都视为未接管。"""
+        if adopt_fn is None:
+            return False
+        try:
+            return bool(await adopt_fn(account))
+        except Exception:  # noqa: BLE001 - 自救绝不打断选号链路
+            logger.debug("adopt credentials failed for %s", channel_id, exc_info=True)
+            return False
 
     exclude = exclude_ids or set()
     now = _now()
@@ -133,6 +151,14 @@ async def pick_with_refresh_fallback(
                     "skip refresh for %s account %s: failed within TTL",
                     channel_id, account_id,
                 )
+                # 负缓存期内不再重放 refresh，但仍值得试一次自救：客户端可能
+                # 已重新登录（这正是旧实现"必须手动重导"的场景）。
+                adopted = await _try_adopt(account)
+                if adopted:
+                    _mark_refresh_success(channel_id, account_id)
+                    fresh = db.get_account(account_id)
+                    if fresh:
+                        return fresh
             else:
                 try:
                     result = await refresh_fn(account)
@@ -140,6 +166,15 @@ async def pick_with_refresh_fallback(
                     logger.debug(
                         "refresh failed for %s account %s", channel_id, account_id, exc_info=True
                     )
+                    # refresh 鉴权失效 → 先尝试自救，成功则直接用新凭据，不必进负缓存。
+                    adopted = await _try_adopt(account)
+                    if adopted:
+                        _mark_refresh_success(channel_id, account_id)
+                        fresh = db.get_account(account_id)
+                        if fresh:
+                            if sticky:
+                                auth_manager._set_sticky_account(fresh["id"], channel_id)
+                            return fresh
                     _mark_refresh_failure(channel_id, account_id, _now())
                 else:
                     _mark_refresh_success(channel_id, account_id)
@@ -165,6 +200,15 @@ async def pick_with_refresh_fallback(
                 "refresh failed for %s account %s",
                 channel_id, row.get("id"), exc_info=True,
             )
+            # 同上：expired 账号 refresh 失败时也试一次自救。
+            adopted = await _try_adopt(row)
+            if adopted:
+                _mark_refresh_success(channel_id, int(row.get("id") or 0))
+                fresh = db.get_account(int(row.get("id") or 0))
+                if fresh:
+                    if sticky:
+                        auth_manager._set_sticky_account(fresh["id"], channel_id)
+                    return fresh
             _mark_refresh_failure(channel_id, int(row.get("id") or 0), _now())
             continue
         _mark_refresh_success(channel_id, int(row.get("id") or 0))
