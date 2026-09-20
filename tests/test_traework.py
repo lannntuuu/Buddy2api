@@ -100,6 +100,26 @@ def test_translate_auto(isolated_db):
     assert translate_model("auto") == "qwen-3.7-plus"
 
 
+def test_translate_auto_falls_back_when_admin_aliases_omit_it(isolated_db):
+    """回归：管理员自定义别名漏掉 "auto" 时，保留字必须兜底成具体模型。
+
+    背景（prod 实测故障）：`channel_aliases` 的语义是「管理员表存在即整体替换内置
+    默认」。prod 的 `traework.aliases` 被设成 {"DeepSeek-V4-Flash-Official": 同名}，
+    没有 "auto"，于是 translate_model("auto") 原样返回 "auto" 并**透传给上游**；
+    而上游不认识这个保留字，直接 500（`internal server error`）。
+    管理页「测试」按钮硬编码 model="auto"，所以只要别名表缺 auto，测试必失败。
+    """
+    # 模拟 prod：自定义别名存在但没有 auto
+    db.set_setting("traework.aliases", {"DeepSeek-V4-Flash-Official": "DeepSeek-V4-Flash-Official"})
+    assert translate_model("auto") == "qwen-3.7-plus"
+    # 管理员显式配了 auto 时仍以管理员为准（不改变既有优先级）
+    db.set_setting("traework.aliases", {"auto": "glm-5.3"})
+    assert translate_model("auto") == "glm-5.3"
+    # 具体模型名不受兜底影响
+    db.set_setting("traework.aliases", {"DeepSeek-V4-Flash-Official": "DeepSeek-V4-Flash-Official"})
+    assert translate_model("glm-5.3") == "glm-5.3"
+
+
 def test_extract_assistant_text_from_task():
     items = [
         {"role": "user", "content": "[]"},
@@ -518,18 +538,28 @@ def test_stream_chat_error_surfaces_in_band(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_r2_code_mode_sends_flag_both_places(isolated_db, monkeypatch):
-    """R2：code 模式在 createSession(initial_message) 与 sendMessage(顶层) 都带
-    is_in_code_mode=True；work 模式两处都不带。"""
+def test_r2_code_mode_sends_flag_on_sendmessage_only(isolated_db, monkeypatch):
+    """R2：code 模式只在 sendMessage 顶层带 is_in_code_mode=True。
+
+    **不再发送 createSession.initial_message**：官方 client 的 initial_message 是
+    一个完整的发消息对象（buildSendMessageRequest 的产物），applyCodeModeFlagIfNeeded
+    只往这个已存在的对象里补键。本网关首轮走独立的 sendMessage，塞一个只有
+    {is_in_code_mode:true} 的桩对象属于协议违规（上游按"这里有一条待发消息"解析，
+    缺 query/model_name 等必需字段即报 500 internal server error）。
+    code 语义由 sendMessage 顶层标记表达，与官方 sendMessage 分支一致。
+    """
     db.set_setting("traework.mode", "code")
     fake = _FakeTraeClient()
     monkeypatch.setattr(tw, "get_client", lambda: fake)
     asyncio.run(tw._turn({"access_token": "tok", "extra": {}}, "hi", "qwen-3.7-plus", timeout=90.0))
 
     create_body = _post_body(fake, "/chat_sessions")
-    assert create_body["initial_message"] == {"is_in_code_mode": True}
+    # 关键回归：不得再伪造 initial_message（无论是否带 flag）
+    assert "initial_message" not in create_body
+    assert "is_in_code_mode" not in create_body
     msg_body = _post_body(fake, "/messages")
     assert msg_body["is_in_code_mode"] is True
+    assert msg_body["agent_id"] == "solo_agent_lite"
 
 
 def test_r2_work_mode_sends_flag_nowhere(isolated_db, monkeypatch):

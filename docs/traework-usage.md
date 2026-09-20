@@ -170,15 +170,27 @@ curl -X PUT ... -d '{"mode":null}'
   `Design→SoloDesignLite`（逆向自客户端 bundle，详见 `redesign-audit/41-traework-code-mode-spec.md`）。
 - 未纳入：`design` 模式（未实现）。
 - **code 模式真正生效靠 `is_in_code_mode` 标记（不止 agent 名）**：官方客户端（TraeWork CN）
-  在 code 模式下会向上游注入 `is_in_code_mode=true`——`createSession` 将其嵌套进
-  `initial_message`，`sendMessage` 放在 body 顶层（逆向自客户端 bundle
-  `976.f593cb93.mjs` 的 `applyCodeModeFlagIfNeeded`）。网关现已对齐这两处：配 `mode=code`
-  时建会话与发消息都带该标记，上游才真正按 TRAE Code 处理；只改 `mode`+`agent` 而不带此
+  在 code 模式下会向上游注入 `is_in_code_mode=true`；对 `sendMessage` 它是 **body 顶层字段**
+  （逆向自客户端 bundle `976.f593cb93.mjs` 的 `applyCodeModeFlagIfNeeded`）。网关按此对齐：
+  配 `mode=code` 时发消息带该标记，上游才真正按 TRAE Code 处理；只改 `mode`+`agent` 而不带此
   标记，上游仍视为普通 work 会话（这正是早期"code 模式形同虚设"的根因）。`work` 模式
   不发送该字段（与官方一致，行为逐字节不变）。
+  > **不要往 `createSession` 里塞 `initial_message`**：官方客户端确实会带这个字段，但那是
+  > `buildSendMessageRequest()` 产出的**完整发消息对象**（含 `chat_session_id`/`query`/
+  > `model_name`/`agent_id` 等），`applyCodeModeFlagIfNeeded` 只是往这个已存在的对象里补一个键。
+  > 本网关首轮走的是**独立的 sendMessage**，若拿 `initial_message` 只装一个
+  > `{is_in_code_mode: true}` 的桩对象，上游会按"这里有一条待发消息"去解析，缺必需字段即报
+  > `500 internal server error`。code 语义由 sendMessage 顶层标记表达即可。
 - ✅ **已用真实账号端到端实测通过**（2026-09-19）：`mode=work` 与 `mode=code` 在
   `/v1/chat/completions`（非流式 + 流式）与 `/v1/responses`（Codex）均正常返回；
   两种模式的 SSE 事件集一致。详见 `redesign-audit/41a-traework-code-mode-evidence.md`。
+- ⚠️ **自定义别名时务必留 `auto`（否则管理页「测试」必失败）**：管理页「测试」按钮固定发
+  `model="auto"`。而 `<channel>.aliases` 的语义是「管理员表存在即**整体替换**内置默认」——
+  如果你的自定义别名表里没有 `auto`，这个保留字就会被**原样透传给上游**，上游不认识它，
+  直接报 `500 internal server error`。
+  网关现已内置兜底：映射结果仍是保留字 `auto` 时回退到内置具体模型（traework 为
+  `qwen-3.7-plus`）；你若显式配了 `auto`，仍以你的配置为准。
+  排查同类问题时先看管理页 → 模型与配置 → 该通道的别名表里有没有 `auto`。
 
 ### 4.5 上下文与思考的呈现方式（v2.4 起已对齐其它通道）
 

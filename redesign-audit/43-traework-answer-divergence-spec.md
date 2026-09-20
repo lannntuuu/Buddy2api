@@ -108,9 +108,14 @@ traework `_last_user_text()` 只挑 `role=="user"` 的最后一条，然后把�
 ### 3.1 R2：补发 `is_in_code_mode`（最高优先级，改动最小）
 
 - `constants.py` 增加 `CODE_MODE_FLAG = "is_in_code_mode"`；
-- `_turn` 建会话时，`mode == "code"` 则在 body 里带 `initial_message: {"is_in_code_mode": True}`；
 - 发消息时，`mode == "code"` 则在 body 顶层带 `is_in_code_mode: True`；
 - work 模式**不发送**该字段（与官方一致，避免改变现有行为）。
+
+> **更正（见 §7）**：早期实现还往 `createSession` 里塞了
+> `initial_message: {"is_in_code_mode": True}`，**这是错的，已移除**。
+> 官方 `initial_message` 是 `buildSendMessageRequest()` 的完整产物，
+> `applyCodeModeFlagIfNeeded` 只是往已存在的对象里补键；本网关首轮走独立
+> sendMessage，桩对象会被上游当作"待发消息"解析而报 500。
 
 ### 3.2 R3：思考走 `reasoning_content` —— **已实施（按用户指示对齐其它通道）**
 
@@ -250,11 +255,82 @@ fake 既不是 awaitable、也没有 `aiter_lines`，`read_events` 抛的是 `Ty
 1. 单测：`tests/test_traework.py` 覆盖 code 模式带/不带 flag、`token_usage` 解析回填
    （含三列/credit 落库、不污染正文）、`finish_reason` 映射、`_new_piece` 重叠片段、
    R1 压平（逐字节一致 / system+历史 / 多 system / 图片忽略 / 缺 user 轮 400）、
-   R3（流式 reasoning_content 与 content 分离、非流式 reasoning_content、兜底不重复）。
-   **67 passed**。
-2. 全量：`pytest tests -q` → **794 passed，4 deselected**。
+   R3（流式 reasoning_content 与 content 分离、非流式 reasoning_content、兜底不重复）、
+   以及 §7 的两条回归（不得发 `initial_message`、`auto` 保留字兜底）。
+2. 全量：`pytest tests -q` → **795 passed，4 deselected**。
 3. 文档：§4.4 / §4.5 与 credit 文档均已按实现更新。
 4. **不做**真实联网验证（见 §1.1 安全边界）；如需实测，由用户在 prod(:8788) 侧自行触发。
 5. 既有契约测试未被削弱：`test_provider_log_wrappers_route_through_shared` 明确要求
    "无 usage 时不得多传 token kwargs"，实现据此改为条件透传而非无条件传。
-4. **不做**真实联网验证（见 §1.1 安全边界）；如需实测，由用户在 prod(:8788) 侧自行触发。
+
+---
+
+## 7. prod(:8788)「测试」失败的根因与修复（第三轮）
+
+用户反馈：prod 分支跑的项目里 traework「测试」通过不了。零网络排查结论如下。
+
+### 7.1 先排除的项（都不是原因）
+
+| 假设 | 证据 | 结论 |
+|---|---|---|
+| 凭据失效 | prod 库里 token 是 Fernet **密文**；用 prod 自己的 `credentials.key` 解密后与客户端 `storage.json` **逐字节一致**，access 有效期至 2026-10-03 | 排除 |
+| prod 代码落后 | prod 已含前两轮全部提交（`git merge-base --is-ancestor` 三个提交均为真） | 排除 |
+| 别名表内容 | 两侧都含 `qwen-3.7-plus` / `DeepSeek-V4-Flash-Official`，白名单不是瓶颈 | 排除 |
+| host override | 两侧 `channel_hosts` 都未设置 | 排除 |
+
+### 7.2 真正原因（两个独立缺陷叠加）
+
+**原因 A：`createSession.initial_message` 桩对象（本 spec §3.1 早期实现的错误）**
+
+上一轮我依据 `applyCodeModeFlagIfNeeded` 写了 `initial_message = {"is_in_code_mode": True}`。
+但官方客户端里这个字段是 `buildSendMessageRequest()` 的**完整产物**：
+
+```
+R = buildSendMessageRequest(...)     // 含 chat_session_id/content/query/model_name/agent_id/...
+createSession(en({..., initial_message: R, ...}))
+```
+
+而 `applyCodeModeFlagIfNeeded` 只是往**已存在**的对象里补键
+（`e = r.initial_message ?? {}; e.is_in_code_mode = !0`），从不凭空创建。
+
+本网关的架构是「建会话 → 另发一次 sendMessage」，首轮并不走 `initial_message`。
+塞一个只有 flag 的桩对象，等于告诉上游"这里有一条待发消息"，而它缺 `query`/`model_name`，
+上游按 500 `internal server error` 返回。**这与模型名无关**：prod 唯一一条真实请求
+（`logs id=34009`）用的就是合法模型 `DeepSeek-V4-Flash-Official`，照样 503。
+
+时间线印证：代码 21:18 落盘，进程 22:59 导入新代码，23:00 那次请求即 500——此前
+18:00 用同样模型是 200。
+
+**修复**：删掉 `initial_message` 注入，code 语义只由 sendMessage 顶层标记表达
+（那正是官方 `chat.sendMessage` 分支的做法）。`work` 模式行为不变。
+
+**原因 B：保留字 `auto` 被原样透传给上游（配置 + 代码双因素）**
+
+管理页「测试」按钮**硬编码** `{model:'auto',prompt:'ping'}`（`channels.js:318`）。
+而 `channel_aliases()` 的语义是「设置键存在即**整体替换**内置默认」：
+
+```
+dev : traework.aliases = {"auto": "qwen-3.7-plus"}                    → translate_model("auto") = "qwen-3.7-plus" ✅
+prod: traework.aliases = {"DeepSeek-V4-Flash-Official": "同名"}       → translate_model("auto") = "auto"          ❌
+```
+
+`"auto"` 于是被当作 `model_name` 发给上游。官方客户端**从不这样发**：
+`getModelRequestSelection` 在 Auto 策略下返回 `modelName:""`（空串），具体模型才给 id。
+`"auto"` 是 UI 保留字，不是合法的线上取值。
+
+**修复**：`make_translator(..., reserved=...)` 新增兜底——映射结果仍是保留字时回退到内置
+具体模型；管理员显式配了 `auto` 时仍以管理员为准（不改既有优先级）。`reserved` 默认 `None`，
+其余通道行为完全不变。
+
+### 7.3 为什么会有"dev 能过、prod 不能"的错觉
+
+dev 的 `enabled_channels = ["workbuddy"]`——**traework 根本没启用**，在 dev 点「测试」会在
+`get_provider` 处直接 400（`Channel 'traework' is not enabled`），压根到不了 traework 代码。
+所以这不是"dev 过 / prod 不过"，而是两个实例的配置不同。真正相关的差异只有两处：
+`enabled_channels` 与 `aliases` 表。
+
+### 7.4 附带发现：测试路径不落日志
+
+`chat.test_chat` 与 `store_common.run_test_chat` **都不写 logs 表**，只有 `_run_turn` 写。
+所以「测试」失败在日志页查不到任何痕迹——这正是本次排查一开始缺证据的原因。
+（已记录为待办，本轮未改，避免扩大改动面。）

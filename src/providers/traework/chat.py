@@ -47,8 +47,10 @@ def _spawn_bg_close(coro) -> None:
 
 
 # 与 qclaw / qwenwork 的同名单行拷贝收敛：见 store_common.make_translator
+# reserved=ALIASES：即使管理员自定义别名时漏掉 "auto"，也兜底翻成内置的具体模型
+# （否则保留字 "auto" 会原样透传给上游并报错；管理页「测试」按钮硬编码 model="auto"）。
 translate_model = store_common.make_translator(
-    lambda: channel_aliases(CHANNEL_ID, ALIASES), "auto"
+    lambda: channel_aliases(CHANNEL_ID, ALIASES), "auto", reserved=ALIASES
 )
 
 
@@ -420,18 +422,22 @@ async def _turn(
     try:
         # 建会话与发消息共用同一个 mode，确保两者取值一致（只解析一次）。
         mode = channel_session_mode(CHANNEL_ID, SESSION_MODE)
-        # code 模式：官方 client 在 createSession 把 is_in_code_mode 嵌套进
-        # initial_message（976.f593cb93.mjs applyCodeModeFlagIfNeeded）；work 模式
-        # 不发送该字段，body 与此前逐字段一致。
+        # 注意：**不发送 initial_message**。
+        # 官方 client 的 createSession 确实带 initial_message，但那是「完整的发消息对象」
+        # （410.66aabbc9.mjs: initial_message = buildSendMessageRequest(...)，含
+        # chat_session_id/content/query/model_name/agent_id/... ），
+        # 976.f593cb93.mjs 的 applyCodeModeFlagIfNeeded 只是往这个**已存在**的对象里
+        # 补一个键（e = r.initial_message ?? {}; e.is_in_code_mode = !0），从不凭空造。
+        # 本网关的架构是「建会话 → 另发一次 sendMessage」，首轮不走 initial_message，
+        # 所以拿它塞一个 {is_in_code_mode:true} 的**桩对象**属于协议违规：上游会照
+        # 「这里有一条待发消息」去解析，缺少 query/model_name 等必需字段即报错。
+        # code 模式改由 sendMessage 顶层的 is_in_code_mode 表达——那正是官方 client
+        # 在 chat.sendMessage 分支上的做法，语义对等且不伪造首轮消息。
         create_json: dict = {
             "mode": mode,
             "auto_create_project": True,
             "origin": "web",
         }
-        if mode == SESSION_MODE_CODE:
-            init_msg = dict(create_json.get("initial_message") or {})
-            init_msg[CODE_MODE_FLAG] = True
-            create_json["initial_message"] = init_msg
         created = await client.post(
             session_url,
             headers=headers,
