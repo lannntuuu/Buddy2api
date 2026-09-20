@@ -180,22 +180,27 @@ curl -X PUT ... -d '{"mode":null}'
   `/v1/chat/completions`（非流式 + 流式）与 `/v1/responses`（Codex）均正常返回；
   两种模式的 SSE 事件集一致。详见 `redesign-audit/41a-traework-code-mode-evidence.md`。
 
-### 4.5 已知限制：不保留多轮上下文 / system / tools（当前边界，非 bug）
+### 4.5 上下文与思考的呈现方式（v2.4 起已对齐其它通道）
 
-TraeWork 通道每收到一个请求都会**新建一个上游会话、用完即删**（见 `chat.py` 的 `_turn`）：
-网关只把 OpenAI 请求里**最后一条 user 消息**抽取出来发给上游（`query` 为单轮对话体），
-**不转发** system prompt、历史多轮 messages、tools、temperature 等参数。
+TraeWork 通道每收到一个请求都会**新建一个上游会话、用完即删**（见 `chat.py` 的 `_turn`），
+上游协议是「会话 + 单条 `query` 文本」而非 `messages` 数组。因此网关会把 OpenAI 请求里的
+**system prompt 与全部历史轮次压平成一段文本**塞进那条 `query`——效果上等价于其它通道
+「转发 system + 历史」，模型能看到完整的对话上下文。
 
-这意味着：
+- **system / 多轮历史：已转发**（压平进单条 `query`，相邻段落空行分隔）。
+  无 system 且只有一条 user 消息时，发送内容与该 user 原文**逐字节相同**（不加任何前缀或标记）。
+- **思考（reasoning）走独立的 `reasoning_content` 字段**：流式响应的 delta 为
+  `reasoning_content`，最终答案走 `content`；非流式的 `message.reasoning_content` 也会带上。
+  这与 `qodercn` / `traesolo` / `qwenwork` / workbuddy 一致。
+  > 注意：**不渲染 `reasoning_content` 的客户端只会看到最终答案**，这属于预期行为
+  > （思考不再混进正文，所以不会再出现"先自言自语再回答"）。
+- **仍然不生效**：`tools` / 函数调用、`temperature` 等采样参数（上游该协议不接受）；
+  图片等多模态零件无法放进单轮文本，会被忽略。
+- **仍不保留跨请求记忆**：网关不复用上游会话，每轮都是新会话。多轮上下文靠客户端把历史
+  带在 `messages` 里（这也是把历史压平转发的原因）。
 
-- 同一把 Key 的连续对话在 TraeWork 通道**没有"记忆"**：每轮都是全新会话，上游看不到上一轮；
-- 客户端下发的 system 指令、工具调用、采样参数在 TraeWork 通道**不生效**；
-- 这是该通道当前的**设计边界**（上游历史事件由服务端会话持有，而网关不复用会话），
-  **不是故障**，请勿据此误判通道异常。
-
-对照：同样的请求走其它通道（如 `qwenwork` / `qclaw`）会保留完整上下文与 system/tools，
-表现符合预期时应参考那些通道。若需要多轮 / 带上下文的 TraeWork 对话，目前只能由你在每轮
-把历史拼进 user 消息里（上下文由客户端自行维护）。
+对照：`qwenwork` / `qodercn` / `qclaw` / `traesolo` 直接转发 `messages` 数组，语义与
+上面「压平转发」一致，行为表现应当对齐。若需要真正的上游会话复用（方案 B），目前未实现。
 
 ## 5. 客户端接入
 

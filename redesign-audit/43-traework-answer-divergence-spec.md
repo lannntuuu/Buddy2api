@@ -112,16 +112,32 @@ traework `_last_user_text()` 只挑 `role=="user"` 的最后一条，然后把�
 - 发消息时，`mode == "code"` 则在 body 顶层带 `is_in_code_mode: True`；
 - work 模式**不发送**该字段（与官方一致，避免改变现有行为）。
 
-### 3.2 R3：思考走 `reasoning_content`（流式）——**未实施，待决策**
+### 3.2 R3：思考走 `reasoning_content` —— **已实施（按用户指示对齐其它通道）**
 
-- `on_thinking` 转发时改为 `sse({"reasoning_content": piece})`，不再塞进 `content`；
-- 保留"最终回答若已在思考里则不重复发"的判断；
-- 严格 OpenAI 客户端由此能把思考与正文分开渲染。
+用户指示：这两个问题（R3/R1）"看下其他在用的通道就好了"，即以兄弟通道行为为准。
 
-**为何未做**：这是**行为可见的破坏性变更**——现有客户端（含本机在用者）可能已习惯
-"思考文本先到"的表现；改成独立字段后，不渲染 `reasoning_content` 的客户端会**看不到任何
-中间输出**（首包变成空的 role 帧，之后长时间静默直到最终答案），TTFB 体验反而变差。
-需要用户先确认目标客户端是否支持 `reasoning_content`，故本轮不动。
+参考实现（实测读取）：
+
+| 通道 | 做法 | 位置 |
+|---|---|---|
+| qodercn | `delta_out["reasoning_content"] = reasoning` | `chat.py:329-332` |
+| traesolo | `delta["reasoning_content"] = ev["reasoning_content"]` | `chat.py:507-508` |
+| qwenwork | 收集后 `message["reasoning_content"]` | `chat.py:291-292,306-307` |
+| workbuddy (proxy) | 收集后 `message["reasoning_content"]` | `proxy.py:1011-1012,1071-1072` |
+| qclaw | 仅当 content 为空时把思考**兜底提升**为 content | `chat.py:41-54` |
+
+**结论：标准做法是思考走独立字段**；只有 qclaw 因上游可能不返回正文才做兜底提升。
+
+实施：
+- 流式：`on_thinking` 转发改为 `sse({"reasoning_content": piece})`，最终答案仍走 `content`；
+- 非流式：`_turn` 累计思考并返回，`_openai_json` 在 `reasoning != text` 时写
+  `message["reasoning_content"]`（正文来自思考兜底时不重复填）。
+
+**关键回归修复**：旧代码有一句"最终回答若已包含在转发过的内容里则不重复发"的守卫，是
+为**旧行为**（思考混在 `content` 里）防重复用的。思考移到 `reasoning_content` 后二者不再
+共用通道，继续沿用该守卫会导致：**不渲染 `reasoning_content` 的客户端完全收不到回答**。
+现改为与 qodercn/traesolo 一致——`content` 与 `reasoning_content` 各自独立转发，不跨通道去重
+（原先的 `emitted` 列表随之成为死代码，已删除）。
 
 ### 3.3 R4：解析 `token_usage` 真值
 
@@ -140,15 +156,30 @@ traework `_last_user_text()` 只挑 `role=="user"` 的最后一条，然后把�
 
 - `finish_reason` 依据上游 `done.status` 映射（`completed→stop`、失败→`error`）；
 - `_new_piece` 增加"非前缀重叠"保护；
-- 非流式在拿到思考时补 `reasoning_content`（若 3.2 已实现，则统一由同一处产出）。
+- 非流式在拿到思考时补 `reasoning_content`（已随 3.2 一并实现）。
 
-### 3.5 R1：入参保真（**需用户决策，本次不实施**）
+### 3.5 R1：入参保真 —— **已实施（压平转发，方案 A）**
 
-`query` 的载荷模型是"单轮对话"，**历史上文由服务端会话持有**。网关每请求新建并删除会话，因此要恢复多轮
-上下文，只有两条路：
+用户指示以兄弟通道为准。兄弟通道**全部转发 system + 完整历史**：
 
-- **方案 A（保守）**：只做 `3.1`–`3.4`，不碰会话生命周期。多轮仍失忆，但 code 模式、用量真值、
-  终止语义都能拿到。**本轮即采用 A。**
+| 通道 | 做法 | 位置 |
+|---|---|---|
+| qwenwork | `_split_messages` 取 system + 转发完整 `messages` + `tools` | `chat.py:77-95,113-114,161-163` |
+| qodercn | 同上 | `chat.py:91-109,187-189` |
+| qclaw | `body = dict(payload)` 整体透传 | `chat.py:100-104` |
+| traesolo | 转发完整 `messages`（含 assistant tool_calls） | `chat.py:219-263` |
+
+TraeWork 上游不接受 `messages` 数组，只接受一条单轮 `query` 文本，故采用**压平**：把
+system 与全部历史按空行拼接进 `query`，效果上等价于兄弟通道转发 `messages`。
+
+**硬约束（已用测试锁定）**：无 system 且仅一条 user 消息时，发送文本与该 user 原文
+**逐字节相同**——不做 strip、不加前缀/标记。实现中发现并修复了两处偏差：
+
+1. 早期实现先 `.strip()` 再返回，导致用户文本首尾有空白时**不再逐字节一致**；
+2. `has_user` 早期写成"turns 非空"，于是**只有 assistant/tool 轮的请求不再回 400**
+   （校验被放宽）；已恢复为"存在非空 user 消息"，与改造前 `_last_user_text` 语义一致。
+
+仍**未做**方案 B（按会话复用上游 session）。
 - **方案 B（彻底）**：按客户端会话 id 复用上游 session（映射 OpenAI 会话 ↔ `chat_session_id`），并转发
   system/历史/tools/参数。改动大、涉及会话池与清理，且需与"每请求独立、无状态"的既有降级语义
   重新对齐，风险高。
@@ -164,9 +195,24 @@ traework `_last_user_text()` 只挑 `role=="user"` 的最后一条，然后把�
 | R4 token_usage 解析 + 三列/credit | ✅ 已实施 + 单测 |
 | R5 finish_reason 映射 | ✅ 已实施 + 单测 |
 | R6 `_new_piece` 重叠保护 | ✅ 已实施 + 单测 |
-| R1 入参保真 | ⏸️ 未实施（方案 B，待决策） |
+| R1 入参保真（压平转发 system + 历史） | ✅ 已实施 + 单测（方案 B 会话复用仍未做） |
 | 测试设施缺陷 | ✅ 已修复 |
-| 全量单测 | ✅ `782 passed in 39.75s` |
+| 全量单测 | ✅ `794 passed, 4 deselected` |
+
+### 3.7 实施过程中额外发现并修复的回归（第二轮）
+
+除 §3.5 记录的 `_build_prompt` 两处偏差外，R3 落地时还发现一处**严重回归**：
+
+- `_stream_chat` 里"最终回答若已包含在转发过的内容里则跳过"的守卫，原本是为**旧行为**
+  （思考混在 `content`）防重复用的。思考改走 `reasoning_content` 后，若答案文本恰是思考的
+  子串（例如上游思考里出现 "pong"、而最终答案就是 "pong"），该守卫会**把回答整个吞掉**——
+  不渲染 `reasoning_content` 的客户端将**完全收不到回答**。
+- 已按 qodercn/traesolo 语义改为：`content` 与 `reasoning_content` 独立转发、不跨通道去重；
+  随之删除已无读取方的 `emitted` 列表。
+- 原测试 `test_stream_chat_no_duplicate_answer` 曾把该错误行为固化为断言
+  （`assert "pong" not in contents`），已改写为
+  `test_stream_chat_answer_always_sent_as_content_even_if_same_as_thinking`，
+  断言答案**必须**出现在 `content` 中。
 
 ---
 
@@ -186,26 +232,28 @@ fake 既不是 awaitable、也没有 `aiter_lines`，`read_events` 抛的是 `Ty
 
 修复：`_FakeTraeStream.__aenter__` 改 `async def` 并返回带 `status_code` 与 `aiter_lines()` 的响应对象。
 
-结果：`44 passed in 2.80s`（原先需 ~37 分钟超时）；全量 `771 passed in 39.04s`。
+结果：`44 passed in 2.80s`（原先需 ~37 分钟超时）。
 
 ---
 
 ## 5. 文档同步
 
 - `docs/traework-usage.md` §4.4 补充：code 模式的实际生效条件（含 `is_in_code_mode`）；
-- 新增一节说明"多轮上下文/ system 不生效"的既有边界，避免用户误判为故障；
-- `docs/credit-and-token-tracking.md` 中"TraeWork 上游不报 token"的结论需按 §3.3 更正。
+- §4.5 改写为「上下文与思考的呈现方式」：说明 system + 历史已压平转发、思考走
+  `reasoning_content`、以及仍然不生效的部分（tools / 采样参数 / 图片 / 跨请求记忆）；
+- `docs/credit-and-token-tracking.md` 中"TraeWork 上游不报 token"的结论已按 §3.3 更正。
 
 ---
 
 ## 6. 验收
 
-1. 单测：`tests/test_traework.py` 覆盖 code 模式带 flag（两处）、work 模式不带 flag（两处）、
-   `token_usage` 解析回填（含三列/credit 落库、且不污染正文）、`finish_reason` 映射、
-   `_new_piece` 重叠片段。**55 passed**。
-2. 全量：`pytest tests -q` → **782 passed，4 deselected**。
-3. 文档：`docs/traework-usage.md` §4.4 补充 code 模式生效条件，新增 §4.5 已知限制；
-   `docs/credit-and-token-tracking.md` §2 表格与 §6 按实际实现更正。
+1. 单测：`tests/test_traework.py` 覆盖 code 模式带/不带 flag、`token_usage` 解析回填
+   （含三列/credit 落库、不污染正文）、`finish_reason` 映射、`_new_piece` 重叠片段、
+   R1 压平（逐字节一致 / system+历史 / 多 system / 图片忽略 / 缺 user 轮 400）、
+   R3（流式 reasoning_content 与 content 分离、非流式 reasoning_content、兜底不重复）。
+   **67 passed**。
+2. 全量：`pytest tests -q` → **794 passed，4 deselected**。
+3. 文档：§4.4 / §4.5 与 credit 文档均已按实现更新。
 4. **不做**真实联网验证（见 §1.1 安全边界）；如需实测，由用户在 prod(:8788) 侧自行触发。
 5. 既有契约测试未被削弱：`test_provider_log_wrappers_route_through_shared` 明确要求
    "无 usage 时不得多传 token kwargs"，实现据此改为条件透传而非无条件传。

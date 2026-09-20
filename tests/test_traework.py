@@ -258,8 +258,8 @@ def test_turn_creates_session_with_default_mode(isolated_db, monkeypatch):
     monkeypatch.setattr(tw, "get_client", lambda: fake)
 
     account = {"access_token": "tok", "extra": {}}
-    # _turn 现返回 (text, usage, finish_reason)
-    text, _usage, _finish = asyncio.run(tw._turn(account, "hi", "qwen-3.7-plus", timeout=90.0))
+    # _turn 现返回 (text, usage, finish_reason, reasoning)
+    text, _usage, _finish, _reasoning = asyncio.run(tw._turn(account, "hi", "qwen-3.7-plus", timeout=90.0))
     assert text == "pong"
     # 建会话 POST 的 body 与改造前逐字段一致
     create_body = _post_body(fake, "/chat_sessions")
@@ -300,6 +300,33 @@ def test_turn_creates_session_with_work_mode(isolated_db, monkeypatch):
     msg_body = _post_body(fake, "/messages")
     assert msg_body["agent_id"] == "solo_work_lite"
     assert msg_body["agent_type"] == "solo_work_lite"
+
+
+def test_r1_turn_sends_flattened_prompt_to_upstream(isolated_db, monkeypatch):
+    """R1：_turn 发出的 query 必须包含 system 与历史（而非只发最后一句 user）。"""
+    db.set_setting("traework.mode", "work")
+    fake = _FakeTraeClient()
+    monkeypatch.setattr(tw, "get_client", lambda: fake)
+
+    account = {"access_token": "tok", "extra": {}}
+    full_payload = {
+        "model": "qwen-3.7-plus",
+        "messages": [
+            {"role": "system", "content": "system-ctx"},
+            {"role": "user", "content": "上一问"},
+            {"role": "assistant", "content": "上一答"},
+            {"role": "user", "content": "当前问"},
+        ],
+    }
+    prompt, _has_user = tw._build_prompt(full_payload)
+    asyncio.run(tw._turn(account, prompt, "qwen-3.7-plus", timeout=90.0))
+    msg_body = _post_body(fake, "/messages")
+    query = json.loads(msg_body["query"])
+    assert query[0]["data"]["content"] == prompt
+    assert "system-ctx" in query[0]["data"]["content"]
+    assert "上一问" in query[0]["data"]["content"]
+    assert "上一答" in query[0]["data"]["content"]
+    assert "当前问" in query[0]["data"]["content"]
 
 
 def test_traework_sources_do_not_touch_workbuddy_stack():
@@ -402,13 +429,30 @@ def test_stream_chat_forwards_thinking_early(monkeypatch):
         return "ok", "pong"
 
     payloads, _text = _collect_stream(monkeypatch, fake_turn, order)
-    raw = [c["choices"][0]["delta"].get("content") for c in payloads]
-    contents = [x.strip() for x in raw if x]
-    # 思考片段先于最终回答出现
-    assert contents.index("用户要求只回复某个词") < contents.index("pong")
+    # R3：思考片段走 reasoning_content，最终回答走 content；且思考先于回答出现。
+    # 在完整 payloads 序列里定位思考帧与最终内容帧的下标，确认思考先于回答。
+    reasoning_idx = next(
+        i for i, c in enumerate(payloads)
+        if c["choices"][0]["delta"].get("reasoning_content", "").strip() == "用户要求只回复某个词"
+    )
+    content_idx = next(
+        i for i, c in enumerate(payloads)
+        if c["choices"][0]["delta"].get("content", "").strip() == "pong"
+    )
+    assert reasoning_idx < content_idx
+    # 思考文本不得混入 content
+    contents = [c["choices"][0]["delta"].get("content") for c in payloads]
+    assert "用户要求只回复某个词" not in [x for x in contents if x]
 
 
-def test_stream_chat_no_duplicate_answer(monkeypatch):
+def test_stream_chat_answer_always_sent_as_content_even_if_same_as_thinking(monkeypatch):
+    """R3：思考走 reasoning_content 后，最终回答仍必须以 content 下发。
+
+    回归点：早期"答案已在转发内容里则不重复发"的守卫是为旧行为（思考混在 content）
+    防重复用的。R3 把思考移到 reasoning_content 后二者不再共用通道，沿用该守卫会让
+    不渲染 reasoning_content 的客户端**完全收不到回答**。参考 qodercn/traesolo：
+    content 与 reasoning_content 独立转发，不做跨通道去重。
+    """
     order = []
 
     async def fake_turn(prompt, model, client_model, info, stream=False, on_thinking=None, timeout=90.0):
@@ -418,9 +462,13 @@ def test_stream_chat_no_duplicate_answer(monkeypatch):
         return "ok", "pong"
 
     payloads, _text = _collect_stream(monkeypatch, fake_turn, order)
+    reasoning = [c["choices"][0]["delta"].get("reasoning_content") for c in payloads]
     contents = [c["choices"][0]["delta"].get("content") for c in payloads]
-    # 答案已包含在转发过的思考文本里，不再重复发
-    assert contents.count("pong") == 1
+    assert "pong" in reasoning
+    # 关键：答案必须出现在 content 里（不得被思考去重守卫吞掉）
+    assert "pong" in [x.strip() for x in contents if x]
+    # 且流以正常 finish_reason=stop 收尾
+    assert payloads[-1]["choices"][0]["finish_reason"] == "stop"
 
 
 def test_stream_chat_dedups_cumulative_thinking(monkeypatch):
@@ -434,12 +482,15 @@ def test_stream_chat_dedups_cumulative_thinking(monkeypatch):
         return "ok", "pong"
 
     payloads, _text = _collect_stream(monkeypatch, fake_turn, order)
-    raw = [c["choices"][0]["delta"].get("content") for c in payloads]
-    contents = [x.strip() for x in raw if x]
+    reasoning = [c["choices"][0]["delta"].get("reasoning_content") for c in payloads]
+    reasoning = [x.strip() for x in reasoning if x]
     # 第二段是累计重发，只转发增量；前缀不重复出现
-    assert "思考第一步" in contents
-    assert "。继续推理" in contents
-    assert "".join(contents).count("思考第一步") == 1
+    assert "思考第一步" in reasoning
+    assert "。继续推理" in reasoning
+    assert "".join(reasoning).count("思考第一步") == 1
+    # 思考文本不出现在 content 里（R3 分离）
+    contents = [c["choices"][0]["delta"].get("content") for c in payloads]
+    assert "思考第一步" not in [x for x in contents if x]
 
 
 def test_stream_chat_error_surfaces_in_band(monkeypatch):
@@ -745,6 +796,259 @@ def test_r4_stream_terminal_chunk_carries_usage(isolated_db, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 新增回归：R1 入参保真（system + 多轮历史压平进单条 query）
+# ---------------------------------------------------------------------------
+
+
+def _build_query_json(payload: dict) -> str:
+    """复刻 _turn 里 query 的构造：单元素 list 包一层 text item。"""
+    prompt, _has_user = tw._build_prompt(payload)
+    return json.dumps(
+        [{"type": "text", "data": {"content": prompt}}],
+        ensure_ascii=False,
+    )
+
+
+def test_r1_single_user_no_system_is_byte_identical(isolated_db):
+    """R1 硬约束：无 system + 单条 user 消息时，prompt 与用户文本逐字节相同。"""
+    payload = {"model": "qwen-3.7-plus", "messages": [{"role": "user", "content": "只回复：pong"}]}
+    prompt, has_user = tw._build_prompt(payload)
+    assert has_user is True
+    assert prompt == "只回复：pong"
+    # query 形状仍是 list-of-one-text-item，且 content 等于原文
+    query = _build_query_json(payload)
+    parsed = json.loads(query)
+    assert parsed == [{"type": "text", "data": {"content": "只回复：pong"}}]
+
+
+def test_r1_system_and_history_flattened_into_query(isolated_db):
+    """R1：system + 多轮历史都进 query；query 仍是合法 list-of-one-text-item。"""
+    payload = {
+        "model": "qwen-3.7-plus",
+        "messages": [
+            {"role": "system", "content": "你是一个严谨的助手"},
+            {"role": "user", "content": "什么是光年？"},
+            {"role": "assistant", "content": "光年是距离单位"},
+            {"role": "user", "content": "那速度呢？"},
+        ],
+    }
+    prompt, has_user = tw._build_prompt(payload)
+    assert has_user is True
+    # system 与历史都被保留（模型视角与兄弟通道转发 messages 数组一致）
+    assert "你是一个严谨的助手" in prompt
+    assert "什么是光年？" in prompt
+    assert "光年是距离单位" in prompt
+    assert "那速度呢？" in prompt
+    # 仍为单用户轮语义（最后一句仍是当前提问），且 query 形状合法
+    query = _build_query_json(payload)
+    parsed = json.loads(query)
+    assert isinstance(parsed, list) and len(parsed) == 1
+    assert parsed[0] == {"type": "text", "data": {"content": prompt}}
+
+
+def test_r1_multiple_system_joined_by_blank_line(isolated_db):
+    """R1：多条 system 以空行拼接（与 qwenwork._split_messages 一致）。"""
+    payload = {
+        "model": "qwen-3.7-plus",
+        "messages": [
+            {"role": "system", "content": "规则一"},
+            {"role": "system", "content": "规则二"},
+            {"role": "user", "content": "开始"},
+        ],
+    }
+    prompt, _has_user = tw._build_prompt(payload)
+    assert "规则一" in prompt and "规则二" in prompt
+    # 两条 system 以空行分隔（非简单拼接，也不带标记）
+    assert "规则一\n\n规则二" in prompt
+    assert prompt.endswith("开始")
+
+
+def test_r1_list_content_parts_text_concatenated_image_ignored(isolated_db):
+    """R1：list content 里文本零件拼接、图片零件忽略且不崩。"""
+    payload = {
+        "model": "qwen-3.7-plus",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "看图回答："},
+                    {"type": "image_url", "image_url": {"url": "http://x/y.png"}},
+                    {"type": "text", "text": "这是什么？"},
+                ],
+            }
+        ],
+    }
+    prompt, has_user = tw._build_prompt(payload)
+    assert has_user is True
+    # 文本零件拼接；图片零件被忽略（本协议无法承载）
+    assert prompt == "看图回答：这是什么？"
+
+
+def test_r1_no_user_turn_reports_400(isolated_db):
+    """R1：无 user 轮时仍按既有语义回 400（chat_completions 据此拦截）。"""
+    payload = {"model": "qwen-3.7-plus", "messages": [{"role": "system", "content": "只有系统提示"}]}
+    prompt, has_user = tw._build_prompt(payload)
+    # 无 user 轮 → has_user 为 False；chat_completions 据此回 400（system 文本本身
+    # 仍会被压平进 prompt，但缺 user 轮不构成合法请求）。
+    assert has_user is False
+
+
+def test_r1_only_assistant_or_tool_still_400(isolated_db):
+    """R1 回归：has_user 只看 user 轮，与改造前 _last_user_text 语义一致。
+
+    早期实现把 has_user 写成 "turns 非空"，于是只有 assistant / tool 轮的请求
+    不再回 400（校验被放宽）。这里锁死：缺 user 轮一律 False。
+    """
+    for msgs in (
+        [{"role": "assistant", "content": "我先说话"}],
+        [{"role": "tool", "content": "工具结果"}],
+        [{"role": "assistant", "content": "a"}, {"role": "tool", "content": "b"}],
+    ):
+        _prompt, has_user = tw._build_prompt({"model": "m", "messages": msgs})
+        assert has_user is False, f"缺 user 轮应回 400，但被放行: {msgs}"
+
+
+def test_r1_byte_identical_keeps_surrounding_whitespace(isolated_db):
+    """R1 硬约束：单 user、无 system 时必须逐字节一致，含首尾空白（不得 strip）。"""
+    for text in ("hello", "  hello  ", "\nhello\n", "line1\nline2", "  "):
+        prompt, has_user = tw._build_prompt(
+            {"model": "m", "messages": [{"role": "user", "content": text}]}
+        )
+        if text.strip():
+            assert prompt == text, f"未逐字节保留: {text!r} -> {prompt!r}"
+            assert has_user is True
+        else:
+            # 纯空白 user 文本视为无有效 user 轮（与旧实现"取不到文本"一致）
+            assert has_user is False
+
+
+
+# ---------------------------------------------------------------------------
+# 新增回归：R3 思考走 reasoning_content
+# ---------------------------------------------------------------------------
+
+
+def test_r3_nonstream_reasoning_content_present(isolated_db, monkeypatch):
+    """R3：非流式拿到思考时，message.reasoning_content 必须呈现（与兄弟通道一致）。"""
+    db.set_setting("traework.mode", "work")
+    _add_one_traework_account()
+    events = [
+        "event: plan_item",
+        "data: " + json.dumps(
+            {
+                "id": "p1",
+                "thought": "",
+                "reasoning_content": "让我先想想思路",
+                "tool_call_info": {"name": "finish", "params": {"summary": "pong"}},
+                "result": {"status": "success"},
+            },
+            ensure_ascii=False,
+        ),
+        "event: token_usage",
+        'data: {"input_tokens": 1, "output_tokens": 2}',
+        "event: done",
+        'data: {"status": "completed"}',
+    ]
+    fake = _FakeTraeClientEvents(events)
+    monkeypatch.setattr(tw, "get_client", lambda: fake)
+
+    status, body = asyncio.run(
+        tw.chat_completions(
+            {"model": "qwen-3.7-plus", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+            None,
+        )
+    )
+    assert status == "json", body
+    message = body["choices"][0]["message"]
+    assert message["content"] == "pong"
+    # 思考文本独立成字段，绝不混入 content
+    assert message.get("reasoning_content") == "让我先想想思路"
+
+
+def test_r3_nonstream_fallback_answer_not_duplicated_into_reasoning(isolated_db, monkeypatch):
+    """R3：当最终答案来自思考兜底（GET /messages 无 finish/正文，只有思考文本）时，
+    同一文本不得同时占 content 与 reasoning_content。
+
+    这里需要 GET /messages 返回的助手消息本身是「只有 reasoning_content、无 finish」
+    的 plan_item：extract_assistant_text 会退回思考文本作答案；同时事件流也产出同样的
+    思考文本，故 thinking_accum 与最终答案相等，`_openai_json` 的去重守卫应跳过
+    reasoning_content（否则同一段既当答案又当思考）。
+    """
+    db.set_setting("traework.mode", "work")
+    _add_one_traework_account()
+
+    class _FakeTraeClientFallback(_FakeTraeClientEvents):
+        async def get(self, url, *, headers=None, timeout=None):
+            if url.endswith("/messages"):
+                return _FakeTraeResponse(
+                    payload={"code": 0, "data": {"items": [
+                        {"role": "assistant", "message_type": "task",
+                         "content": json.dumps(
+                             {"task_id": "t", "messages": [
+                                 {"type": "plan_item", "plan_item": {
+                                     "thought": "",
+                                     "reasoning_content": "唯一的回答",
+                                     "tool_call_info": {"name": "web_search", "params": {"query": "x"}},
+                                 }}],
+                             }, ensure_ascii=False)},
+                    ]}}
+                )
+            return _FakeTraeResponse()
+
+    events = [
+        "event: plan_item",
+        "data: " + json.dumps(
+            {
+                "id": "p1",
+                "thought": "",
+                "reasoning_content": "唯一的回答",
+                "tool_call_info": {"name": "web_search", "params": {"query": "x"}},
+            },
+            ensure_ascii=False,
+        ),
+        "event: done",
+        "data: {}",
+    ]
+    fake = _FakeTraeClientFallback(events)
+    monkeypatch.setattr(tw, "get_client", lambda: fake)
+
+    status, body = asyncio.run(
+        tw.chat_completions(
+            {"model": "qwen-3.7-plus", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+            None,
+        )
+    )
+    assert status == "json", body
+    message = body["choices"][0]["message"]
+    # 答案来自思考兜底 → content 承载它，reasoning_content 不得重复同一段
+    assert message["content"] == "唯一的回答"
+    assert "reasoning_content" not in message
+
+
+def test_r3_stream_reasoning_and_final_content_separated(monkeypatch):
+    """R3 流式端到端：思考增量走 reasoning_content，最终答案走 content。"""
+    order = []
+
+    async def fake_turn(prompt, model, client_model, info, stream=False, on_thinking=None, timeout=90.0):
+        if on_thinking is not None:
+            await on_thinking("先规划再回答")
+        await asyncio.sleep(0.02)
+        return "ok", "pong", None, "stop", "先规划再回答"
+
+    payloads, _text = _collect_stream(monkeypatch, fake_turn, order)
+    reasoning = [c["choices"][0]["delta"].get("reasoning_content") for c in payloads]
+    reasoning = [x.strip() for x in reasoning if x]
+    contents = [c["choices"][0]["delta"].get("content") for c in payloads]
+    contents = [x.strip() for x in contents if x]
+    # 思考片段走 reasoning_content，最终答案（pong）走 content
+    assert "先规划再回答" in reasoning
+    assert "pong" in contents
+    # content 里不得出现思考文本（R3 分离，绝不混入）
+    assert "先规划再回答" not in contents
+
+
+
+# ---------------------------------------------------------------------------
 # 测试替身：自包含跑完 _turn（建会话 → 发消息 → 收流 → GET /messages）
 # ---------------------------------------------------------------------------
 
@@ -1007,8 +1311,8 @@ def test_run_turn_self_heals_and_retries(isolated_db, monkeypatch, client_auth_d
     fake = _FakeTraeClientFailOnce()
     monkeypatch.setattr(tw, "get_client", lambda: fake)
 
-    # _run_turn 现返回 ("ok", text, usage, finish_reason)
-    status, text, _usage, _finish = asyncio.run(
+    # _run_turn 现返回 ("ok", text, usage, finish_reason, reasoning)
+    status, text, _usage, _finish, _reasoning = asyncio.run(
         tw._run_turn("hi", "qwen-3.7-plus", "auto", None, stream=False)
     )
 
@@ -1054,7 +1358,7 @@ def test_run_turn_selfheal_retry_keeps_usage_and_finish(isolated_db, monkeypatch
 
     monkeypatch.setattr(store_common, "log_request", spy_log)
 
-    status, text, usage, finish = asyncio.run(
+    status, text, usage, finish, _reasoning = asyncio.run(
         tw._run_turn("hi", "qwen-3.7-plus", "auto", None, stream=False)
     )
 

@@ -60,24 +60,76 @@ def accepts_model(inner: str) -> bool:
     )
 
 
-def _last_user_text(payload: dict) -> str:
-    for item in reversed(payload.get("messages") or []):
-        if not isinstance(item, dict) or item.get("role") != "user":
-            continue
-        content = item.get("content")
-        if isinstance(content, str) and content.strip():
-            return content
-        if isinstance(content, list):
-            parts = []
-            for part in content:
-                if isinstance(part, dict) and part.get("text"):
-                    parts.append(str(part["text"]))
-                elif isinstance(part, str):
-                    parts.append(part)
-            text = "".join(parts).strip()
-            if text:
-                return text
+def _parts_to_text(content) -> str:
+    """把一条消息的 content 拍平成文本。
+
+    支持 str 与 list[part]：list 里只取文本零件（part.get("text") 或裸 str），
+    图片类零件（type=="image_url" / 含 "image"）不在此协议承载，直接忽略但不崩。
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                # 图片零件无法放进单轮 query 文本，忽略（不抛）。
+                ptype = str(part.get("type") or "")
+                if "image" in ptype:
+                    continue
+                text = part.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+            elif isinstance(part, str):
+                parts.append(part)
+        return "".join(parts)
     return ""
+
+
+def _build_prompt(payload: dict) -> tuple[str, bool]:
+    """把 system + 全部历史压平进单条上游 query 文本（R1，入参保真）。
+
+    上游是「会话 + 单 query」模型，不像兄弟通道（qwenwork/qodercn/qclaw/traesolo）
+    那样把 messages 数组整体转发；网关每请求新建并删除会话，服务端不持有历史。
+    为在模型视角与兄弟通道保持一致（system 与多轮历史都抵达上游），这里把
+    它们串行化进唯一的 query 文本，等价于兄弟通道「转发 system + 历史」的语义。
+
+    约定：用户/system/assistant 依次拼接，相邻段之间空行分隔；多条 system 以
+    空白行拼接（与 qwenwork._split_messages 一致）。不含任何前缀/标记。
+
+    硬约束：当 payload 无 system 且仅有一条 user 消息时，返回文本须与该 user
+    文本逐字节相同（无前缀/后缀/标记，且**不做 strip**）——既保持历史行为，
+    也锁定既有测试。
+
+    返回 (prompt, has_user)：has_user 为 False 时调用方应回 400（无 user 轮）。
+    has_user 语义与改造前 _last_user_text 一致：只看是否存在**非空 user 消息**，
+    只有 assistant/tool 轮的请求同样回 400。
+    """
+    system_parts: list[str] = []
+    turns: list[str] = []
+    # 单条 user 轮的原样文本（不 strip），用于满足"逐字节一致"的硬约束。
+    sole_user_raw: str | None = None
+    user_count = 0
+    for item in payload.get("messages") or []:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        raw = _parts_to_text(item.get("content"))
+        text = raw.strip()
+        if role == "user" and text:
+            user_count += 1
+            sole_user_raw = raw
+        if not text:
+            continue
+        if role == "system":
+            system_parts.append(text)
+            continue
+        # user / assistant 都作为对话历史压平；其余角色（如 tool）按文本并入。
+        turns.append(text)
+
+    # 单一 user 且无 system：原样返回未 strip 的原文，保证逐字节一致。
+    if not system_parts and user_count == 1 and len(turns) == 1:
+        return (sole_user_raw if sole_user_raw is not None else turns[0]), True
+    return "\n\n".join([*system_parts, *turns]), user_count > 0
 
 
 def _finish_answer(tool_call_info, bucket: list[str]) -> None:
@@ -262,9 +314,21 @@ def extract_assistant_text(items: list) -> str:
     return _join(answer) or _join(thinking)
 
 
-def _openai_json(model: str, text: str, finish: str = "stop", usage: dict | None = None) -> dict:
+def _openai_json(
+    model: str,
+    text: str,
+    finish: str = "stop",
+    usage: dict | None = None,
+    reasoning: str = "",
+) -> dict:
     # 上游 token_usage 事件拿到真值则回填，否则保持 0（向后兼容）。
     usage = usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    message: dict = {"role": "assistant", "content": text}
+    # R3：思考文本走独立的 reasoning_content 字段（与 qwenwork/qodercn/traesolo
+    # 一致），不混入 content。当正文来自思考兜底时，answer 与 reasoning 是同一段，
+    # 此时不重复填 reasoning_content，避免同一字符串既当答案又当思考。
+    if reasoning and reasoning != text:
+        message["reasoning_content"] = reasoning
     return {
         "id": f"traework-{uuid.uuid4().hex[:12]}",
         "object": "chat.completion",
@@ -273,7 +337,7 @@ def _openai_json(model: str, text: str, finish: str = "stop", usage: dict | None
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": text},
+                "message": message,
                 "finish_reason": finish,
             }
         ],
@@ -319,11 +383,12 @@ async def _turn(
     model: str,
     timeout: float = 90.0,
     on_thinking=None,
-) -> str:
-    """跑完一个上游 agent 回合，返回最终回答文本。
+) -> tuple:
+    """跑完一个上游 agent 回合，返回 (text, usage, finish_reason, reasoning)。
 
     on_thinking: 可选 async 回调，上游事件流里的思考文本（plan_item 的
-    thought/reasoning_content）到达时逐片段调用，供流式请求提前转发。
+    thought/reasoning_content）到达时逐片段调用，供流式请求提前转发。返回值
+    reasoning 同样累计这些思考文本（R3），供非流式回填 message.reasoning_content。
     """
     headers = auth_headers(account)
     session_url = f"{channel_host(CHANNEL_ID, 'agent_host', AGENT_API)}{SESSIONS_PATH}"
@@ -332,6 +397,9 @@ async def _turn(
     client = get_client()
     task: asyncio.Task | None = None
     closed = False
+    # 累计思考文本（R3）：流式经 on_thinking 提前转发，非流式在 _turn 内自行累计，
+    # 最终回填到非流式 message.reasoning_content。与流式用同一去重逻辑避免重复。
+    thinking_accum: list[str] = []
 
     async def _close_session() -> None:
         if sid:
@@ -425,10 +493,11 @@ async def _turn(
                         answer_text, thinking_frags = _split_event(event_name, event_payload)
                         if answer_text:
                             pieces.append(answer_text)
-                        if on_thinking is not None:
-                            for frag in thinking_frags:
-                                if frag and frag not in seen_thinking:
-                                    seen_thinking.add(frag)
+                        for frag in thinking_frags:
+                            if frag and frag not in seen_thinking:
+                                seen_thinking.add(frag)
+                                thinking_accum.append(frag)
+                                if on_thinking is not None:
                                     await on_thinking(frag)
             except httpx.HTTPError:
                 finished.set()
@@ -484,7 +553,8 @@ async def _turn(
             _spawn_bg_close(_close_client())
             # 透传真实用量与终止原因：usage 仅在拿到 token_usage 真值时非空，
             # finish_reason 仅在 done.status 命中映射时非空（缺省回退 "stop"）。
-            return text, usage, finish_reason
+            # reasoning 为累计思考文本（R3），空串表示无思考。
+            return text, usage, finish_reason, "\n".join(dict.fromkeys(thinking_accum)).strip()
         except BaseException:
             # 失败路径：同步清理，会话删除尽量做到，再抛出。
             task.cancel()
@@ -526,10 +596,11 @@ async def _adopt_and_retry(
         result = await _turn(fresh, prompt, model, timeout=timeout, on_thinking=on_thinking)
     except Exception:  # noqa: BLE001 - 重试失败同样收敛为 None（调用方按 503 降级）
         return None
-    # 保留 _turn 的完整三元组，让调用方能一并落库 usage/finish_reason；兼容只返回文本的替身。
+    # 保留 _turn 的完整四元组 (text, usage, finish_reason, reasoning)；兼容旧替身
+    # 只返回 (text, usage, finish_reason) 或纯文本的情形。
     if isinstance(result, tuple):
         return result
-    return result, None, None
+    return result, None, None, ""
 
 
 async def _run_turn(
@@ -565,11 +636,13 @@ async def _run_turn(
         t0 = time.time()
         try:
             turn_result = await _turn(account, prompt, model, timeout=timeout, on_thinking=on_thinking)
-            # _turn 返回 (text, usage, finish_reason)；用法兼容旧返回纯文本的场景。
+            # _turn 返回 (text, usage, finish_reason, reasoning)；兼容旧替身只返回
+            # (text, usage, finish_reason) 或纯文本的情形。
             if isinstance(turn_result, tuple):
-                text, turn_usage, turn_finish = turn_result
+                text, turn_usage, turn_finish, *rest = turn_result
+                turn_reasoning = rest[0] if rest else ""
             else:
-                text, turn_usage, turn_finish = turn_result, None, None
+                text, turn_usage, turn_finish, turn_reasoning = turn_result, None, None, ""
             finish = turn_finish or "stop"
             auth_manager.mark_account_success(account["id"])
             if first_token_cell is not None and "ms" not in first_token_cell:
@@ -581,8 +654,9 @@ async def _run_turn(
                 first_token_ms=(first_token_cell or {}).get("ms"),
                 usage=turn_usage,
             )
-            # 返回 (text, usage, finish_reason)；非流式 _openai_json 与流式末帧共用。
-            return "ok", text, turn_usage, finish
+            # 返回 (text, usage, finish_reason, reasoning)；非流式 _openai_json 与流式末帧共用。
+            # reasoning 经 *_stream_chat 收集（流式）或 _openai_json 回填（非流式）。
+            return "ok", text, turn_usage, finish, turn_reasoning
         except TraeWorkAuthError as exc:
             auth_manager.mark_account_failure(account["id"], 503)
             last_error = ("error", (503, {"error": {"message": str(exc)[:240], "type": "server_error"}}))
@@ -597,12 +671,15 @@ async def _run_turn(
                     adopted_once.add(account_id)
                     fresh = db.get_account(account_id) or account
                     auth_manager.mark_account_success(account_id)
-                    # 自救重试同样产出 (text, usage, finish_reason)；兼容只返回文本的替身。
+                    # 自救重试同样产出 (text, usage, finish_reason[, reasoning])；
+                    # 兼容旧替身只返回 (text, usage, finish_reason) 或纯文本的情形。
                     retry_usage: dict | None = None
                     retry_finish = "stop"
+                    retry_reasoning = ""
                     if isinstance(retried, tuple):
-                        retried, retry_usage, retry_finish = retried
+                        retried, retry_usage, retry_finish, *rest = retried
                         retry_finish = retry_finish or "stop"
+                        retry_reasoning = rest[0] if rest else ""
                     if first_token_cell is not None and "ms" not in first_token_cell:
                         first_token_cell["ms"] = int(
                             (time.monotonic() - first_token_cell.get("t0", time.monotonic())) * 1000
@@ -612,7 +689,7 @@ async def _run_turn(
                         first_token_ms=(first_token_cell or {}).get("ms"),
                         usage=retry_usage,
                     )
-                    return "ok", retried, retry_usage, retry_finish
+                    return "ok", retried, retry_usage, retry_finish, retry_reasoning
             continue
         except httpx.HTTPError as exc:
             auth_manager.mark_account_failure(account["id"], 503)
@@ -637,8 +714,9 @@ async def _run_turn(
 
 async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
     model = translate_model(str(payload.get("model") or "auto"))
-    prompt = _last_user_text(payload)
-    if not prompt:
+    # R1：把 system + 全部历史压平进单条 query（上游是会话 + 单 query 模型）。
+    prompt, has_user = _build_prompt(payload)
+    if not has_user:
         return (
             "error",
             (400, {"error": {"message": "messages must include a user turn", "type": "invalid_request_error"}}),
@@ -651,10 +729,13 @@ async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
         return ("stream", _stream_chat(prompt, model, client_model, api_key_info))
     status, *rest = await _run_turn(prompt, model, client_model, api_key_info, stream=False)
     if status == "ok":
+        # _run_turn 现返回 ("ok", text, usage, finish_reason, reasoning)；
+        # 兼容旧替身只回四元组或更短的情形。
         text = rest[0]
         usage = rest[1] if len(rest) > 1 else None
         finish = rest[2] if len(rest) > 2 else None
-        return ("json", _openai_json(client_model, text, finish or "stop", usage))
+        reasoning = rest[3] if len(rest) > 3 else ""
+        return ("json", _openai_json(client_model, text, finish or "stop", usage, reasoning))
     status_code, detail = rest[0]
     return ("error", (status_code, detail))
 
@@ -732,7 +813,6 @@ async def _stream_chat(
     turn_task = asyncio.create_task(
         _run_turn(prompt, model, client_model, api_key_info, stream=True, on_thinking=on_thinking)
     )
-    emitted: list[str] = []  # 完整片段（供最终答案去重判断）
     last_full = ""
     try:
         while True:
@@ -752,11 +832,12 @@ async def _stream_chat(
                 while not queue.empty():
                     frags.append(queue.get_nowait())
                 for frag in frags:
-                    emitted.append(frag)
                     piece = _new_piece(last_full, frag)
                     last_full = frag
                     if piece:
-                        yield sse({"content": piece})
+                        # R3：思考片段走独立的 reasoning_content 字段，不塞进 content
+                        # （与 qwenwork/qodercn/traesolo 一致）；最终答案另走 content。
+                        yield sse({"reasoning_content": piece})
             else:
                 get_task.cancel()
     finally:
@@ -773,17 +854,21 @@ async def _stream_chat(
             "error",
             (500, {"error": {"message": f"internal error: {exc}"[:240], "type": "server_error"}}),
         )
-    # 容忍测试替身（仅返回 ("ok", text) 两元组），真实 _run_turn 返回四元组。
+    # 容忍测试替身（仅返回 ("ok", text) 两元组），真实 _run_turn 返回五元组。
     status = res[0]
     if status == "ok":
         text = res[1]
         usage = res[2] if len(res) > 2 else None
         finish = res[3] if len(res) > 3 else None
         finish = finish or "stop"
-        # 最终回答若已包含在转发过的思考文本里就不重复发，避免正文出现两遍。
-        if text and text not in "".join(emitted):
+        # 最终回答始终以 content 下发。R3 之后思考走 reasoning_content 这一独立字段，
+        # 与 content 不再共用通道，故**不能**再拿思考文本去抑制回答：早期
+        # "text in 已转发内容则跳过"的守卫是为旧行为（思考混在 content 里）防重复用的，
+        # 沿用会导致不渲染 reasoning_content 的客户端**完全收不到回答**。
+        # 与 qodercn/traesolo 一致：content 与 reasoning_content 各自独立转发，不跨通道去重。
+        if text:
             mark_first_token()
-            yield sse({"content": ("\n" if emitted else "") + text})
+            yield sse({"content": text})
         # 末帧带 usage（上游 token_usage 真实值，无则省略）与 finish_reason。
         yield sse({}, finish, usage=usage)
         yield "data: [DONE]\n\n"
