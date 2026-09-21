@@ -24,7 +24,8 @@ def admin_env(monkeypatch):
 
 
 def _add_log(provider: str, model: str, created_at: int, *, prompt: int = 100,
-             completion: int = 50, credit: float = 0.1, duration_ms: int = 1000,
+             completion: int = 50, cache_read: int = 0, credit: float = 0.1,
+             duration_ms: int = 1000,
              first_token_ms: int | None = None,
              account_id: int | None = None, account_name: str | None = None):
     db.record_request({
@@ -38,6 +39,7 @@ def _add_log(provider: str, model: str, created_at: int, *, prompt: int = 100,
         "prompt_tokens": prompt,
         "completion_tokens": completion,
         "total_tokens": prompt + completion,
+        "cache_read_tokens": cache_read,
         "credit": credit,
         "finish_reason": "stop",
         "duration_ms": duration_ms,
@@ -256,6 +258,101 @@ def test_usage_account_level_tps_and_ratio_same_scope(isolated_db):
     # cache_hit_ratio 池化: 账号层与平台层同方法（平台层 = 两账号合并口径）
     assert a["summary"]["cache_hit_ratio"] is not None
     assert b["summary"]["cache_hit_ratio"] is not None
+
+
+# ---------- 合并口径：未勾选「按账号分组」时同通道同模型同日只有一行 ----------
+
+def test_usage_platform_daily_merges_across_accounts(isolated_db):
+    """多账号通道：平台级 daily 必须跨账号合并成每日一行，派生值按合并后的量重算。
+
+    回归点：SQL 按 (provider, model, date, account) 出行，早期实现把每行直接
+    append 进平台级 daily，导致未勾选分组时同一天出现 N 个账号 = N 行，
+    且这些行的平均耗时 / tps / 命中率互不可比。
+    """
+    today = date.today()
+    # 账号 A：150 tok / (3000-1000)ms；账号 B：100 tok / (2000-1500)ms
+    _add_log("qclaw", "m1", _ts(today), account_id=1, account_name="A",
+             prompt=100, completion=150, cache_read=40, credit=0.5,
+             duration_ms=3000, first_token_ms=1000)
+    _add_log("qclaw", "m1", _ts(today), account_id=2, account_name="B",
+             prompt=200, completion=100, cache_read=60, credit=0.25,
+             duration_ms=2000, first_token_ms=1500)
+
+    daily = db.get_provider_model_usage({})["providers"]["qclaw"]["models"]["m1"]["daily"]
+    assert [d["date"] for d in daily] == [today.isoformat()], "同通道同模型同一天应合并为一行"
+
+    row = daily[0]
+    assert row["requests"] == 2
+    assert row["prompt_tokens"] == 300
+    assert row["completion_tokens"] == 250
+    assert row["total_tokens"] == 550
+    assert row["cache_read_tokens"] == 100
+    assert row["credit"] == 0.75
+    # 加权平均 (3000+2000)/2，而不是两行各报 3000 / 2000
+    assert row["avg_duration_ms"] == 2500
+    # 池化 (150+100) tok / (2000+500) ms = 100.0，而不是逐行 75.0 / 200.0
+    assert row["tps"] == 100.0
+    # 池化命中率 100/300，而不是 40/100 / 60/200
+    assert row["cache_hit_ratio"] == 33.33
+    # 行字段集与合并前保持一致（不新增裸 duration_ms）
+    assert "duration_ms" not in row
+
+
+def test_usage_daily_sums_equal_summary(isolated_db):
+    """合并后的 daily 逐列相加必须等于模型小计 / 平台汇总（跨天 + 跨账号都不丢量）。"""
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+    for day in (today, yesterday):
+        _add_log("qclaw", "m1", _ts(day), account_id=1, account_name="A",
+                 prompt=10, completion=5, credit=0.5)
+        _add_log("qclaw", "m1", _ts(day), account_id=2, account_name="B",
+                 prompt=20, completion=10, credit=0.25)
+        _add_log("qclaw", "m2", _ts(day), account_id=2, account_name="B",
+                 prompt=30, completion=15, credit=0.125)
+
+    qclaw = db.get_provider_model_usage({})["providers"]["qclaw"]
+    fields = ["requests", "prompt_tokens", "completion_tokens", "total_tokens", "credit"]
+
+    for model, bucket in qclaw["models"].items():
+        assert len(bucket["daily"]) == 2  # 两天各一行，不因 2 个账号翻倍
+        for field in fields:
+            assert sum(d[field] for d in bucket["daily"]) == pytest.approx(
+                bucket["summary"][field]), f"model {model} field {field}"
+
+    for field in fields:
+        summed = sum(sum(d[field] for d in b["daily"]) for b in qclaw["models"].values())
+        assert summed == pytest.approx(qclaw["summary"][field]), f"provider field {field}"
+
+
+def test_usage_account_daily_merges_renamed_account(isolated_db):
+    """同一 account_id 在窗口内改过名（account_name 多值）：账号层 daily 也要合并。"""
+    today = date.today()
+    _add_log("qclaw", "m1", _ts(today), account_id=1, account_name="A-old",
+             prompt=100, completion=50, duration_ms=1000)
+    _add_log("qclaw", "m1", _ts(today), account_id=1, account_name="A-new",
+             prompt=100, completion=50, duration_ms=2000)
+    _add_log("qclaw", "m1", _ts(today), account_id=2, account_name="B",
+             prompt=100, completion=50, duration_ms=3000)
+
+    qclaw = db.get_provider_model_usage({})["providers"]["qclaw"]
+    assert len(qclaw["models"]["m1"]["daily"]) == 1
+    assert qclaw["models"]["m1"]["daily"][0]["avg_duration_ms"] == 2000
+
+    accounts = {a["id"]: a for a in qclaw["accounts"]}
+    acct_daily = accounts[1]["models"]["m1"]["daily"]
+    assert [d["date"] for d in acct_daily] == [today.isoformat()]
+    assert acct_daily[0]["requests"] == 2
+    assert acct_daily[0]["prompt_tokens"] == 200
+    assert acct_daily[0]["avg_duration_ms"] == 1500
+
+
+def test_usage_daily_sorted_date_desc(isolated_db):
+    today = date.today()
+    for delta in range(4):
+        _add_log("qclaw", "m1", _ts(today - timedelta(days=delta)),
+                 account_id=1 + (delta % 2), account_name="A")
+    daily = db.get_provider_model_usage({})["providers"]["qclaw"]["models"]["m1"]["daily"]
+    assert [d["date"] for d in daily] == sorted((d["date"] for d in daily), reverse=True)
 
 
 def test_usage_no_internal_temp_keys_leak(isolated_db):
