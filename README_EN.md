@@ -383,6 +383,8 @@ The **Usage** and **Request logs** pages carry a **speed (t/s)** column (API fie
 
 The **Usage** detail table supports **grouping by account**: a checkbox on the far right of the control row (on by default, persisted to the `localStorage` key `cb_gw_usage_acct`). When enabled, only multi-account channels expand an account layer (provider summary / platform-level model subtotal / account subtotal / per-account model subtotal / daily detail, with both levels of subtotals shown); single-account channels keep the original provider summary → model subtotal → daily detail three-tier layout. At every level the group heading sits **above** its own content (summary and subtotals first, their detail rows after). The toggle is purely a front-end display dimension (it does not filter or exclude any account) and issues no request. Account attribution comes from the `account_name` value copy captured at request time, so a deleted account's historical attribution is preserved.
 
+**When the checkbox is cleared, the usage of the same channel and the same model is merged outright**: no account layer is expanded, and both the model subtotal and the daily detail are the totals across all of that channel/model's accounts — one row per calendar day (never "several rows for the same day, one per account, with incomparable per-row average duration / speed / hit rate"). The merged row's `avg_duration_ms` / `tps` / cache hit ratio are recomputed from the merged raw sums, and `Σ daily detail == model subtotal == provider summary`.
+
 ## Multiple accounts and "pinning an account"
 
 When a channel has several accounts, the gateway picks one automatically by

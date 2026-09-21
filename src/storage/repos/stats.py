@@ -12,6 +12,10 @@ from storage.repos.logs import stream_p95_by_provider
 def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
     """Per (provider x model x day) token/credit aggregations from request logs.
 
+    平台层的 `models[*].daily` 是**跨账号合并**后的每日一行（未勾选「按账号分组」
+    时前端读的就是这份）；`accounts[*].models[*].daily` 是账号内的每日一行。
+    两层的 summary 与 daily 都满足 Σ == 上一层。
+
     filters:
       provider  optional, only that channel
       model     optional, only that model
@@ -125,6 +129,15 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
         target["decode_tokens"] += int(row["decode_tokens"] or 0)
         target["decode_ms"] += int(row["decode_ms"] or 0)
 
+    def _daily_rows(accum: dict) -> list:
+        """把 {日期: 原始聚合量} 转成日期降序的日明细行列表。"""
+        out = []
+        for date_str in sorted(accum, reverse=True):
+            f = _finalize(accum[date_str])
+            f.pop("duration_ms", None)  # 日明细不暴露裸时长（沿用原有行字段集）
+            out.append({"date": date_str, **f})
+        return out
+
     def _finalize(s: dict) -> dict:
         requests = max(1, s["requests"])
         # 与 success_rate 同口径：返回百分数（已 ×100），前端 pct() 直接拼 %
@@ -158,41 +171,22 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
         row = dict(r)
         p = row["provider"] or "workbuddy"
         m = row["model"] or ""
+        d = row["date"]
         if p not in providers_out:
             providers_out[p] = {"models": {}, "summary": _new_summary(), "_accounts": {}}
         prov_bucket = providers_out[p]
+        # 平台级模型桶：daily 先以日期为键累积**原始聚合量**（构建期是 dict，收尾转成
+        # 日期降序的行列表）。SQL 按 (provider, model, date, account) 出行，多账号通道
+        # 的同一天会有多行，这里按日期合并 —— 未勾选「按账号分组」时前端直接读这份
+        # daily，同一通道同一模型同一天只有一行；派生值（平均耗时 / tps / 命中率）
+        # 由合并后的累加量重算，不是对各行再取平均。
         if m not in prov_bucket["models"]:
-            prov_bucket["models"][m] = {"daily": [], "summary": _new_summary()}
+            prov_bucket["models"][m] = {"daily": {}, "summary": _new_summary()}
         model_bucket = prov_bucket["models"][m]
-        daily_prompt = int(row["prompt_tokens"] or 0)
-        daily_cache_read = int(row["cache_read_tokens"] or 0)
-        daily_ratio = (
-            (daily_cache_read / daily_prompt * 100) if daily_prompt > 0 else None
-        )
-        d_ms = int(row["decode_ms"] or 0)
-        model_bucket["daily"].append(
-            {
-                "date": row["date"],
-                "requests": int(row["requests"] or 0),
-                "prompt_tokens": daily_prompt,
-                "completion_tokens": int(row["completion_tokens"] or 0),
-                "total_tokens": int(row["total_tokens"] or 0),
-                "cache_read_tokens": daily_cache_read,
-                "cache_creation_tokens": int(row["cache_creation_tokens"] or 0),
-                "credit": round(float(row["credit"] or 0), 4),
-                "avg_duration_ms": (
-                    int(row["duration_ms"] / row["requests"]) if row["requests"] else 0
-                ),
-                "tps": (
-                    round(int(row["decode_tokens"] or 0) * 1000 / d_ms, 1)
-                    if d_ms > 0
-                    else None
-                ),
-                "cache_hit_ratio": (
-                    round(daily_ratio, 2) if daily_ratio is not None else None
-                ),
-            }
-        )
+        model_bucket["daily"].setdefault(d, _new_summary())
+        _add(model_bucket["daily"][d], row)
+        _add(model_bucket["summary"], row)
+
         # 账号维度：同一批行多建一层桶；NULL 归一到「未指定账号」。
         aid = row["account_id"]
         akey = str(aid) if aid is not None else "none"
@@ -211,24 +205,27 @@ def get_provider_model_usage(filters: Optional[dict] = None) -> dict:
             # rows 按日期降序：首个非空名字即最近的账号名
             acct["name"] = raw_name
             acct["_named"] = True
+        # 账号内同理：桶按 account_id 归并，同一账号当天改了名也会有多行，按日期合并。
         if m not in acct["models"]:
-            acct["models"][m] = {"daily": [], "summary": _new_summary()}
+            acct["models"][m] = {"daily": {}, "summary": _new_summary()}
         acct_model = acct["models"][m]
-        acct_model["daily"].append(dict(model_bucket["daily"][-1]))
+        acct_model["daily"].setdefault(d, _new_summary())
+        _add(acct_model["daily"][d], row)
         _add(acct_model["summary"], row)
         _add(acct["summary"], row)
 
-        _add(model_bucket["summary"], row)
         _add(prov_bucket["summary"], row)
         _add(totals, row)
 
     for p, prov_bucket in providers_out.items():
         for model_bucket in prov_bucket["models"].values():
+            model_bucket["daily"] = _daily_rows(model_bucket["daily"])
             model_bucket["summary"] = _finalize(model_bucket["summary"])
         prov_bucket["summary"] = _finalize(prov_bucket["summary"])
         accounts = prov_bucket.pop("_accounts", {})
         for acct in accounts.values():
             for model_bucket in acct["models"].values():
+                model_bucket["daily"] = _daily_rows(model_bucket["daily"])
                 model_bucket["summary"] = _finalize(model_bucket["summary"])
             acct["summary"] = _finalize(acct["summary"])
         account_count = int(account_count_by_provider.get(p) or 0) or len(accounts)
