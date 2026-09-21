@@ -67,6 +67,7 @@ from upstream.compaction import (  # noqa: E402,F401
 from storage import database as db
 from accounts import auth_manager
 from providers import model_limits
+from upstream import rate_limits
 from providers.store_common import (
     credit_source_of,
     enqueue_record_request,
@@ -108,6 +109,110 @@ def _parse_retry_after(value) -> float | None:
     if not (seconds >= 0) or seconds == float("inf"):
         return None
     return seconds
+
+
+# ============================================================
+# WorkBuddy 6004 频率限制（(账号, 模型) 级）
+# ============================================================
+
+def _is_rate_limit_error(status: int, payload) -> bool:
+    """上游 6004 频率限制判定：HTTP 429 + body code==6004。
+
+    payload 为已解析 dict 或原始 bytes（流式路径拿到的是 raw body）。
+    """
+    if status != 429:
+        return False
+    if isinstance(payload, (bytes, bytearray)):
+        try:
+            payload = json.loads(bytes(payload).decode("utf-8", "replace"))
+        except Exception:
+            return False
+    elif isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            return False
+    if not isinstance(payload, dict):
+        return False
+    return payload.get("code") == rate_limits.RATE_LIMIT_CODE
+
+
+def _rate_limit_record(account: dict, model: str, payload) -> float:
+    """登记一次 (账号, 模型) 限流，返回生效的解除 epoch（测试注入点）。"""
+    reset_epoch = rate_limits.parse_reset_epoch(payload)
+    return rate_limits.record(int(account.get("id") or 0), model, reset_epoch)
+
+
+def _limited_tried_ids(model: str) -> set[int]:
+    """该模型当前已被记录限流的账号集（预判跳过：seed 进 tried_ids 即生效，
+    pin/sticky 的“仅可用账号生效”语义天然被覆盖）。"""
+    try:
+        return rate_limits.limited_account_ids(model)
+    except Exception:  # noqa: BLE001 - 观测失败绝不阻断转发
+        return set()
+
+
+def _rate_limit_exhausted_error(model: str, accounts: list[dict], last_detail) -> tuple:
+    """构造“该模型全部可用账号都限流”的项目层返回体（保留 code 6004）。
+
+    last_detail 必须是调用方已用 _is_rate_limit_error 校验过的真实 6004
+    body（含 requestId），只取其 message；非 6004 的失败不冒充限流文案。
+    另补结构化字段：最早恢复时刻、各账号明细、retry_after（秒）。
+    """
+    view = rate_limits.model_view(model)
+    detail = last_detail if isinstance(last_detail, dict) else None
+    message = None
+    if isinstance(detail, dict):
+        message = detail.get("msg")
+        if not isinstance(message, str) or not message:
+            inner = detail.get("error")
+            message = inner.get("message") if isinstance(inner, dict) else None
+    if not isinstance(message, str) or not message:
+        message = "您的使用量已超出频率限制（所有账号该模型均受限）。"
+    limited = list(view.get("limited_accounts", []))
+    earliest = view.get("earliest_reset")
+    body: dict = {
+        "code": rate_limits.RATE_LIMIT_CODE,
+        "msg": message,
+        "error": {
+            "message": message,
+            "type": rate_limits.RATE_LIMIT_TYPE,
+            "code": rate_limits.RATE_LIMIT_CODE,
+            "reset_at": earliest,
+            "reset_at_iso": view.get("earliest_reset_iso"),
+            "limited_accounts": limited,
+            "tried_account_ids": [a.get("id") for a in accounts],
+        },
+    }
+    retry_after = max(1, int(earliest - time.time())) if earliest else None
+    if retry_after:
+        body["error"]["retry_after"] = retry_after
+    return body
+
+
+def _rate_limit_event_body(body: dict) -> bytes:
+    """6004 全限返回的 SSE error 事件体（非 200 透传形态，保留 code 6004）。
+
+    结构化 dict 直接序列化（不走 _err_sse_event 的二次包裹，否则 body 会
+    被塞进 message 字符串、code 退回 429）。
+    """
+    payload = json.dumps({"error": body["error"]}, ensure_ascii=False)
+    return f"data: {payload}\n\ndata: [DONE]\n\n".encode("utf-8")
+
+
+def _rate_limit_error_result(model: str, tried_ids: set[int], last_detail) -> tuple:
+    """非流式“全账号该模型均限流”的项目层出口。
+
+    返回 ("error", (429, body))。last_detail 应是调用方已用
+    _is_rate_limit_error 校验过的真实 6004 body（含 requestId），只取其
+    message；None 或非 dict 用合成文案。retry_after（秒）放在
+    body.error.retry_after，不动 v1 层的 JSONResponse 现状。
+    """
+    accounts_tried = [{"id": aid} for aid in sorted(tried_ids)]
+    body = _rate_limit_exhausted_error(model, accounts_tried, last_detail)
+    return ("error", (429, body))
+
+
 
 # 进程级长寿命上游客户端(keep-alive 复用,降低每次转发的 TCP+TLS 建连成本)。
 # 与 openai_compat._get_client / storage.http_pool 同模式:按"当前事件循环"绑定,
@@ -463,10 +568,29 @@ async def proxy_chat_completions(
     tried_ids: set[int] = set()
     max_retries = 3
     last_error = None
+    # 6004 (账号,模型) 级限流：预判跳过已记录限流的账号（seed 进 tried_ids，
+    # pin/sticky 的“仅可用账号生效”语义天然被覆盖），全限即停直接返回。
+    upstream_model = str(body.get("model") or model_name or "auto")
+    tried_ids |= _limited_tried_ids(upstream_model)
 
     for attempt in range(max_retries):
         account = await auth_manager.pick_account_with_fallback(tried_ids)
         if not account:
+            # 全部候选账号都被排除。若该模型确有生效的限流记录（含入口预判
+            # 即全限），按 q6 裁决只看限流记录 → 项目层 6004 出口；否则维持
+            # 原语义（503 No available accounts）。last_error 仅在携带真实
+            # 6004 时贡献 message。
+            if _limited_tried_ids(upstream_model):
+                last_detail = (
+                    last_error[1][1]
+                    if (
+                        last_error is not None
+                        and last_error[0] == "error"
+                        and _is_rate_limit_error(last_error[1][0], last_error[1][1])
+                    )
+                    else None
+                )
+                return _rate_limit_error_result(upstream_model, tried_ids, last_detail)
             break
 
         tried_ids.add(account["id"])
@@ -532,11 +656,19 @@ async def proxy_chat_completions(
             )
 
         last_error = result
-        auth_manager.mark_account_failure(account["id"], err_status)
+        # 6004：按 (账号, 模型) 记录限流（解析上游申报的解除时刻），不触发
+        # 账号级连坐冷却——同账号其它模型不受影响（上游文案实测语义）。
+        if _is_rate_limit_error(err_status, result[1][1]):
+            _rate_limit_record(account, upstream_model, result[1][1])
+        else:
+            auth_manager.mark_account_failure(account["id"], err_status)
         # 上下文超限(11115)与内容形态超限(11128)换账号也无济于事：
         # 同一 body 发到任何账号都必然超限。精简重试已做过，直接返回 400。
         if _is_oversize_semantics(err_status, result[1][1]):
             will_retry = False
+        elif _is_rate_limit_error(err_status, result[1][1]):
+            # 限流换号零延迟（另一账号可能仍可用）；循环顶部 pick 不到会全限停机。
+            will_retry = attempt < max_retries - 1
         else:
             will_retry = _is_retryable_status(err_status) and attempt < max_retries - 1
         detail = result[1][1]
@@ -552,8 +684,14 @@ async def proxy_chat_completions(
             reasoning_effort=effective_reasoning,
         )
         if not will_retry:
+            # 预算用尽仍是 6004：全部可用账号都已记录限流 → 项目层出口。
+            if _is_rate_limit_error(err_status, result[1][1]) and not (
+                _limited_tried_ids(upstream_model) - tried_ids
+            ):
+                return _rate_limit_error_result(upstream_model, tried_ids, result[1][1])
             return result
-        await _retry_delay(attempt)
+        if not _is_rate_limit_error(err_status, result[1][1]):
+            await _retry_delay(attempt)
 
     return last_error or (
         "error",
@@ -618,11 +756,13 @@ class _RetryLog:
     __slots__ = (
         "account", "prompt_tokens", "completion_tokens", "total_tokens",
         "credit", "status", "message", "started", "attempt", "retry_after",
+        "skip_delay",
     )
 
     def __init__(self, account, status, message, started,
                  attempt=None, retry_after=None,
-                 prompt_tokens=0, completion_tokens=0, total_tokens=0, credit=0):
+                 prompt_tokens=0, completion_tokens=0, total_tokens=0, credit=0,
+                 skip_delay=False):
         self.account = account
         self.status = status
         self.message = message
@@ -633,6 +773,8 @@ class _RetryLog:
         self.completion_tokens = completion_tokens
         self.total_tokens = total_tokens
         self.credit = credit
+        # 6004 换号零延迟：另一账号可能仍可用，退避只会白等。
+        self.skip_delay = skip_delay
 
 
 async def _stream_upstream(
@@ -654,10 +796,36 @@ async def _stream_upstream(
     # refresh/退避）；重试或换号不重置起点。
     request_t0 = time.monotonic()
     first_token_ms: int | None = None
+    # 6004 (账号,模型) 级限流（流式）：与非流式同一套预判跳过 + 全限即停。
+    upstream_model = str(body.get("model") or model_name or "auto")
+    tried_ids |= _limited_tried_ids(upstream_model)
 
     for attempt in range(3):
         account = await auth_manager.pick_account_with_fallback(tried_ids)
         if not account:
+            # 全部候选账号都被排除。该模型确有生效限流记录 → 项目层 6004
+            # 出口（含入口预判即全限）；否则维持原语义（透传 503 收尾）。
+            if _limited_tried_ids(upstream_model):
+                last_detail = (
+                    _safe_err(last_error, 429)
+                    if last_error and _is_rate_limit_error(429, last_error)
+                    else None
+                )
+                _log_request(
+                    api_key_info, last_account, model_name, True,
+                    0, 0, 0, 0, "error", 429,
+                    "all workbuddy accounts rate-limited for this model (6004)",
+                    time.time(),
+                    reasoning_effort=effective_reasoning,
+                )
+                yield _rate_limit_event_body(
+                    _rate_limit_exhausted_error(
+                        upstream_model,
+                        [{"id": aid} for aid in sorted(tried_ids)],
+                        last_detail,
+                    )
+                )
+                return
             break
         channel = account.get("provider") or "workbuddy"
         if pending_retry_log is not None:
@@ -677,7 +845,9 @@ async def _stream_upstream(
                 increment_usage=False,
                 reasoning_effort=effective_reasoning,
             )
-            if pending_retry_log.retry_after is not None:
+            if pending_retry_log.skip_delay:
+                pending_retry_log = None
+            elif pending_retry_log.retry_after is not None:
                 await _retry_delay(
                     pending_retry_log.attempt, retry_after=pending_retry_log.retry_after
                 )
@@ -762,7 +932,13 @@ async def _stream_upstream(
                                 model_name,
                                 dump_path,
                             )
-                        auth_manager.mark_account_failure(account["id"], response.status_code)
+                        # 6004：按 (账号, 模型) 记录限流，不触发账号级连坐冷却；
+                        # 预判记录已随 tried_ids 生效，下一圈 pick 自动跳过该账号。
+                        rate_limited_hit = _is_rate_limit_error(response.status_code, raw_error)
+                        if rate_limited_hit:
+                            _rate_limit_record(account, upstream_model, raw_error)
+                        else:
+                            auth_manager.mark_account_failure(account["id"], response.status_code)
                         # 上下文超限(11115)与内容形态超限(11128)换账号也无济于事：
                         # 同一 body 发到任何账号都必然超限。精简过仍失败或未参与
                         # 精简的客户端，直接把 400 透传给客户端，不再重试。
@@ -775,6 +951,17 @@ async def _stream_upstream(
                             )
                             yield _err_sse_event(raw_error, response.status_code)
                             return
+                        if rate_limited_hit and attempt < 2:
+                            # 限流换号零延迟（另一账号可能仍可用）；不进退避。
+                            pending_retry_log = _RetryLog(
+                                account=account,
+                                status=response.status_code,
+                                message=raw_error.decode("utf-8", "replace")[:500],
+                                started=t0,
+                                attempt=attempt,
+                                skip_delay=True,
+                            )
+                            continue
                         if _is_retryable_status(response.status_code) and attempt < 2:
                             pending_retry_log = _RetryLog(
                                 account=account,
@@ -795,6 +982,19 @@ async def _stream_upstream(
                             raw_error.decode("utf-8", "replace")[:500], t0,
                             reasoning_effort=effective_reasoning,
                         )
+                        # 预算用尽仍是 6004：全部可用账号都已记录限流 → 项目层出口。
+                        if (
+                            rate_limited_hit
+                            and not (_limited_tried_ids(upstream_model) - tried_ids)
+                        ):
+                            yield _rate_limit_event_body(
+                                _rate_limit_exhausted_error(
+                                    upstream_model,
+                                    [{"id": aid} for aid in sorted(tried_ids)],
+                                    _safe_err(raw_error, response.status_code),
+                                )
+                            )
+                            return
                         yield _err_sse_event(raw_error, response.status_code)
                         return
 

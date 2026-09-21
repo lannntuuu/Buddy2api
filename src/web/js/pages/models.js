@@ -1,6 +1,6 @@
 import {api,apiErr,respList} from '../api.js';
 import {I} from '../icons.js';
-const{ref,reactive,computed,onMounted}=Vue;
+const{ref,reactive,computed,onMounted,onUnmounted}=Vue;
 
 export default {props:['token','toast'],setup(p){
   // 统一模型（跨平台翻译层）
@@ -37,7 +37,7 @@ export default {props:['token','toast'],setup(p){
           const v=await api.get('/admin/channels/'+id+'/models',p.token);
           const rateById={};(v.model_details||[]).forEach(d=>{rateById[d.id]=d});
           const al=v.aliases||{};
-          return {...v,kind:kindById[id]||'builtin',modelRows:(v.models||[]).map(mid=>{const d=rateById[mid]||{};return{id:mid,names:aliasNamesFor(al,mid),rate:d.rate,display_name:d.display_name,official:!!d.official,reasoning:(v.reasoning&&v.reasoning[mid])||'',maxInput:(v.model_limits&&v.model_limits[mid]!==undefined)?v.model_limits[mid]:null}}),reasoningDefault:v.reasoning_default||'',reasoningSupported:!!v.reasoning_supported,reasoningCustomized:!!v.reasoning_customized,sessionModeSupported:!!v.session_mode_supported,sessionMode:v.session_mode||'work',sessionModeDefault:v.session_mode_default||'work',sessionModeCustomized:!!v.session_mode_customized,sessionModeChoices:v.session_mode_choices||['work','code'],defaultMaxInput:(v.default_max_input_tokens!==undefined&&v.default_max_input_tokens!==null)?v.default_max_input_tokens:'',modelLimitsCustomized:!!v.model_limits_customized}
+          return {...v,kind:kindById[id]||'builtin',modelRows:(v.models||[]).map(mid=>{const d=rateById[mid]||{};return{id:mid,names:aliasNamesFor(al,mid),rate:d.rate,display_name:d.display_name,official:!!d.official,reasoning:(v.reasoning&&v.reasoning[mid])||'',maxInput:(v.model_limits&&v.model_limits[mid]!==undefined)?v.model_limits[mid]:null,rateLimit:(v.rate_limits&&v.rate_limits[mid])||null}}),reasoningDefault:v.reasoning_default||'',reasoningSupported:!!v.reasoning_supported,reasoningCustomized:!!v.reasoning_customized,sessionModeSupported:!!v.session_mode_supported,sessionMode:v.session_mode||'work',sessionModeDefault:v.session_mode_default||'work',sessionModeCustomized:!!v.session_mode_customized,sessionModeChoices:v.session_mode_choices||['work','code'],defaultMaxInput:(v.default_max_input_tokens!==undefined&&v.default_max_input_tokens!==null)?v.default_max_input_tokens:'',modelLimitsCustomized:!!v.model_limits_customized}
         }catch(e){return{channel:id,kind:kindById[id]||'builtin',error:String(e.message),modelRows:[],aliases:{}}}
       }));
       if(!chs.value.some(c=>c.channel===activeCh.value))activeCh.value=chs.value.length?chs.value[0].channel:'';
@@ -155,7 +155,31 @@ export default {props:['token','toast'],setup(p){
     umBusy.value=false;
   }
 
-  onMounted(loadAll);return{um,umLd,umErr,umBusy,channels,addUM,rmUM,umCell,umSet,umWarn,saveUM,chs,chLoaded,chErr,activeCh,chOf,chBusyOf,addModelRow,rmModelRow,chDefaultText,saveChActive,resetChActive,canRefreshOfficial,refreshOfficialModels,I}
+  // 6004 (账号,模型) 级限流展示：最早恢复时间 + hover 各账号明细（纯内存态，
+  // 重启即清）。fmt 直接来自后端 reset_at_iso，避免前端时区换算错位。
+  // 限流会随时间自动解除且无推送，60s 轮询刷新一次快照即可接受。
+  function rlEarliest(r){
+    const rl=r.rateLimit;if(!rl||!rl.earliest_reset)return '';
+    return rl.earliest_reset_iso||(new Date(rl.earliest_reset*1000)).toLocaleString();
+  }
+  function rlDetail(r){
+    const rl=r.rateLimit;if(!rl||!rl.limited_accounts||!rl.limited_accounts.length)return '';
+    return rl.limited_accounts.map(a=>'#'+a.account_id+(a.account_name?' '+a.account_name:'')+' · '+(a.reset_at_iso||'')).join('\n');
+  }
+  let rlTimer=null;
+  async function refreshRateLimits(){
+    if(document.hidden)return;
+    try{
+      const v=await api.get('/admin/channels/'+activeCh.value+'/models',p.token);
+      const byId={};(v.models||[]).forEach(mid=>{byId[mid]=(v.rate_limits&&v.rate_limits[mid])||null});
+      const c=chOf();if(!c)return;
+      c.modelRows.forEach(r=>{r.rateLimit=byId[r.id]!==undefined?byId[r.id]:null});
+    }catch(e){/* 快照刷新失败不打扰 */}
+  }
+  onMounted(loadAll);
+  onMounted(()=>{rlTimer=setInterval(refreshRateLimits,60000)});
+  onUnmounted(()=>{clearInterval(rlTimer)});
+  return{um,umLd,umErr,umBusy,channels,addUM,rmUM,umCell,umSet,umWarn,saveUM,chs,chLoaded,chErr,activeCh,chOf,chBusyOf,addModelRow,rmModelRow,chDefaultText,saveChActive,resetChActive,canRefreshOfficial,refreshOfficialModels,rlEarliest,rlDetail,I}
 },template:`
 <div>
   <div class="phead"><h1>模型配置</h1><p>统一模型翻译 · 各通道白名单与别名 · 改动即时生效</p></div>
@@ -196,7 +220,7 @@ export default {props:['token','toast'],setup(p){
         <div class="hint" style="margin:0 0 8px">「展示名」就是 <code>GET /v1/models</code> 列出的名字，也是客户端该请求的名字（保存后即时生效）；留空则直接用模型 ID。多个名字用英文逗号分隔。</div>
         <div v-if="chOf().modelRows.length" class="table-scroll" style="margin-bottom:8px">
           <table style="font-size:12px">
-            <thead><tr><th style="text-align:left;padding:4px 8px">模型 ID</th><th style="text-align:left;padding:4px 8px;min-width:90px">展示名</th><th style="text-align:right;padding:4px 8px;min-width:90px">倍率</th><th style="text-align:left;padding:4px 8px;min-width:130px">最大输入上下文</th><th v-if="chOf().reasoningSupported" style="text-align:left;padding:4px 8px;min-width:118px">思考档位</th><th style="width:56px"></th></tr></thead>
+            <thead><tr><th style="text-align:left;padding:4px 8px">模型 ID</th><th style="text-align:left;padding:4px 8px;min-width:90px">展示名</th><th style="text-align:right;padding:4px 8px;min-width:90px">倍率</th><th style="text-align:left;padding:4px 8px;min-width:130px">最大输入上下文</th><th v-if="chOf().reasoningSupported" style="text-align:left;padding:4px 8px;min-width:118px">思考档位</th><th v-if="chOf().channel==='workbuddy'" style="text-align:left;padding:4px 8px;min-width:150px" title="上游 6004 频率限制的解除时间（进程内状态，重启后清空）">限流解除时间</th><th style="width:56px"></th></tr></thead>
             <tbody>
               <tr v-for="(r,i) in chOf().modelRows" :key="i">
                 <td><input class="tcell" v-model="r.id" placeholder="模型 ID"/></td>
@@ -214,6 +238,10 @@ export default {props:['token','toast'],setup(p){
                     <option value="">默认（不注入）</option>
                     <option v-for="lv in ['none','minimal','low','medium','high','max']" :key="lv" :value="lv">{{lv}}</option>
                   </select>
+                </td>
+                <td v-if="chOf().channel==='workbuddy'" style="padding:3px 8px;font-family:var(--mono)">
+                  <span v-if="rlEarliest(r)" class="tag" style="color:var(--warn,#d97706);cursor:default" :title="rlDetail(r)">⏳ {{rlEarliest(r)}}</span>
+                  <span v-else style="color:var(--fg3)">-</span>
                 </td>
                 <td style="padding:3px 8px;text-align:right"><button class="btn s danger" @click="rmModelRow(chOf(),i)">删除</button></td>
               </tr>

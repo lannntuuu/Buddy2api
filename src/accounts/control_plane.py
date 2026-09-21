@@ -456,6 +456,29 @@ def channel_model_view(channel: str) -> dict:
             {"id": mid, "display_name": mid, "rate": None, "context_window": None, "official": False}
             for mid in effective_ids
         ]
+    # 6004 (账号,模型) 级限流观测面：仅 workbuddy 上游有此语义；内存态、
+    # 重启即清。key 为别名解析后的上游模型 id，与限流记录同一套归一逻辑。
+    rate_limit_view: dict[str, dict] = {}
+    if channel == "workbuddy":
+        from upstream import rate_limits as _rate_limits
+
+        account_names = {
+            int(a.get("id") or 0): a.get("name", "")
+            for a in db.list_accounts_summary()
+        }
+        for mid in effective_ids:
+            info = _rate_limits.model_view(mid)
+            if info["limited_accounts"]:
+                info["limited_accounts"] = [
+                    {
+                        **item,
+                        "account_name": account_names.get(
+                            int(item["account_id"]), f"#{item['account_id']}"
+                        ),
+                    }
+                    for item in info["limited_accounts"]
+                ]
+            rate_limit_view[mid] = info
     return {
         "channel": channel,
         "models": effective_ids,
@@ -481,6 +504,8 @@ def channel_model_view(channel: str) -> dict:
         "session_mode_choices": list(model_config.SESSION_MODES),
         # 模型上下文限额（DB settings，不进 JSON）：仅显式配置项 + 通道生效默认
         **model_limits.get_channel_limits(channel),
+        # 6004 (账号,模型) 级限流观测面（workbuddy 专属；其它通道为空 dict）
+        "rate_limits": rate_limit_view,
     }
 
 
