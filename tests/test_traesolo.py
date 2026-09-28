@@ -480,6 +480,57 @@ def test_dynamic_models_refresh(isolated_db):
     assert "brand-new-model" in [m["id"] for m in providers.get_provider(CHANNEL_ID).list_models()]
 
 
+def test_case_insensitive_official_lookup(isolated_db):
+    """官方 config_name 常是全小写(deepseek-v4.1-flash)，白名单里是混合大小写
+    (DeepSeek-V4.1-Flash)；大小写不敏感命中官方值，而非回退静态段/None。
+
+    BUG A 回归：之前 model_rate / fetch_model_rates 用精确 dict.get，大小写不
+    一致时拿不到官方 rate / display_name，与官方直调不一致。
+    """
+    db.delete_setting("traesolo.aliases")
+    db.delete_setting("traesolo.models")
+    with tsc._model_cache.lock:
+        tsc._model_cache.details = [
+            {
+                "id": "deepseek-v4.1-flash",  # 官方全小写
+                "display_name": "DeepSeek V4.1 Flash",
+                "rate": 0.123,
+                "context_window": 256000,
+                "fee_level": None,
+                "official": True,
+            }
+        ]
+        tsc._model_cache.ids = ["deepseek-v4.1-flash"]
+        tsc._model_cache.fetched_at = time.time()
+    # 白名单里有混合大小写形态（STATIC_MODELS 之外，用自定义 models 注入）
+    db.set_setting("traesolo.models", ["DeepSeek-V4.1-Flash"])
+    assert tsc.model_rate("DeepSeek-V4.1-Flash") == 0.123
+    # fetch_model_rates 同样大小写不敏感命中官方段
+    rates = {r["id"]: r for r in providers.get_provider(CHANNEL_ID).fetch_model_rates()}
+    row = rates["DeepSeek-V4.1-Flash"]
+    assert row["official"] is True
+    assert row["rate"] == 0.123
+    assert row["display_name"] == "DeepSeek V4.1 Flash"
+
+
+def test_case_insensitive_official_no_match_falls_back(isolated_db):
+    """真不在官方(如 glm-5.3-flash 不在官方只有 glm-5.3)时回退静态段/None，不误命中。"""
+    db.delete_setting("traesolo.aliases")
+    db.delete_setting("traesolo.models")
+    with tsc._model_cache.lock:
+        tsc._model_cache.details = [
+            {"id": "glm-5.3", "display_name": "GLM-5.3", "rate": 0.40, "context_window": 128000, "fee_level": None, "official": True}
+        ]
+        tsc._model_cache.ids = ["glm-5.3"]
+        tsc._model_cache.fetched_at = time.time()
+    db.set_setting("traesolo.models", ["glm-5.3-flash"])
+    # 白名单里是 glm-5.3-flash，官方只有 glm-5.3，大小写不敏感也不会误命中
+    assert tsc.model_rate("glm-5.3-flash") is None
+    rates = {r["id"]: r for r in providers.get_provider(CHANNEL_ID).fetch_model_rates()}
+    row = rates["glm-5.3-flash"]
+    assert row["official"] is False
+
+
 def test_dynamic_models_negative_cache(isolated_db):
     mock = use_mock()
     mock.models = None  # 上游 500
