@@ -95,6 +95,10 @@ SOLO 的凭据是 JSON（trae2api-web 的 `auths/trae-<uid>.json` 或手动构�
 - `auto` 别名落到 **`glm-5.2`**。
 - 模型名**大小写不敏感**（`deepseek_v4_flash_official` / `DeepSeek-V4-Flash-Official` 都认），
   内部名后缀 `__dev`/`__max` 自动剥离。
+- 官方 `get_detail_param` 的 `config_name` 可能是全小写（如 `deepseek-v4.1-flash`），而白名单/别名里常是
+  混合大小写（如 `DeepSeek-V4.1-Flash`）。**模型命中与官方 rate / display_name 的 lookup 均大小写不敏感**
+  （`model_rate` 与 `fetch_model_rates` 已与 `accepts_model` 对齐），因此「刷新官方模型表」后白名单内
+  官方存在的模型能正确显示官方倍率与展示名；白名单里官方不存在的 id（如 `glm-5.3-flash`）回退静态段。
 - 列表外的名字 400。`/v1/models` 里 SOLO 模型带 `traesolo/` 前缀列出；不带前缀按 Key 绑定通道解析。
 - 通道白名单/别名同样支持 `GET/PUT /admin/channels/traesolo/models`（整体替换，`null` 重置）。
 

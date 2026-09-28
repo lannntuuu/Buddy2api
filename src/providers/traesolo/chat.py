@@ -911,7 +911,15 @@ def model_rate(name: str) -> float | None:
     """
     base = (name or "").strip()
     details = {d["id"]: d for d in dynamic_model_details()}
+    # 与 accepts_model 对齐的大小写不敏感官方 lookup：
+    # 官方 config_name 可能为全小写（如 deepseek-v4.1-flash），而白名单里常是
+    # 混合大小写（如 DeepSeek-V4.1-Flash），需先精确、再 normalize、再大小写不敏感命中。
     d = details.get(base)
+    if d is None:
+        d = details.get(normalize_model_name(base))
+    if d is None:
+        lowered = base.lower()
+        d = next((v for k, v in details.items() if k.lower() == lowered), None)
     if d is not None and d.get("official") and d.get("rate") is not None:
         return float(d["rate"])
     if base in MODEL_RATES:

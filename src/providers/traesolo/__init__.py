@@ -38,12 +38,17 @@ class TraeSoloProvider:
 
         traesolo 有官方 get_detail_param 接口，优先用缓存的官方明细（official=True）；
         缓存未命中（无可用账号/未拉过）时回退到静态 MODEL_RATES（official=False，仍可显示倍率）。
+
+        与 accepts_model 对齐的大小写不敏感官方 lookup：官方 config_name 可能是全小写
+        （如 deepseek-v4.1-flash），白名单里常是混合大小写（如 DeepSeek-V4.1-Flash），
+        因此用 lower() 建索引再以 lower() 查询。
         """
         effective_ids = chat.effective_model_ids()
-        details = {d["id"]: d for d in chat.dynamic_model_details()}
+        # 大小写不敏感映射：官方 id 统一以 lower() 做 key
+        details = {d["id"].lower(): d for d in chat.dynamic_model_details()}
         out: list[dict] = []
         for mid in effective_ids:
-            d = details.get(mid)
+            d = details.get(mid.lower())
             if d is not None and d.get("official"):
                 out.append({
                     "id": mid,
