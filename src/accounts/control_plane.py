@@ -512,8 +512,21 @@ def channel_model_view(channel: str) -> dict:
 async def refresh_channel_models(channel: str) -> dict:
     """强制刷新某通道的官方模型表（仅支持动态拉取的通道，如 traesolo）。
 
-    返回 {"channel", "refreshed": bool, "model_details": [...], "note": str}。
-    非动态通道返回 refreshed=false 并附说明。
+    返回：
+      {
+        "channel": str,
+        "refreshed": bool,
+        "model_details": [...],   # 白名单内模型的明细（旧字段，前端仍依赖，不变）
+        "official_models": [...], # 完整官方可见模型列表（不受白名单限制），供弹窗
+        "note": str,
+      }
+
+    model_details 语义与内容保持不变（仅含白名单内模型）。
+    official_models 为官方完整可见对话模型列表（已全局过滤掉
+    invisible/custom_model/subagent/summary），每项含
+    id / display_name / rate / context_window / official=True，供前端
+    「官方可用模型选择弹窗」使用。非 traesolo 通道 / 无该能力的通道，
+    official_models 回退为与 model_details 相同（保证字段始终存在）。
     """
     channel = str(channel or "").strip()
     if not providers.is_known_channel(channel):
@@ -526,17 +539,27 @@ async def refresh_channel_models(channel: str) -> dict:
     if callable(refresh_fn):
         ok = await refresh_fn(force=True)
         view = channel_model_view(channel)
+        model_details = view.get("model_details", [])
+        # 完整官方可见列表（不受白名单限制）；拿不到就回退到白名单明细
+        official_fn = getattr(provider, "official_model_details", None)
+        if callable(official_fn):
+            official_models = official_fn() or list(model_details)
+        else:
+            official_models = list(model_details)
         return {
             "channel": channel,
             "refreshed": bool(ok),
-            "model_details": view.get("model_details", []),
+            "model_details": model_details,
+            "official_models": official_models,
             "note": "" if ok else "刷新失败（可能无可用账号或上游不可达）",
         }
     view = channel_model_view(channel)
+    model_details = view.get("model_details", [])
     return {
         "channel": channel,
         "refreshed": False,
-        "model_details": view.get("model_details", []),
+        "model_details": model_details,
+        "official_models": list(model_details),
         "note": "该通道无动态模型接口，仅展示静态白名单（上游不提供倍率）",
     }
 

@@ -30,7 +30,7 @@ class TraeSoloProvider:
     checkin_supported = True
 
     def list_models(self) -> list[dict]:
-        # 动态表（若有可用账号且缓存新鲜）优先，否则内置 32 个 config_name。
+        # 动态表（若有可用账号且缓存新鲜）优先，否则内置静态兜底（可见对话模型子集）。
         return [{"id": item} for item in chat.effective_model_ids()]
 
     def fetch_model_rates(self) -> list[dict]:
@@ -70,6 +70,17 @@ class TraeSoloProvider:
     async def refresh_dynamic_models(self, force: bool = False) -> bool:
         """强制重新拉取官方模型表（get_detail_param），成功缓存 1h。"""
         return await chat.refresh_dynamic_models(force=force)
+
+    def official_model_details(self) -> list[dict]:
+        """完整官方可见模型明细（不含白名单过滤），供模型选择弹窗使用。
+
+        返回 chat.official_model_details()——即全局过滤后（剔掉
+        invisible/custom_model/subagent/summary）的官方可见对话模型列表，
+        每项含 id / display_name / rate / context_window / official=True。
+        TTL 外（未拉过或缓存过期）返回空 list。control_plane 通过
+        getattr(provider, "official_model_details", None) 探测调用。
+        """
+        return chat.official_model_details()
 
     def alias_map(self) -> dict[str, str]:
         return channel_aliases(CHANNEL_ID, ALIASES)
