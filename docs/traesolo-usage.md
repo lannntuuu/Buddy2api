@@ -89,8 +89,9 @@ SOLO 的凭据是 JSON（trae2api-web 的 `auths/trae-<uid>.json` 或手动构�
 
 ## 4. Trae SOLO 可用模型
 
-- **动态模型表**：每次请求 best-effort 拉取 TRAE 的 `get_detail_param`（1 小时缓存、失败 5 分钟负缓存），
-  实测当前账号约 **38 个**模型（含 `Doubao-Seed-Evolving`、`glm-5.3`、`kimi-k3`、`qwen3.8-max` 等新模型）。
+- **动态模型表**：每次请求 best-effort 拉取 TRAE 的 `get_detail_param`（1 小时缓存、失败 5 分钟负缓存）。
+  官方原始返回实测 **42 条**，经下面的非对话过滤后入缓存 **15 个可见对话模型**
+  （含 `Doubao-Seed-Evolving`、`step-5-preview`、`glm-5.3`、`deepseek-v4.1-flash`、`kimi-k3`、`qwen3.8-max` 等）。
 - **非对话模型全局过滤**：官方返回的 `config_info_list` 里混有内部项，解析/入缓存阶段即剔除：
   `is_invisible_to_user` 为真、`usage` 为 `custom_model`/`summary`、名字含 `subagent`/`sub_agent` 或等于 `summary`。
   实测 42 条 → **15 个可见对话模型**。被剔除的模型（含 `DeepSeek-V4-Pro`、`DeepSeek-V4-Flash`、`glm-5`、
