@@ -7,6 +7,8 @@ export default {props:['token','toast'],setup(p){
   const um=ref([]),umLd=ref(true),umBusy=ref(false),umErr=ref(''),channels=ref([]);
   // 各平台设置（可切换列表）
   const chs=ref([]),chLoaded=ref(false),chErr=ref(''),chBusy=ref({}),activeCh=ref('');
+  // Trae SOLO 官方可用模型选择弹窗状态
+  const picker=ref({open:false,channel:'',rows:[],busy:false,error:''});
 
   // 契约 4/6:PUT /admin/channels/{ch}/models 响应带生效模型 id 列表(models),
   // 据此本地回写白名单行;缺 models 或形状不符返回 false → 调用方回退整表 loadAll()。
@@ -116,11 +118,65 @@ export default {props:['token','toast'],setup(p){
     setChBusy(c,true);
     try{
       const r=await api.post('/admin/channels/'+c.channel+'/models/refresh',{},p.token,{timeoutMs:60000});
+      // Trae SOLO：直接弹出官方可用模型选择弹窗
+      if(c.channel==='traesolo'){
+        if(r&&r.refreshed&&Array.isArray(r.official_models)&&r.official_models.length){
+          openPicker(c,r.official_models);
+        }else{
+          p.toast('刷新失败：'+(r&&r.note?r.note:'无可用账号或上游不可达'),'err');
+        }
+        return;
+      }
+      // 其余（密钥型 apikey）通道：保持原行为
       if(r&&r.refreshed){p.toast(c.channel+' 官方模型表已刷新')}
       else{p.toast((r&&r.note)||(c.channel+' 刷新未完成'),'info')}
       await loadAll();
     }catch(e){p.toast('刷新失败：'+apiErr(e),'err')}
-    setChBusy(c,false);
+    // 必须用 finally 复位忙碌态：上面 traesolo 分支会 return，若把
+    // setChBusy 放在函数末尾会被跳过，按钮将永久卡在「刷新中」且禁用。
+    finally{setChBusy(c,false)}
+  }
+  function openPicker(c,official){
+    const wl=new Set((c.models||[]).map(x=>String(x).toLowerCase()));
+    picker.value={
+      open:true,
+      channel:c.channel,
+      error:'',
+      busy:false,
+      rows:(official||[]).map(m=>({
+        id:m.id,
+        display_name:m.display_name||'',
+        rate:(m.rate===null||m.rate===undefined)?null:m.rate,
+        context_window:(m.context_window===null||m.context_window===undefined)?null:m.context_window,
+        checked:wl.has(String(m.id).toLowerCase())
+      }))
+    };
+  }
+  function closePicker(){picker.value.open=false}
+  function pickerToggleAll(v){picker.value.rows.forEach(r=>{r.checked=v});}
+  // 收集勾选的 id（保持官方顺序），并清理指向已剔除模型的孤儿别名。
+  // 大小写不敏感判断别名目标是否在 models 中，但写回值保持原样。
+  function pickerSavePayload(c){
+    const models=picker.value.rows.filter(r=>r.checked).map(r=>r.id);
+    const wl=new Set(models.map(x=>String(x).toLowerCase()));
+    const al=c.aliases||{};
+    const aliases={};
+    Object.keys(al).forEach(k=>{const v=al[k];if(wl.has(String(v).toLowerCase()))aliases[k]=v});
+    return {models,aliases};
+  }
+  async function savePicker(){
+    const c=chOf();if(!c||picker.value.busy)return;
+    const {models,aliases}=pickerSavePayload(c);
+    if(!models.length&&!confirm('确认保存空白名单？这会让 '+picker.value.channel+' 的所有模型请求都 400。'))return;
+    picker.value.busy=true;picker.value.error='';
+    try{
+      // 仅提交 models 与清理后的 aliases；不动思考档位/上下文限额
+      await api.put('/admin/channels/'+picker.value.channel+'/models',{models,aliases},p.token);
+      p.toast(picker.value.channel+' 官方模型已保存');
+      closePicker();
+      await loadAll();
+    }catch(e){picker.value.error='保存失败：'+apiErr(e)}
+    picker.value.busy=false;
   }
 
   // 统一模型表操作
@@ -179,7 +235,7 @@ export default {props:['token','toast'],setup(p){
   onMounted(loadAll);
   onMounted(()=>{rlTimer=setInterval(refreshRateLimits,60000)});
   onUnmounted(()=>{clearInterval(rlTimer)});
-  return{um,umLd,umErr,umBusy,channels,addUM,rmUM,umCell,umSet,umWarn,saveUM,chs,chLoaded,chErr,activeCh,chOf,chBusyOf,addModelRow,rmModelRow,chDefaultText,saveChActive,resetChActive,canRefreshOfficial,refreshOfficialModels,rlEarliest,rlDetail,I}
+  return{um,umLd,umErr,umBusy,channels,addUM,rmUM,umCell,umSet,umWarn,saveUM,chs,chLoaded,chErr,activeCh,chOf,chBusyOf,addModelRow,rmModelRow,chDefaultText,saveChActive,resetChActive,canRefreshOfficial,refreshOfficialModels,openPicker,closePicker,pickerToggleAll,savePicker,picker,rlEarliest,rlDetail,I}
 },template:`
 <div>
   <div class="phead"><h1>模型配置</h1><p>统一模型翻译 · 各通道白名单与别名 · 改动即时生效</p></div>
@@ -299,6 +355,50 @@ export default {props:['token','toast'],setup(p){
         <div v-if="chOf().credit_rate_customized" class="tag" style="margin-top:6px">已自定义换算率</div>
       </div>
       <div v-if="chOf().error" style="margin-top:10px;font-size:12px;color:var(--err)">{{chOf().error}}</div>
+    </div>
+  </div>
+  <div class="ov" v-if="picker.open" @click.self="closePicker()">
+    <div class="modal wide" style="width:880px;max-width:94vw;display:flex;flex-direction:column;max-height:88vh">
+      <div class="modal-h">
+        <div>
+          <h3>Trae SOLO 官方可用模型</h3>
+          <div class="hint" style="margin:4px 0 0">勾选要启用的模型 · 保存后写入该通道白名单（思考档位 / 上下文限额不变）</div>
+        </div>
+        <button class="x" @click="closePicker()">&times;</button>
+      </div>
+      <div class="modal-b" style="overflow:auto">
+        <div v-if="picker.error" style="margin-bottom:10px;font-size:12px;color:var(--err)">{{picker.error}}</div>
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <button class="btn s" @click="pickerToggleAll(true)" :disabled="picker.busy">全选</button>
+          <button class="btn s" @click="pickerToggleAll(false)" :disabled="picker.busy">全不选</button>
+          <span class="hint" style="margin:0;align-self:center">已选 {{picker.rows.filter(r=>r.checked).length}} / {{picker.rows.length}}</span>
+        </div>
+        <div class="table-scroll" style="margin:0">
+          <table style="font-size:12px">
+            <thead><tr><th style="text-align:left;padding:4px 8px;width:48px">启用</th><th style="text-align:left;padding:4px 8px;min-width:180px">展示名</th><th style="text-align:left;padding:4px 8px;min-width:200px">模型 ID</th><th style="text-align:right;padding:4px 8px;min-width:80px">倍率</th><th style="text-align:right;padding:4px 8px;min-width:120px">上下文窗口</th></tr></thead>
+            <tbody>
+              <tr v-for="(r,i) in picker.rows" :key="r.id">
+                <td style="padding:3px 8px;text-align:center"><input type="checkbox" v-model="r.checked" :disabled="picker.busy"/></td>
+                <td style="padding:3px 8px">{{r.display_name||r.id}}</td>
+                <td style="padding:3px 8px;font-family:var(--mono)">{{r.id}}</td>
+                <td style="padding:3px 8px;text-align:right;font-family:var(--mono)">
+                  <span v-if="r.rate!==null&&r.rate!==undefined">{{r.rate}}</span>
+                  <span v-else style="color:var(--fg3)">-</span>
+                </td>
+                <td style="padding:3px 8px;text-align:right;font-family:var(--mono)">
+                  <span v-if="r.context_window!==null&&r.context_window!==undefined">{{r.context_window}}</span>
+                  <span v-else style="color:var(--fg3)">-</span>
+                </td>
+              </tr>
+              <tr v-if="!picker.rows.length"><td :colspan="5" class="empty">无可用官方模型</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="modal-f">
+        <button class="btn" @click="closePicker()" :disabled="picker.busy">取消</button>
+        <button class="btn pri" @click="savePicker()" :disabled="picker.busy">{{picker.busy?'保存中…':'保存'}}</button>
+      </div>
     </div>
   </div>
 </div>`};

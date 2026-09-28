@@ -91,16 +91,27 @@ SOLO 的凭据是 JSON（trae2api-web 的 `auths/trae-<uid>.json` 或手动构�
 
 - **动态模型表**：每次请求 best-effort 拉取 TRAE 的 `get_detail_param`（1 小时缓存、失败 5 分钟负缓存），
   实测当前账号约 **38 个**模型（含 `Doubao-Seed-Evolving`、`glm-5.3`、`kimi-k3`、`qwen3.8-max` 等新模型）。
-- **静态回退**：上游拉不到时用内置 32 个 `config_name` 兜底。
+- **非对话模型全局过滤**：官方返回的 `config_info_list` 里混有内部项，解析/入缓存阶段即剔除：
+  `is_invisible_to_user` 为真、`usage` 为 `custom_model`/`summary`、名字含 `subagent`/`sub_agent` 或等于 `summary`。
+  实测 42 条 → **15 个可见对话模型**。被剔除的模型（含 `DeepSeek-V4-Pro`、`DeepSeek-V4-Flash`、`glm-5`、
+  `glm-5-turbo`、`sagitta`、`aquila` 等官方标记不可见的项）**不再进入白名单候选，也不再可请求**。
+- **静态回退**：上游拉不到时用内置 **9 个** `config_name` 兜底（只保留过滤后仍可见的模型，不补齐）。
 - `auto` 别名落到 **`glm-5.2`**。
+- **模型选择弹窗**：管理页「模型配置 → 各平台设置 → traesolo」点「刷新官方模型表」会**实时拉官方并弹出弹窗**，
+  列出官方可见模型（勾选框 + 展示名 + 模型 ID + 官方倍率 + 上下文窗口），当前白名单已选项**预勾选**。
+  保存**只写白名单 `models`** 并清理「目标已被剔除」的孤儿别名，思考档位 / 上下文限额不变。
+  刷新失败（无可用账号 / 上游不可达）时弹窗报错且不修改任何配置。该弹窗**仅 traesolo** 有；
+  密钥型通道的「刷新官方模型表」仍是只刷新不弹窗。
 - 模型名**大小写不敏感**（`deepseek_v4_flash_official` / `DeepSeek-V4-Flash-Official` 都认），
   内部名后缀 `__dev`/`__max` 自动剥离。
 - 官方 `get_detail_param` 的 `config_name` 可能是全小写（如 `deepseek-v4.1-flash`），而白名单/别名里常是
   混合大小写（如 `DeepSeek-V4.1-Flash`）。**模型命中与官方 rate / display_name 的 lookup 均大小写不敏感**
   （`model_rate` 与 `fetch_model_rates` 已与 `accepts_model` 对齐），因此「刷新官方模型表」后白名单内
-  官方存在的模型能正确显示官方倍率与展示名；白名单里官方不存在的 id（如 `glm-5.3-flash`）回退静态段。
+  官方存在的模型能正确显示官方倍率与展示名。
 - 列表外的名字 400。`/v1/models` 里 SOLO 模型带 `traesolo/` 前缀列出；不带前缀按 Key 绑定通道解析。
 - 通道白名单/别名同样支持 `GET/PUT /admin/channels/traesolo/models`（整体替换，`null` 重置）。
+- `POST /admin/channels/traesolo/models/refresh` 的返回新增 `official_models` 字段：完整官方可见模型列表
+  （不受白名单限制），供上述弹窗使用；原 `model_details`（白名单内明细）语义不变。
 
 > 注意：`glm-5.2` 在 WorkBuddy 和 Trae SOLO 两个通道都存在，不带前缀时按 Key 通道解析，
 > 想明确指 SOLO 就用 `traesolo/glm-5.2`。
@@ -188,7 +199,7 @@ model_provider = "b2api_traesolo"
 | `POST /v1/chat/completions` + `glm-5.2`（非流式） | 200，~5.7s，usage 从 SSE `token_usage` 正确回填 |
 | `POST /v1/chat/completions` + `glm-5.2`（流式） | 200，逐 chunk SSE + `usage` + `[DONE]` |
 | tool_calls 请求（`get_weather` 函数） | 200，`function_call`→`function` 互转正确，参数 JSON 合法 |
-| 动态模型拉取（`get_detail_param`） | 200，38 个模型入缓存（静态表 32 个兜底） |
+| 动态模型拉取（`get_detail_param`） | 200，官方 42 条经非对话过滤后 15 个入缓存（静态表 9 个兜底） |
 | `GET /admin/accounts/1/resources`（配额） | 200，credit 单位，余额 4825 |
 | `GET /admin/accounts/1/checkin`（签到） | 200，`already_claimed=true`、credit=200（当日已领） |
 | `POST /admin/accounts/1/test`（测试对话） | 200，返回上游回答 |

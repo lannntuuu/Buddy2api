@@ -173,7 +173,8 @@ def test_traesolo_in_default_registry(isolated_db, monkeypatch):
     assert p is not None
     assert p.display_name == "Trae SOLO"
     assert p.checkin_supported is True
-    assert len(p.list_models()) == 32
+    # 静态兜底表 STATIC_MODELS 现仅保留官方可见对话模型子集（9 个）
+    assert len(p.list_models()) == 9
     assert p.alias_map()["auto"] == "glm-5.2"
 
 

@@ -747,8 +747,31 @@ class _ModelCache:
 _model_cache = _ModelCache()
 
 
+def is_selectable_model(cfg: dict) -> bool:
+    """官方 42 条里剔掉 invisible/custom_model/subagent/summary，只留可见对话模型。
+
+    三个条件任一命中即剔除：
+      1. is_invisible_to_user 为 True / "true"（布尔或字符串）
+      2. usage 为 custom_model / summary
+      3. config_name 含 subagent / sub_agent，或恰好等于 "summary"
+    语义 = not excluded(cfg)；返回 True 表示该模型应进入白名单/弹窗候选。
+    """
+    name = str(cfg.get("config_name") or "")
+    low = name.lower()
+    if cfg.get("is_invisible_to_user") in (True, "true"):
+        return False
+    if cfg.get("usage") in ("custom_model", "summary"):
+        return False
+    if "subagent" in low or "sub_agent" in low or low == "summary":
+        return False
+    return True
+
+
 async def fetch_model_details(account: dict) -> list[dict]:
     """拉 SOLO 模型表（get_detail_param），返回每个模型的明细。
+
+    解析阶段即全局过滤掉非对话模型（invisible / custom_model / subagent / summary），
+    因此缓存 _model_cache.details / .ids 里只有官方可见对话模型。
 
     每个明细含：
       - id: config_name（白名单用的内部名）
@@ -783,6 +806,9 @@ async def fetch_model_details(account: dict) -> list[dict]:
     out: list[dict] = []
     for cfg in data.get("config_info_list") or []:
         if not isinstance(cfg, dict):
+            continue
+        # 全局过滤：非对话模型（invisible/custom_model/subagent/summary）不进入缓存
+        if not is_selectable_model(cfg):
             continue
         name = str(cfg.get("config_name") or "").strip()
         if not name or any(o["id"] == name for o in out):
@@ -852,11 +878,24 @@ def dynamic_model_ids() -> list[str]:
 
 
 def dynamic_model_details() -> list[dict]:
-    """返回缓存的官方模型明细（含 rate 等）。TTL 外返回空。"""
+    """返回缓存的官方模型明细（含 rate 等）。TTL 外返回空。
+
+    已是全局过滤后的可见对话模型（fetch_model_details 解析阶段已剔除
+    invisible/custom_model/subagent/summary）。
+    """
     with _model_cache.lock:
         if _model_cache.details and time.time() - _model_cache.fetched_at < DYNAMIC_MODELS_TTL:
             return list(_model_cache.details)
     return []
+
+
+def official_model_details() -> list[dict]:
+    """暴露完整官方可见模型明细（不受白名单限制），供「官方可用模型选择弹窗」使用。
+
+    返回 dynamic_model_details() 的缓存副本；每项含
+    id / display_name / rate / context_window / official=True。TTL 外返回空。
+    """
+    return dynamic_model_details()
 
 
 _dynamic_task: Optional[asyncio.Task] = None

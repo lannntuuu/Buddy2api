@@ -42,40 +42,19 @@ from providers.trae_shared import (
 )
 
 # --- Models ---
-# 内置静态模型表（32 个 config_name，来自逆向报告；动态拉取失败时回退）。
+# 内置静态模型表（9 个 config_name），是官方可见对话模型（经 is_selectable_model
+# 过滤后）的静态兜底子集；动态拉取失败时回退。只保留过滤后仍可见的模型，
+# 不补齐——与官方解析/缓存阶段的全局过滤保持一致。
 STATIC_MODELS = (
     "Doubao-Seed-2.1-Pro",
-    "seed-code-pro-0430",
     "Doubao-Seed-2.1-Turbo",
-    "Doubao-Seed-2.0-Code",
     "DeepSeek-V4-Flash-Official",
-    "browser_use_subagent",
     "glm-5.2",
-    "glm-5-turbo",
-    "glm-5",
-    "DeepSeek-V4-Pro",
-    "DeepSeek-V4-Flash",
     "kimi-k3",
     "kimi-k2.7-code",
     "kimi-k2.6",
     "minimax-m3",
     "qwen-3.7-plus",
-    "sagitta",
-    "aquila",
-    "custom_model_gemini",
-    "custom_model_placeholder",
-    "custom_model_1M_text",
-    "custom_model_1M",
-    "custom_model_kimi",
-    "custom_model_claude",
-    "custom_model_gpt-5",
-    "custom_model_no-fc",
-    "custom_model_deepseek_chat",
-    "custom_model_deepseek_reasoner",
-    "custom_model_deepseek_v4",
-    "explore_sub_agent_v13",
-    "explore_sub_agent_v2",
-    "summary",
 )
 
 DEFAULT_CONFIG = "glm-5.2"  # 默认模型（实测可用）
