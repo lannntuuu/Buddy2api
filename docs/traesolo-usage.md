@@ -117,6 +117,84 @@ SOLO 的凭据是 JSON（trae2api-web 的 `auths/trae-<uid>.json` 或手动构�
 > 注意：`glm-5.2` 在 WorkBuddy 和 Trae SOLO 两个通道都存在，不带前缀时按 Key 通道解析，
 > 想明确指 SOLO 就用 `traesolo/glm-5.2`。
 
+### 4.1 官方 `get_detail_param` 接口（模型表的唯一来源）
+
+模型表的唯一来源就是这一个官方接口，动态刷新、静态兜底、弹窗候选全部由它派生：
+
+```
+POST {agent_host}/api/ide/v1/get_detail_param
+```
+
+| 项 | 值 |
+|---|---|
+| Host | `AGENT_HOST = https://trae-api-cn.mchost.guru`（可被 `channel_hosts` 白名单覆盖） |
+| Path | `EP_MODELS = /api/ide/v1/get_detail_param`（`src/providers/traesolo/constants.py`） |
+| Headers | `solo_headers(account, stream=False)`（`Cloud-IDE-JWT {access_token}` 等指纹头） |
+| Body | `{"function":"solo_work_lite","config_names":null,"need_prompt":false,"current_config_info":null,"poly_prompt":true,"mode_type":null,"agent_type":null}` |
+
+- 调用方：`fetch_model_details()`（`src/providers/traesolo/chat.py`）；成功缓存 1h、失败负缓存 5min。
+- 可导入 Postman 的复刻集合：`traesolo_models_get_detail_param.postman_collection.json`（仓库根目录），
+  用于把「Postman 原始返回」与「网关解析结果」对照，排查模型表是否失真。
+
+**返回 `config_info_list[]` 的关键字段**（实测 42 条）：
+
+| 字段 | 含义 | 对网关的作用 |
+|---|---|---|
+| `config_name` | 官方内部 id | 即白名单/请求用的模型 id |
+| `usage` | `custom_model` / `summary` / 空 | **值为 `custom_model`/`summary` 时被过滤** |
+| `is_invisible_to_user` | 是否对用户隐藏 | 为 `True`/`"true"` 时被过滤 |
+| `display_config.display_name` | 官方展示名 | 弹窗/倍率展示 |
+| `display_config.model_capability` | `chat_model` / `reasoning_model` / 空 | **仅能力标签，不是可用性判据**（见 4.4） |
+| `display_config.fee_model_level` | 计费档位 | 展示 |
+| `context_window_tokens.dev` | 上下文窗口 | 展示 |
+| `display_contact_config` | JSON 串，含 `consumption_rate.data.rate` | 官方 credit 倍率来源 |
+| `custom_models` | `provider//model` 路由列表 | 该 config 背后的第三方路由模板 |
+| `model_detail_list` | `__dev` / `__max` 子配置（含 `model_name`、`max_tokens` 等） | 内部模式切换，不区分可用性 |
+
+### 4.2 42 条实测分类
+
+| 类别 | 数量 | 说明 |
+|---|---|---|
+| **可见对话模型（进白名单候选）** | **15** | `Doubao-Seed-Evolving`、`Doubao-Seed-2.1-Pro`、`Doubao-Seed-2.1-Turbo`、`step-5-preview`、`glm-5.3`、`glm-5.2`、`deepseek-v4.1-flash`、`DeepSeek-V4-Flash-Official`、`DeepSeek-V4-Pro-Official`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`minimax-m3`、`qwen3.8-max`、`qwen-3.7-plus` |
+| 官方标记不可见（`is_invisible_to_user=true`） | 12 | `seed-code-pro-0430`、`Doubao-Seed-2.0-Code`、`glm-5`、`glm-5-turbo`、`DeepSeek-V4-Flash`、`DeepSeek-V4-Pro`、`sagitta`、`aquila`、`file_search_agent`、`explore_sub_agent_v2`、`browser_use_subagent`、`computer_use_subagent` |
+| `custom_model_*`（`usage=custom_model`） | 14 | 全部被 `is_selectable_model()` 过滤，见 4.3 |
+| 其它（`summary` 等） | 1 | `usage=summary`，被过滤 |
+
+**过滤规则**（`is_selectable_model()`，`chat.py`）三条件任一命中即剔除：`is_invisible_to_user` 为真、
+`usage` 为 `custom_model`/`summary`、`config_name` 含 `subagent`/`sub_agent` 或等于 `summary`。
+过滤发生在**解析/入缓存阶段**，被剔除项不进入白名单候选。
+
+### 4.3 `custom_model_*` 实测可达性（直连上游，绕过网关）
+
+用真实账号 token 直接打 `llm_utils_chat`（单字 prompt、非流式、请求间 ≥3s）实测 14 个 `custom_model_*`：
+
+| 模型 | 占位名直发 | 路由名直发 | 结论 |
+|---|---|---|---|
+| `custom_model_gpt-5` | ✅ 200 | — | **上游可达**（后端实为 `gpt-5-2025-08-07`） |
+| `custom_model_gpt-6` | ✅ 200 | — | **上游可达**（`extra_info.model` / `provider_model_name` 同样是 `gpt-5-2025-08-07`） |
+| 其余 12 个（gemini/claude/kimi/deepseek_*/1M/1M_text/doubao_*/no-fc/placeholder） | ❌ `event:error code=4023` | ❌ `code=4001 param invalid` | **不可达** |
+
+关键结论：
+
+- **`custom_model_gpt-5`/`gpt-6` 上游确实能跑**，但它们的 `usage` 是 `custom_model`，
+  会被 `is_selectable_model()` 过滤 —— 因此**不会进入网关白名单，网关侧选不到**
+  （直接发 `model=custom_model_gpt-5` 会被 bind 层判为 `400 unknown_model`）。
+  想启用必须显式写进 `traesolo.models` 白名单。
+- 其余 12 个无论用占位名还是其 `custom_models` 里的 `provider//model` 路由名都调不通，
+  说明这些 `custom_models` 只是**未激活的路由模板**，并非当前账号已开通的通道。
+
+### 4.4 不可达项的共性（含一条被证伪的推断）
+
+- ❌ **不是** `model_capability`：可达的 gpt-5/6 是 `chat_model`，但**15 个可见常规模型全是
+  `reasoning_model`**（且它们经网关可正常调用），所以 `chat_model`/`reasoning_model` 只是能力标签，
+  不能当可用性判据。
+- ❌ **不是** `is_invisible_to_user`：失败组该项均为 `false`（即"对用户可见"）。
+- ❌ **不是** `__dev`/`__max` 子配置：成功与失败组都有。
+- ✅ **真正区别在 `custom_models` 路由是否已被上游激活**：常规模型（如 `glm-5.2`、
+  `DeepSeek-V4-Flash-Official`）是官方已开通的独立 config，直接可用；失败的那些 custom 路由挂在
+  第三方供应商（`gemini//`、`anthropic//`、`Kimi-CN//`、`volcengine-plan//` 等）上但未激活。
+  `custom_model_gpt-5/6` 是特例 —— 它们挂在 openai 官方直连路由（`openai//gpt-5` 等）上且已激活。
+
 ## 5. 客户端接入
 
 ### 5.1 通用 OpenAI 兼容客户端
@@ -207,6 +285,24 @@ model_provider = "b2api_traesolo"
 
 单元测试：`tests/test_traesolo.py`（50 个用例，全部 mock HTTP），全量 272 用例通过。
 
+### 9.1 验证记录（模型表实测，真实 prod 账号直连上游）
+
+用 prod 实例 DB 里的真实 traesolo 账号 token，绕过网关直接调官方接口（详见 4.1/4.3）：
+
+| 项目 | 结果 |
+|---|---|
+| `get_detail_param`（模型表） | 200，`config_info_list` 共 **42 条** |
+| `custom_model_gpt-5` 对话 | 200，`extra_info.model` / `timing_cost.provider_model_name` = `gpt-5-2025-08-07` |
+| `custom_model_gpt-6` 对话 | 200，后端同样为 `gpt-5-2025-08-07`（未真正切到 gpt-6） |
+| 其余 12 个 `custom_model_*` | 占位名 → `code=4023`；路由名 → `code=4001 param invalid`，均不可达 |
+
+探针脚本与存档：`.tmp/call_get_detail_param.py`、`.tmp/probe_custom_models2.py`、
+`.tmp/probe_routes.py`、`.tmp/get_detail_param_full.json`、`.tmp/custom_models_reachability2.json`、
+`.tmp/route_probe.json`（均为临时产物，可复现）。
+
+> 风控注意：验证一律单字 prompt（`hi`）、非流式、请求间 ≥3s、无并发无重试。
+> 这类直连上游的探测**会真实消耗账号积分**，勿对高端模型（gpt-5/6）做批量或长输出试探。
+
 ## 10. 环境变量 / 启动参数
 
 | 变量 | 说明 |
@@ -221,3 +317,18 @@ model_provider = "b2api_traesolo"
 
 - `docs/credit-and-token-tracking.md`：token 与 credit 统计的来龙去脉（为什么 SOLO / TraeWork 默认
   没有 credit、`credit_rate` 换算率怎么用、估算值和真实值的差距在哪）。
+- `traesolo_models_get_detail_param.postman_collection.json`（仓库根目录）：官方 `get_detail_param`
+  的可导入 Postman 复刻集合，用于对照官方原始返回与网关解析结果（见 4.1）。
+- `docs/traework-usage.md`：TraeWork 通道说明（与 SOLO 相互独立，勿混用账号/Key）。
+
+### 本文章节索引
+
+| 想了解 | 看 |
+|---|---|
+| 官方模型表接口与返回字段 | 4.1 |
+| 官方 42 条怎么分类、哪些被过滤 | 4.2 |
+| `custom_model_*` 到底能不能用（实测） | 4.3 |
+| 可用性的判据是什么（含一条被证伪的推断） | 4.4 |
+| 刷新按钮 / 模型选择弹窗怎么用 | 第 4 节开头 |
+| 模型表实测与对话验证记录 | 9、9.1 |
+| 请求没反应 / 报错排查 | 8 |
