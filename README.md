@@ -588,6 +588,29 @@ powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1
 ./ops/start-docker-wsl.sh
 ```
 
+## v2.3 更新内容
+
+自 v2.2.0 起的累积发布（113 个提交）。**含破坏性变更**，完整说明见
+[docs/releases/v2.3.0.md](docs/releases/v2.3.0.md)。
+
+- **⚠️ Trae SOLO 白名单收窄**：新增非对话模型全局过滤（`is_invisible_to_user` / `custom_model` /
+  `summary` / `subagent`），官方 42 条只剩 **15 个可见对话模型**。官方标记不可见的模型
+  （含 `DeepSeek-V4-Pro`、`DeepSeek-V4-Flash`、`glm-5` 等）**不再可请求**，会返回 `400 unknown_model`；
+  请在「模型配置 → 刷新官方模型表」弹窗重选。静态兜底表同步 32 → 9。
+- **Trae SOLO 模型选择弹窗**：点「刷新官方模型表」实时拉官方并弹窗，列出可见模型
+  （展示名 / ID / 官方倍率 / 上下文窗口），白名单已选项预勾选，支持全选/全不选；
+  保存只写白名单并清理孤儿别名，刷新失败不改任何配置。
+- **新通道 Qoder CN（`qodercn`）**：opt-in，本机登录缓存可导入、查额度、对话。
+  默认通道列表**未变**（仍是 workbuddy / qclaw / qwenwork / traework / traesolo）。
+- **`/v1/models` 现在列出别名（对外名）**：没配别名的 id 仍按原生形式列出，旧配置不失效。
+- **限额存储迁移**：`model_limits.json` → 全局键进 `gateway_settings.json`、通道/模型级进 DB
+  settings，首次读取自动迁移并留痕（不删原文件）。
+- **模型最大输入上下文可配置** + **TraeWork `work`/`code` 会话模式可选**（默认 `work`）。
+- **管理台改版**：主从式「通道管理」+「模型配置」独立页、统一浮窗、拖拽排序、多 Key 并存、
+  WorkBuddy 凭证快照/手动锁定；用量统计新增「按账号分组」与 t/s 速度列。
+- **修复**：Trae SOLO 官方倍率大小写不匹配、WorkBuddy 6004 限流自动换号、TraeWork 自动退出登录、
+  credit 真值优先、11115 上下文超限不再换账号、SQLite locked 重试、单字符连击退化护栏等。
+
 ## v2.2 更新内容
 
 相对 1.4 / 2.0 / 2.1 的主要变化：

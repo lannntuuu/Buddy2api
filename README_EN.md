@@ -553,6 +553,34 @@ powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1
 ./ops/start-docker-wsl.sh
 ```
 
+## What's new in v2.3
+
+Cumulative release since v2.2.0 (113 commits). **Contains breaking changes**; see
+[docs/releases/v2.3.0.md](docs/releases/v2.3.0.md) (Chinese) for the full list.
+
+- **⚠️ Trae SOLO whitelist narrowed**: new global non-chat model filtering (`is_invisible_to_user` /
+  `custom_model` / `summary` / `subagent`) leaves **15 selectable chat models** out of the official 42.
+  Officially-hidden models (including `DeepSeek-V4-Pro`, `DeepSeek-V4-Flash`, `glm-5`) are **no longer
+  requestable** and now return `400 unknown_model`; re-pick them in the "Refresh official model table"
+  dialog. The static fallback list goes 32 → 9 in step.
+- **Trae SOLO model picker**: the "Refresh official model table" button fetches the official list live and
+  opens a dialog (display name / id / official rate / context window) with current whitelist entries
+  pre-checked and select-all / clear-all. Saving writes only the whitelist and prunes orphan aliases;
+  a failed refresh changes nothing.
+- **New Qoder CN channel (`qodercn`)**: opt-in; import the local login cache, read quota, and chat.
+  The default channel list is **unchanged** (workbuddy / qclaw / qwenwork / traework / traesolo).
+- **`/v1/models` now lists aliases (public names)**: ids without an alias are still listed natively, so
+  existing configuration keeps working.
+- **Limits storage migration**: `model_limits.json` → global keys into `gateway_settings.json`, per-channel
+  and per-model limits into DB settings; migrated automatically on first read, with the old file left in place.
+- **Configurable max input context** and **TraeWork `work`/`code` session mode** (defaults to `work`).
+- **Admin console overhaul**: master-detail "Channels" plus a separate "Model config" page, unified dialogs,
+  drag-to-reorder, multiple keys per channel, WorkBuddy credential snapshots and manual pinning; usage stats
+  gain "group by account" and a t/s speed column.
+- **Fixes**: Trae SOLO official rate case-mismatch, WorkBuddy 6004 rate-limit account failover, TraeWork
+  auto-logout, upstream credit truth preferred, 11115 context-overflow no longer rotates accounts, SQLite
+  locked retries, single-character repeat-run guard, and more.
+
 ## What's new in v2.2
 
 Compared to 1.4 / 2.0 / 2.1:
