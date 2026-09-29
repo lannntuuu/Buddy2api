@@ -1,4 +1,7 @@
-"""通用全局配置容器（gateway_settings.json，仓库根，与 config.toml 同级）。
+"""通用全局配置容器（gateway_settings.json）。
+
+路径：``src/gateway_settings.json``（见下方 ``_SETTINGS_PATH`` 注释——**不是**
+仓库根，与 config.toml 不同级；历史行为，勿改）。
 
 职责：存放**不分平台、不分模型**的全局可配置项（首批：max_input_tokens /
 max_output_tokens / enforce）。结构是任意扁平对象——**未知键原样保留**（读不
@@ -22,7 +25,10 @@ from typing import Any
 
 logger = logging.getLogger("buddy2api.gateway_settings")
 
-# 仓库根 gateway_settings.json 路径（与 config.toml 同级）：src/storage → 上溯两级
+# gateway_settings.json 路径：src/storage → 上溯两级 = src/gateway_settings.json。
+# 注意：**不是**仓库根（与 config.toml 不同级），这是历史行为——prod 现有配置
+# 就落在 src/ 下，改路径会让已存配置（如 manual_account_pin）静默丢失。
+# 仓库根若出现同名文件不会被读取（旧版本残留，可删）。
 _SETTINGS_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "gateway_settings.json",

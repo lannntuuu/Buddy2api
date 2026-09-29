@@ -33,7 +33,7 @@ If the paths are wrong you can point them with `CB_AUTH_DIR`, `CB_QCLAW_AUTH_DIR
 Just follow "Install and run" below. These are the easiest things to trip over in 2.0:
 
 1. **An empty Channels page right after startup is normal.** It no longer auto-imports by default. Go to the **Channels** page: pick a channel → Re-detect → Import all. All four local channels are available; **for Trae SOLO click "Start web login"** after selecting it, finish the TRAE login in the new window, and the browser redirects back to the server to complete the import (if the remote side can't reach the callback, paste the full address-bar URL into "Manual complete").
-2. **One API key hits exactly one channel.** You must pick a channel when creating it. A WorkBuddy key sends `auto` / `glm-5.2`; a QwenWork key sends `auto` or `qwork-advanced`; a TraeWork key sends `auto` or `qwen-3.7-plus`; a Trae SOLO key sends `auto` or `glm-5.2`; a GMI key sends any model the upstream lists; a Bailian key sends any model on the `/v1/models` whitelist (SOLO's model list is large and surfaced under the `traesolo/` prefix in `/v1/models`). A channel/model mismatch returns 400 or 403; the gateway won't forward you to another vendor.
+2. **One API key hits exactly one channel.** You must pick a channel when creating it. A WorkBuddy key sends `auto` / `glm-5.2`; a QwenWork key sends `auto` or `qwork-advanced`; a TraeWork key sends `auto` or `qwen-3.7-plus`; a Trae SOLO key sends `auto` or `glm-5.2`; a GMI key sends any model the upstream lists; a Bailian key sends any model on the `/v1/models` whitelist (SOLO's official table narrows to 15 selectable chat models after non-chat filtering and is surfaced under the `traesolo/` prefix in `/v1/models`; what is actually requestable follows that channel's whitelist, which you can pick in the "Refresh official model table" dialog on the Model config page). A channel/model mismatch returns 400 or 403; the gateway won't forward you to another vendor.
 3. **A channel returns 503 `channel_unavailable`:** that channel has no imported, usable account yet.
 4. **Run QClaw / QwenWork with `python -m src.gateway.server` directly on Windows.** A Linux Docker container can't decrypt the DPAPI-encrypted local files those two use; the admin UI says so. WorkBuddy can keep using Docker.
 5. This project and the chat client should run on the same machine. If the client runs inside Docker, set Base URL to `http://host.docker.internal:8787/v1`, not the container's own `127.0.0.1`.
@@ -153,7 +153,7 @@ Differences from 1.4: startup no longer auto-imports accounts; an empty pool ret
 |---|---|
 | Base URL | `http://127.0.0.1:8787/v1` |
 | API Key | Created in the admin UI, bound to a channel |
-| Model | WorkBuddy: `auto` / `glm-5.2`. QClaw: `auto` or `qclaw/default`. QwenWork: `auto` or `qwork-advanced`. TraeWork: `auto` or `qwen-3.7-plus`. Trae SOLO: `auto` / `glm-5.2` / `traesolo/...` (full list in `/v1/models`). GMI / Bailian: `auto` or whatever the upstream lists. |
+| Model | WorkBuddy: `auto` / `glm-5.2`. QClaw: `auto` or `qclaw/default`. QwenWork: `auto` or `qwork-advanced`. TraeWork: `auto` or `qwen-3.7-plus`. Trae SOLO: `auto` / `glm-5.2` / `traesolo/...` (15 official selectable models; full list in `/v1/models`; pick them in the "Refresh official model table" dialog). GMI / Bailian: `auto` or whatever the upstream lists. |
 | Stream | Recommended on |
 
 Interfaces: `/v1/chat/completions`, `/v1/responses`, `/v1/models`. An unprefixed `auto` goes to the channel bound to the key. Codex uses the Responses interface; a key set to type Codex in the admin UI is sanitized per Codex prompt characteristics (if another client borrows the key but lacks Codex characteristics, it isn't rewritten).
@@ -218,6 +218,25 @@ curl -X PUT -H "Authorization: Bearer <admin-token>" -H "Content-Type: applicati
 ```
 
 The admin UI's "Model config" page provides a graphical interface: a wide "Unified models" table (one unified model per row, one platform per column; fill the cell with the internal name, empty = that platform doesn't have it) + a "Per-channel settings" toggle list (each platform's whitelist and aliases).
+
+### Refreshing the official model table / the Trae SOLO model picker
+
+Under "Per-channel settings", Trae SOLO and API-key-type (apikey) channels have a "Refresh official model table" button:
+
+- **API-key channels**: only re-fetch the upstream `/v1/models` to refresh rates — no dialog.
+- **Trae SOLO**: the button **fetches the official `get_detail_param` live and opens an "Official available models" dialog**, listing the official selectable models (checkbox + display name + model ID + official rate + context window). Entries already in the current whitelist are **pre-checked** (case-insensitive match), with select-all / clear-all. Saving writes **only the whitelist `models`** (full replace) and prunes aliases whose target was dropped; reasoning tiers and context limits are left untouched. If the refresh fails (no usable account / upstream unreachable) the dialog reports an error and **changes nothing**.
+
+**Global non-chat model filtering**: the official `config_info_list` mixes in internal entries, which are dropped at parse/cache time:
+
+- `is_invisible_to_user` is truthy (boolean, or the string `"true"`)
+- `usage` is `custom_model` / `summary`
+- `config_name` contains `subagent` / `sub_agent`, or equals `summary`
+
+Measured: 42 official entries → **15 selectable chat models**. The dropped entries (including the officially-hidden `DeepSeek-V4-Pro`, `DeepSeek-V4-Flash`, `glm-5`, `glm-5-turbo`, `sagitta`, `aquila`) **no longer appear as whitelist candidates and are no longer requestable**. Trae SOLO's static fallback list is narrowed to **9** entries in step (only models that survive the filter; deliberately not backfilled).
+
+The `POST /admin/channels/{channel}/models/refresh` response keeps the existing `model_details` (whitelist-scoped details, semantics unchanged) and adds `official_models`: the **full official selectable list, not bounded by the whitelist**, used by the dialog above.
+
+> See [docs/traesolo-usage.md](docs/traesolo-usage.md) section 4 for details (Chinese).
 
 ## Launch parameters
 
@@ -533,6 +552,34 @@ powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1
 # WSL
 ./ops/start-docker-wsl.sh
 ```
+
+## What's new in v2.3
+
+Cumulative release since v2.2.0 (113 commits). **Contains breaking changes**; see
+[docs/releases/v2.3.0.md](docs/releases/v2.3.0.md) (Chinese) for the full list.
+
+- **⚠️ Trae SOLO whitelist narrowed**: new global non-chat model filtering (`is_invisible_to_user` /
+  `custom_model` / `summary` / `subagent`) leaves **15 selectable chat models** out of the official 42.
+  Officially-hidden models (including `DeepSeek-V4-Pro`, `DeepSeek-V4-Flash`, `glm-5`) are **no longer
+  requestable** and now return `400 unknown_model`; re-pick them in the "Refresh official model table"
+  dialog. The static fallback list goes 32 → 9 in step.
+- **Trae SOLO model picker**: the "Refresh official model table" button fetches the official list live and
+  opens a dialog (display name / id / official rate / context window) with current whitelist entries
+  pre-checked and select-all / clear-all. Saving writes only the whitelist and prunes orphan aliases;
+  a failed refresh changes nothing.
+- **New Qoder CN channel (`qodercn`)**: opt-in; import the local login cache, read quota, and chat.
+  The default channel list is **unchanged** (workbuddy / qclaw / qwenwork / traework / traesolo).
+- **`/v1/models` now lists aliases (public names)**: ids without an alias are still listed natively, so
+  existing configuration keeps working.
+- **Limits storage migration**: `model_limits.json` → global keys into `gateway_settings.json`, per-channel
+  and per-model limits into DB settings; migrated automatically on first read, with the old file left in place.
+- **Configurable max input context** and **TraeWork `work`/`code` session mode** (defaults to `work`).
+- **Admin console overhaul**: master-detail "Channels" plus a separate "Model config" page, unified dialogs,
+  drag-to-reorder, multiple keys per channel, WorkBuddy credential snapshots and manual pinning; usage stats
+  gain "group by account" and a t/s speed column.
+- **Fixes**: Trae SOLO official rate case-mismatch, WorkBuddy 6004 rate-limit account failover, TraeWork
+  auto-logout, upstream credit truth preferred, 11115 context-overflow no longer rotates accounts, SQLite
+  locked retries, single-character repeat-run guard, and more.
 
 ## What's new in v2.2
 

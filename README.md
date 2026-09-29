@@ -34,7 +34,7 @@ python -m src.gateway.server
 按下面的《安装与启动》即可。这几条是 2.0 里最容易踩空的：
 
 1. **启动后通道管理页是空的，这是正常的。** 默认不再自动入库。到「通道管理」页：选通道 → 重新检测 → 一键导入。四个本地通道都能选；**Trae SOLO 选完后点「发起网页登录」**，在新窗口完成 TRAE 登录，浏览器会自动跳回服务完成入库（远程够不到回调时，把地址栏完整 URL 粘贴到「手动完成」）。
-2. **一把 API Key 只打一个通道。** 创建时必须选通道。WorkBuddy 的 Key 可 `auto` / `glm-5.2`；QwenWork 的 Key 可 `auto` 或 `qwork-advanced`；TraeWork 的 Key 可 `auto` 或 `qwen-3.7-plus`；Trae SOLO 的 Key 可 `auto` 或 `glm-5.2`（SOLO 模型表较大，`/v1/models` 里以 `traesolo/` 前缀列出）。通道和模型对不上会 400 或 403，不会帮你转到另一家。
+2. **一把 API Key 只打一个通道。** 创建时必须选通道。WorkBuddy 的 Key 可 `auto` / `glm-5.2`；QwenWork 的 Key 可 `auto` 或 `qwork-advanced`；TraeWork 的 Key 可 `auto` 或 `qwen-3.7-plus`；Trae SOLO 的 Key 可 `auto` 或 `glm-5.2`（SOLO 官方模型表经非对话过滤后为 15 个可见模型，`/v1/models` 里以 `traesolo/` 前缀列出；实际可请求范围以该通道白名单为准，可在「模型配置」页点「刷新官方模型表」弹窗勾选）。通道和模型对不上会 400 或 403，不会帮你转到另一家。
 3. **某个通道返回 503 `channel_unavailable`：** 这个通道还没导入可用账号。
 4. **QClaw / QwenWork 请在 Windows 上直接跑 `python -m src.gateway.server`。** Linux Docker 读不了这两家用了 DPAPI 加密的本机文件；管理页会写明这一点。WorkBuddy 可以继续用 Docker。
 5. 本项目和聊天客户端最好在同一台电脑。客户端如果跑在 Docker 里，Base URL 填 `http://host.docker.internal:8787/v1`，不要填容器自己的 `127.0.0.1`。
@@ -179,7 +179,7 @@ python -m src.gateway.server
 |---|---|
 | Base URL | `http://127.0.0.1:8787/v1` |
 | API Key | 管理页创建，已绑定通道 |
-| 模型 | WorkBuddy：`auto` / `glm-5.2`。QClaw：`auto` 或 `qclaw/default`。QwenWork：`auto` 或 `qwork-advanced`。TraeWork：`auto` 或 `qwen-3.7-plus`。Trae SOLO：`auto` / `glm-5.2` / `traesolo/...`（完整列表见 `/v1/models`） |
+| 模型 | WorkBuddy：`auto` / `glm-5.2`。QClaw：`auto` 或 `qclaw/default`。QwenWork：`auto` 或 `qwork-advanced`。TraeWork：`auto` 或 `qwen-3.7-plus`。Trae SOLO：`auto` / `glm-5.2` / `traesolo/...`（官方可见模型 15 个，完整列表见 `/v1/models`；可用「模型配置 → 刷新官方模型表」弹窗勾选） |
 | Stream | 建议开 |
 
 接口：`/v1/chat/completions`、`/v1/responses`、`/v1/models`。没加前缀的 `auto` 走这把 Key 绑定的通道。Codex 用 Responses 接口；管理页选 Codex 类型的 Key 会按 Codex 特征 prompt 做清洗（其它客户端借用这把 Key、但没有 Codex 特征时不改写）。
@@ -255,6 +255,32 @@ curl -X PUT -H "Authorization: Bearer <admin-token>" -H "Content-Type: applicati
 
 网页管理页「模型配置」页提供图形界面：「统一模型」宽表（一行一个统一模型、每列一平台，
 格子填内部名、留空 = 该平台没有）+「各平台设置」可切换列表（每平台的白名单与别名）。
+
+### 刷新官方模型表 / Trae SOLO 模型选择弹窗
+
+「各平台设置」里，Trae SOLO 与密钥型（apikey）通道有「刷新官方模型表」按钮：
+
+- **密钥型通道**：只重新拉取上游 `/v1/models` 刷新倍率，不弹窗。
+- **Trae SOLO**：点按钮会**实时拉官方 `get_detail_param` 并直接弹出「官方可用模型」弹窗**，
+  列出官方可见模型（勾选框 + 展示名 + 模型 ID + 官方倍率 + 上下文窗口），
+  当前白名单已选项**预勾选**（大小写不敏感匹配），支持全选 / 全不选。
+  保存时**只写白名单 `models`**（整体替换）并清理「目标已被剔除」的孤儿别名；
+  思考档位 / 上下文限额**不变**。刷新失败（无可用账号 / 上游不可达）时弹窗报错且**不修改任何配置**。
+
+**非对话模型全局过滤**：官方 `config_info_list` 里混有内部项，在解析 / 入缓存阶段即剔除：
+
+- `is_invisible_to_user` 为真（布尔或字符串 `"true"`）
+- `usage` 为 `custom_model` / `summary`
+- `config_name` 含 `subagent` / `sub_agent`，或等于 `summary`
+
+实测官方 42 条 → **15 个可见对话模型**。被剔除的项（含官方标记不可见的 `DeepSeek-V4-Pro`、
+`DeepSeek-V4-Flash`、`glm-5`、`glm-5-turbo`、`sagitta`、`aquila` 等）**不再进入白名单候选，
+也不再可请求**。Trae SOLO 的静态兜底表同步收敛为 **9 个**（只保留过滤后仍可见的模型，不补齐）。
+
+`POST /admin/channels/{channel}/models/refresh` 的返回除原有 `model_details`（白名单内明细，
+语义不变）外，新增 `official_models`：**完整官方可见模型列表（不受白名单限制）**，供上述弹窗使用。
+
+> 详细说明见 [docs/traesolo-usage.md](docs/traesolo-usage.md) 第 4 节。
 
 ## 启动参数
 
@@ -561,6 +587,29 @@ powershell -ExecutionPolicy Bypass -File .\ops\start-docker-win.ps1
 # WSL
 ./ops/start-docker-wsl.sh
 ```
+
+## v2.3 更新内容
+
+自 v2.2.0 起的累积发布（113 个提交）。**含破坏性变更**，完整说明见
+[docs/releases/v2.3.0.md](docs/releases/v2.3.0.md)。
+
+- **⚠️ Trae SOLO 白名单收窄**：新增非对话模型全局过滤（`is_invisible_to_user` / `custom_model` /
+  `summary` / `subagent`），官方 42 条只剩 **15 个可见对话模型**。官方标记不可见的模型
+  （含 `DeepSeek-V4-Pro`、`DeepSeek-V4-Flash`、`glm-5` 等）**不再可请求**，会返回 `400 unknown_model`；
+  请在「模型配置 → 刷新官方模型表」弹窗重选。静态兜底表同步 32 → 9。
+- **Trae SOLO 模型选择弹窗**：点「刷新官方模型表」实时拉官方并弹窗，列出可见模型
+  （展示名 / ID / 官方倍率 / 上下文窗口），白名单已选项预勾选，支持全选/全不选；
+  保存只写白名单并清理孤儿别名，刷新失败不改任何配置。
+- **新通道 Qoder CN（`qodercn`）**：opt-in，本机登录缓存可导入、查额度、对话。
+  默认通道列表**未变**（仍是 workbuddy / qclaw / qwenwork / traework / traesolo）。
+- **`/v1/models` 现在列出别名（对外名）**：没配别名的 id 仍按原生形式列出，旧配置不失效。
+- **限额存储迁移**：`model_limits.json` → 全局键进 `gateway_settings.json`、通道/模型级进 DB
+  settings，首次读取自动迁移并留痕（不删原文件）。
+- **模型最大输入上下文可配置** + **TraeWork `work`/`code` 会话模式可选**（默认 `work`）。
+- **管理台改版**：主从式「通道管理」+「模型配置」独立页、统一浮窗、拖拽排序、多 Key 并存、
+  WorkBuddy 凭证快照/手动锁定；用量统计新增「按账号分组」与 t/s 速度列。
+- **修复**：Trae SOLO 官方倍率大小写不匹配、WorkBuddy 6004 限流自动换号、TraeWork 自动退出登录、
+  credit 真值优先、11115 上下文超限不再换账号、SQLite locked 重试、单字符连击退化护栏等。
 
 ## v2.2 更新内容
 

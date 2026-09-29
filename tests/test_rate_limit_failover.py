@@ -173,8 +173,12 @@ def test_non_stream_switches_account_on_6004_and_succeeds(isolated_db, monkeypat
     assert rate_limits.is_limited(acc1["id"], "glm-5.2")
 
 
-def test_non_stream_all_limited_returns_project_level_6004(isolated_db, monkeypatch):
+def test_non_stream_all_limited_returns_project_level_6004(isolated_db, monkeypatch, frozen_now):
     """q3/q6/q7：两账号都吃 6004 → 零上游第三次请求，项目层 429 + code 6004。"""
+    # RATE_BODY 是 2026-09-21 的 prod 抓包（golden fixture），解除时刻写死在报文里。
+    # 把注入时钟钉在该时刻之前，否则 record() 会判定"已过期"而回退兜底冷却，
+    # 用例会随真实时间流逝变成时间炸弹（reset_at 断言失效）。
+    frozen_now["now"] = 1_789_971_000.0
     acc1, acc2 = _add_two_accounts()
     calls = _patch_non_stream_fakes(
         monkeypatch, [acc1, acc2],
@@ -365,8 +369,11 @@ def test_stream_switches_account_on_6004_and_succeeds(isolated_db, monkeypatch):
     assert rate_limits.is_limited(acc1["id"], "glm-5.2")
 
 
-def test_stream_all_limited_returns_project_level_6004_event(isolated_db, monkeypatch):
+def test_stream_all_limited_returns_project_level_6004_event(isolated_db, monkeypatch, frozen_now):
     """q3：流式全限 → SSE error 事件保留 code 6004 + 结构化字段。"""
+    # 同 test_non_stream_all_limited_returns_project_level_6004：钉住时钟，
+    # 否则写死在 RATE_BODY 里的解除时刻过期后 reset_at 断言会失效。
+    frozen_now["now"] = 1_789_971_000.0
     acc1, acc2 = _add_two_accounts()
     body_6004 = json.dumps(RATE_BODY, ensure_ascii=False).encode("utf-8")
     _patch_stream_fakes(
