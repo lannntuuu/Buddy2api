@@ -198,11 +198,31 @@ HEADER_AUTHORIZATION = "Authorization"  # spec:344
 HEADER_CONTENT_TYPE = "Content-Type"  # spec:340
 HEADER_ACCEPT = "Accept"  # spec:341
 HEADER_USER_AGENT = "User-Agent"  # spec:345
-HEADER_MAVIS_SESSION_ID = "X-Mavis-Session-Id"  # spec:346 值 = session UUID（每请求生成）
+HEADER_MAVIS_SESSION_ID = "X-Mavis-Session-Id"  # spec:346 值 = mvs_ + 32 位小写 hex（见下）
 HEADER_MAVIS_AGENT_ID = "X-Mavis-Agent-Id"  # spec:347 值 = agent_id 或 "main"
 HEADER_MAVIS_TIMEZONE_OFFSET = "X-Mavis-Timezone-Offset"  # spec:348 值 = 秒，东为正
 HEADER_ANTHROPIC_BETA = "anthropic-beta"  # spec:349 MiniMax 路径**通常不下发**
+# MITM 实测 2026-09-30（dump-003:27）：主请求 `/v1/messages` **必发**该头，值 `true`。
+# 出处：`.tmp/mitm/minimax-code-20260919/dumps/req-20260930-172559-003.json:27`
+# 与 `.tmp/mitm/minimax-code-20260919/MITM-VERIFIED-FINDINGS.md` §1B#3 / §3 G01。
+# 这是 Anthropic SDK 的**浏览器直连开关**（SDK 在检测到浏览器运行时自动注入，
+# 用于让 Anthropic 侧放行 CORS 直连）。实测客户端在 `/v1/messages` 上会发。
+# ⚠️ **没有**配套的 `anthropic-beta` 头：实测 `jsonl:8` 的
+#    `headerPresence["anthropic-beta"] = null`，且 dump-003 全文无该头 ⇒
+#    本头与 anthropic-beta 无关，别因为"看到 dangerouse 字样"就顺手加 beta。
+# 对照：两次 `count_tokens`（dump-001/dump-002）**不发**该头 ⇒ 属推理路径专属。
+HEADER_ANTHROPIC_DANGEROUS_DIRECT_BROWSER_ACCESS = "anthropic-dangerous-direct-browser-access"
+ANTHROPIC_DANGEROUS_DIRECT_BROWSER_ACCESS = "true"  # MITM 实测 2026-09-30 dump-003:27
 BEARER_PREFIX = "Bearer "  # spec:194,211 真实凭证唯一载体
+# MITM 实测 2026-09-30（dump-003:34 / dump-001:31 / dump-002:31）：
+#   `x-mavis-session-id: mvs_312d6855b7a74b4990b9faf170aecd4f`
+#   = 前缀 `mvs_` + **32 位小写 hex**（无连字符）。旧注释"值 = session UUID
+#   （每请求生成）"只对了一半：格式是带前缀的 hex，且三次请求（含两次
+#   count_tokens）**复用同一个 id** ⇒ 语义是**会话级**，不是每请求一个。
+#   本通道按"一次客户端请求一个会话 id"生成（网关无跨请求会话概念，见 chat.py
+#   `new_session_id` 的 docstring）；**格式**严格对齐实测。
+MAVIS_SESSION_ID_PREFIX = "mvs_"  # MITM 实测 2026-09-30 dump-003:34
+MAVIS_SESSION_ID_HEX_LEN = 32  # MITM 实测 2026-09-30 dump-003:34（uuid4().hex 长度）
 
 # 静态头清单：spec:342-345,690 推理请求里「与环境无关、可写死」的那几项。
 # ⚠️ x-api-key 是占位符 **sk-xxx，别删**：Anthropic SDK 由 apiKey 生成它，缺了可能
@@ -213,12 +233,16 @@ REQUEST_STATIC_HEADERS: dict[str, str] = {
     HEADER_X_API_KEY: API_KEY_PLACEHOLDER,  # spec:343,690 占位符，别删（spec:202）
     HEADER_USER_AGENT: USER_AGENT,  # spec:345,690
     HEADER_MAVIS_AGENT_ID: MAVIS_AGENT_ID_DEFAULT,  # spec:347,690
+    # MITM 实测 2026-09-30 dump-003:27：主请求实测有该头，且**无** anthropic-beta
+    # 配套（jsonl:8 headerPresence 为 null）。spec §3.1 清单没列它 ⇒ 只照 spec 发
+    # 必然漏（MITM-VERIFIED-FINDINGS §3 G01），故在此补齐。
+    HEADER_ANTHROPIC_DANGEROUS_DIRECT_BROWSER_ACCESS: ANTHROPIC_DANGEROUS_DIRECT_BROWSER_ACCESS,
 }
 # 由 chat.py 逐请求注入、**不在**静态表里的头（值含凭证/会话/时区，不能写死）：
 #   Content-Type: application/json     spec:340,690
 #   Accept: application/json           spec:341,690  流式仍是 json（stream:true 在 body）
 #   Authorization: Bearer <token>      spec:344,690  **唯一真实凭证**
-#   X-Mavis-Session-Id: <uuid>         spec:346,690
+#   X-Mavis-Session-Id: mvs_<32hex>    spec:346,690 + MITM 实测 2026-09-30 dump-003:34
 #   X-Mavis-Timezone-Offset: <秒>      spec:348,690  getTimezoneOffset()*-60（东为正）
 DYNAMIC_HEADER_KEYS = (  # spec:340-348,690
     HEADER_CONTENT_TYPE,
@@ -267,19 +291,45 @@ SHARED_AUTH_PATH_PREFIXES = (  # spec:411
 #   is_vl             = 是否接受图像/视频输入（= modalities.input 含 image/video，spec:560）
 #   is_reasoning      = 目录 `reasoning: true`（spec:501,512-515）
 #   thinking          = **思考控制语义**，见下面 THINKING_* 常量
-# spec:524-533 决定性结论：Anthropic 方言下 MiniMax 的思考是 **on/off 二值开关**
-# （adaptive / disabled），**不是** effort 档位；`{reasoning:{effort:...}}` 只在
-# openai-responses 方言里出现（spec:530），本通道不下发。
+# spec:524-533 的静态结论（**已被 MITM 实测部分推翻，见下 EFFORT_DEFAULT**）：
+# Anthropic 方言下 MiniMax 的思考开关是 **on/off 二值**（adaptive / disabled）；
+# `{reasoning:{effort:...}}` 只在 openai-responses 方言里出现（spec:530）。
 THINKING_MODE_SWITCHABLE = "switchable"  # spec:507 thinking_config.mode
 THINKING_CONTROL_ON_OFF = "on_off"  # spec:527-528 isMiniMaxM3ThinkingMode：仅 on|off
 THINKING_TYPE_ADAPTIVE = "adaptive"  # spec:531,540,691 thinking **on** 的映射值
 THINKING_TYPE_DISABLED = "disabled"  # spec:531,508 thinking **off** 的映射值
-THINKING_ON = {"thinking": {"type": THINKING_TYPE_ADAPTIVE}}  # spec:441,531
-THINKING_OFF = {"thinking": {"type": THINKING_TYPE_DISABLED}}  # spec:441,531
+# MITM 实测 2026-09-30（dump-001:67-69 / dump-002:1783-1785）：
+#   count_tokens 请求实测 `thinking: {"type":"adaptive","display":"summarized"}`
+#   ⇒ thinking 还带一个 **display** 伴生字段（旧静态假设只知 `type`）。
+# 出处：`.tmp/mitm/minimax-code-20260919/dumps/req-20260930-172559-001.json:67-69`、
+# `req-20260930-172559-002.json:1783-1785`、MITM-VERIFIED-FINDINGS.md §1D / §3 G05。
+# ⚠️ 推理路径（/v1/messages）实测**不发 thinking**（dump-003 全文 0 处 `"thinking"`），
+#    但本通道仍按调用方意图支持它（见 translate._resolve_thinking 的说明）。
+# ⚠️ 注意 constants 里 M3 的 `options.reasoningSummary:"auto"` 与实测字面
+#    `"summarized"` **不是同一个值**，别混用。
+THINKING_DISPLAY_SUMMARIZED = "summarized"  # MITM 实测 2026-09-30 dump-001:69
+THINKING_DISPLAY_FIELD = "display"  # MITM 实测 2026-09-30 dump-001:68
+THINKING_DISPLAY_VALUES = (THINKING_DISPLAY_SUMMARIZED,)  # 实测仅见该值（不编造其余档）
+THINKING_ON = {
+    "thinking": {"type": THINKING_TYPE_ADAPTIVE, THINKING_DISPLAY_FIELD: THINKING_DISPLAY_SUMMARIZED}
+}  # spec:441,531 + MITM 实测 2026-09-30 dump-001:67-69（补 display）
+THINKING_OFF = {
+    "thinking": {"type": THINKING_TYPE_DISABLED, THINKING_DISPLAY_FIELD: THINKING_DISPLAY_SUMMARIZED}
+}  # spec:441,531 + MITM 实测 2026-09-30（display 是伴生字段，on/off 都带）
 THINKING_MODE_VALUES = ("on", "off")  # spec:528 唯一合法取值（非 effort 档位）
 # effort 档位是「通用非 M3 Anthropic 路径」的东西：low|medium|high|xhigh|max（spec:544），
-# 随 output_config.effort 下发（spec:541-542）。M3 的受管开关路径**不使用**它们。
+# 随 output_config.effort 下发（spec:541-542）。
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")  # spec:544
+# ⚠️ MITM 实测 2026-09-30 推翻了"受管推理路径不发 effort"这个旧判断：
+#   推理请求实测 `output_config: {"effort":"default"}`（dump-003:1822-1823）。
+#   ⇒ `"default"` 是**实测到的**取值，**不在** spec:544 那套 low|medium|high|xhigh|max 里
+#     （客户端把"未显式选档"也**显式下发**，不是省略字段）。
+#   出处：MITM-VERIFIED-FINDINGS.md §1C / §3 G03 / §4。
+EFFORT_DEFAULT = "default"  # MITM 实测 2026-09-30 dump-003:1823
+# 允许值集合 = 实测的 default + spec:544 的通用档位（两者的并集，缺一不可）。
+EFFORT_VALUES = (EFFORT_DEFAULT,) + EFFORT_LEVELS  # MITM 实测 + spec:544
+# OpenAI 侧 `reasoning_effort` 的取值（三家口径：none/minimal 属"关思考"，不是档位）。
+REASONING_EFFORT_OFF_VALUES = ("none", "minimal", "disabled", "off")  # OpenAI 官方词表
 # M2.7 系的思考控制语义：目录只声明 `reasoning: true`，**没有** thinking_config / variants
 # （spec:512-515）。⇒ 写成可配置：缺省跟随 M3 的 on/off 开关（同为 Anthropic 方言，
 # spec:531 那条映射对 anthropic-messages 通用），若实测不支持，改这两个键即可，不必动 chat.py。
@@ -288,6 +338,43 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")  # spec:544
 # 属远端目录/迁移阶段的行为），实测前不要把 M2.7 当已验证模型对外承诺能力。
 DEFAULT_THINKING_ENABLED = True  # spec:507 default_value:'true'（M3 默认开思考）
 MODEL_CATALOG: dict[str, dict] = {
+    # ⚠️ MITM 实测 2026-09-30：客户端**实际在用**的默认模型就是这一档
+    # （dump-003:53 / dump-001:42 / dump-002:42 三处一致）。
+    # 出处：`.tmp/mitm/minimax-code-20260919/dumps/req-20260930-172559-003.json:53`、
+    # MITM-VERIFIED-FINDINGS.md §1C / §3 G02。旧 catalog 只有 M3/M2.7 两族 ⇒ 实测
+    # 请求会落到 `chat.model_meta` 的宽松兜底（能力位全靠猜）。
+    # 字段来源分两类，逐字段标注（**未实测的一律按 M3 同族推断**）：
+    #   [实测] max_output_tokens=128000 ← dump-003:68 `max_tokens:128000`（客户端按该模型
+    #          的输出上限填的，与 M3 的 limit.output 同值，spec:503）
+    #   [推断] 其余能力位（context window 具体值、是否支持 video、attachment 等）
+    #          **MITM 未验证** ⇒ 沿用同族 M3 的值，不编造具体数字。
+    "MiniMax-M3.1-Flash-Preview": {
+        "id": "MiniMax-M3.1-Flash-Preview",  # MITM 实测 2026-09-30 dump-003:53
+        "display_name": "MiniMax-M3.1-Flash-Preview",  # MITM 实测 2026-09-30 dump-003:53
+        "max_input_tokens": 512_000,  # 按 M3 同族推断，MITM 未验证（spec:503 limit.context）
+        "max_output_tokens": 128_000,  # MITM 实测 2026-09-30 dump-003:68（max_tokens=128000）
+        "is_vl": True,  # 按 M3 同族推断，MITM 未验证（spec:502,560；实测无 image/video block）
+        "is_reasoning": True,  # 按 M3 同族推断，MITM 未验证（spec:501 reasoning:true）
+        "modalities": {"input": ["text", "image", "video"], "output": ["text"]},  # 按 M3 同族推断，MITM 未验证
+        "thinking": {  # 按 M3 同族推断，MITM 未验证（推理路径实测不发 thinking，dump-003 无该键）
+            "mode": THINKING_MODE_SWITCHABLE,  # 按 M3 同族推断，MITM 未验证
+            "control": THINKING_CONTROL_ON_OFF,  # 按 M3 同族推断，MITM 未验证
+            "default_enabled": True,  # 按 M3 同族推断，MITM 未验证
+            "on": THINKING_TYPE_ADAPTIVE,  # 按 M3 同族推断，MITM 未验证（count_tokens 实测为 adaptive，dump-001:68）
+            "off": THINKING_TYPE_DISABLED,  # 按 M3 同族推断，MITM 未验证
+            # 推理路径实测走 output_config.effort（dump-003:1822-1823），不是 thinking 档位
+            # ⇒ 这里与 M3 一样标 False（effort 由 translate 的 output_config 通道承载）。
+            "effort": False,
+        },
+        "attachment": True,  # 按 M3 同族推断，MITM 未验证（spec:501）
+        "tool_call": True,  # MITM 实测 2026-09-30：dump-003 带 27 个 tools ⇒ 支持工具调用
+        "temperature": True,  # 按 M3 同族推断，MITM 未验证（实测请求未发 temperature）
+        "context_window_options": [512_000, 1_000_000],  # 按 M3 同族推断，MITM 未验证
+        "context_window_option_hints": {"1000000": "higher_usage"},  # 按 M3 同族推断，MITM 未验证
+        "options": {"reasoningSummary": "auto"},  # 按 M3 同族推断，MITM 未验证
+        "variants": {"none-thinking": THINKING_OFF, "thinking": THINKING_ON},  # 按 M3 同族推断，MITM 未验证
+        "files_api": True,  # 按 M3 同族推断，MITM 未验证（spec:510）
+    },
     "MiniMax-M3": {  # spec:500-511
         "id": "MiniMax-M3",  # spec:501 name
         "display_name": "MiniMax-M3",  # spec:501
@@ -365,12 +452,16 @@ MODEL_CATALOG: dict[str, dict] = {
     },
 }
 
-# 裸 id 列表：从 MODEL_CATALOG 派生（顺序 = 目录声明顺序，M3 首位）。
-STATIC_MODELS = tuple(MODEL_CATALOG)  # spec:499-516
+# 裸 id 列表：从 MODEL_CATALOG 派生（顺序 = 目录声明顺序，实测默认模型首位）。
+STATIC_MODELS = tuple(MODEL_CATALOG)  # spec:499-516 + MITM 实测 2026-09-30（M3.1-Flash-Preview 在首位）
 
-# 默认模型：客户端 defaultModel = 'minimax/MiniMax-M3'（spec:518），
+# 默认模型。**MITM 实测 2026-09-30 修正**：客户端实际在用的默认模型是
+# `MiniMax-M3.1-Flash-Preview`（dump-003:53 / dump-001:42 / dump-002:42 三处一致；
+# MITM-VERIFIED-FINDINGS.md §1C / §3 G02），而 spec:518 记录的 `minimax/MiniMax-M3`
+# 是**静态规格当时的**客户端 defaultModel ⇒ 实测优先，改指向实测模型。
+# 旧 M3 / M2.7 / M2.7-highspeed 三个条目**保留**（不删，仍是可路由目录项）。
+DEFAULT_MODEL = "MiniMax-M3.1-Flash-Preview"  # MITM 实测 2026-09-30 dump-003:53（spec:16,518 为旧值）
 # provider/modelId 前缀 `minimax` 是受管入口、`minimax_api` 是自带 key（spec:518）。
-DEFAULT_MODEL = "MiniMax-M3"  # spec:16,518
 MANAGED_MODEL_REF_PREFIX = "minimax"  # spec:518
 BYOK_MODEL_REF_PREFIX = "minimax_api"  # spec:518
 MODEL_KEY_SEPARATOR = "/"  # spec:518 `minimax/MiniMax-M3`
@@ -379,14 +470,20 @@ MODEL_KEY_SEPARATOR = "/"  # spec:518 `minimax/MiniMax-M3`
 # 本目录 display_name == id，故**不**像 qodercn 那样按展示名派生（会是恒等映射）。
 # "auto" 是网关侧的虚拟别名（上游无此 id），翻到默认模型；spec 未给任何别名。
 ALIASES: dict[str, str] = {
-    "auto": DEFAULT_MODEL,  # spec:518 默认模型兜底（上游不认识 "auto"，spec:499-516 无此项）
-    "minimax/MiniMax-M3": DEFAULT_MODEL,  # spec:518 客户端 model-ref 写法可直接当别名用
+    "auto": DEFAULT_MODEL,  # 默认模型兜底（上游不认识 "auto"，spec:499-516 无此项）
+    # MITM 实测 2026-09-30 dump-003:53：客户端 model-ref 的 provider 前缀就是 `minimax`
+    # （`minimax/MiniMax-M3.1-Flash-Preview` 形状，spec:518 的 `minimax/MiniMax-M3` 同族）。
+    "minimax/MiniMax-M3.1-Flash-Preview": DEFAULT_MODEL,
+    "minimax/MiniMax-M3": "MiniMax-M3",  # spec:518 客户端 model-ref 写法可直接当别名用
     "minimax/MiniMax-M2.7": "MiniMax-M2.7",  # spec:514,518 同上（provider/modelId 形状）
     "minimax/MiniMax-M2.7-highspeed": "MiniMax-M2.7-highspeed",  # spec:512,518 同上
 }
 
 # 代码里出现但**不在**内置目录的 id（多为远端目录/测试/历史，spec:520）：
 # 仅作审计记录，不代表可路由，禁止拿来当默认或别名目标。
+# MITM 实测 2026-09-30：`MiniMax-M3.1-Flash-Preview` 已**升格进目录**（见 MODEL_CATALOG
+# 首条），故从本表移除；无后缀的 `MiniMax-M3.1` 仍不在目录（实测只见 `-Flash-Preview`，
+# 不能推断无后缀 id 也存在 ⇒ 保留登记，不擅自加进目录）。
 NON_CATALOG_MODEL_IDS = ("MiniMax-M3.1", "MiniMax-M2.5", "MiniMax-M2", "MiniMax-M1")  # spec:520
 DISABLE_MODEL_PREFIXES = ("MiniMax-M2",)  # spec:520 config.ts:1581（远端目录/迁移阶段的禁用位）
 # 远端模型目录来源（spec:520）。cn 值如下；en 另有值但 spec 未给出 ⇒ 不猜，留空。
@@ -412,7 +509,14 @@ CACHE_CONTROL_TTL_1H = "1h"  # spec:564 本通道**不得**下发该 ttl
 # 工具调用 = 标准 Anthropic 形状（spec:563）：tools[] 的 name/description/input_schema，
 # 末位工具可挂 cache_control；响应 tool_use；流式 input_json_delta 累加后 JSON.parse。
 TOOL_INPUT_SCHEMA_TYPE = "object"  # spec:563 input_schema{type:object,...}
-EAGER_INPUT_STREAMING = True  # spec:349,563 supportsEagerToolInputStreaming 默认 true
+# MITM 实测 2026-09-30：推理请求的 **27 个 tool 全部**带 `eager_input_streaming: true`
+# （dump-003:83 首个，共 27 处）；而两次 `count_tokens` 的同一批 27 个 tool
+# **全部不带** ⇒ 该字段是**推理路径专属**（MITM-VERIFIED-FINDINGS §1C/§1D、§3 G04）。
+# 出处：`.tmp/mitm/minimax-code-20260919/dumps/req-20260930-172559-003.json:83`（27 处）。
+# ⚠️ 它**不依赖** `anthropic-beta` 头：实测 `headerPresence["anthropic-beta"] = null`
+#    （capture.jsonl:8），却照样发了该字段 ⇒ 旧 TODO"属 beta 细粒度工具流式特性、
+#    故不发"这个推论被实测推翻（该推论混淆了 SDK 能力位与 wire 字段）。
+EAGER_INPUT_STREAMING = True  # spec:349,563 + MITM 实测 2026-09-30 dump-003:83（27/27）
 TOOL_CHOICE_TYPES = ("auto", "any")  # spec:563 目录里明确出现的两个取值（**非**封闭集合）
 # 已核对解包副本 pi-ai/dist/providers/anthropic.js:794-799：tool_choice 是**原样透传**
 # （字符串 ⇒ `{type: <str>}`，对象 ⇒ 直接塞），客户端根本不枚举取值 ⇒ spec:563 那个省略号
@@ -481,12 +585,36 @@ USAGE_FIELDS = (  # spec:623
     USAGE_CACHE_READ_INPUT_TOKENS,
     USAGE_CACHE_CREATION_INPUT_TOKENS,
 )
+# MITM 实测 2026-09-30（capture.jsonl:11 的 usage_snapshots[0]）：
+#   响应 usage 实测带**第 5 个嵌套字段**：
+#     `output_tokens_details: {"thinking_tokens": 57}`
+#   出处：`.tmp/mitm/minimax-code-20260919/capture.jsonl` 第 11 行、
+#   MITM-VERIFIED-FINDINGS.md §1E / §3 G06。
+# ⚠️ `thinking_tokens` 是 `output_tokens` 的**子集**（实测 57 / 85），
+#    **绝不**当成第 5 项加进 total ⇒ `TOTAL_TOKENS_IS_SUM_OF_USAGE_FOUR` 口径不变
+#    （见 translate.normalize_usage 的注释与自检断言）。
+USAGE_OUTPUT_TOKENS_DETAILS = "output_tokens_details"  # MITM 实测 2026-09-30 capture.jsonl:11
+USAGE_THINKING_TOKENS = "thinking_tokens"  # MITM 实测 2026-09-30 capture.jsonl:11
+# 转成 OpenAI 风格明细时的槽位（与 upstream/responses.py:624 同键，便于观测面统一读取）：
+USAGE_COMPLETION_TOKENS_DETAILS = "completion_tokens_details"  # OpenAI 风格明细键
+USAGE_REASONING_TOKENS = "reasoning_tokens"  # OpenAI 风格思考 token 键
 TOTAL_TOKENS_IS_SUM_OF_USAGE_FOUR = True  # spec:619,693 总量 = 四项相加（客户端就是这么算）
 RESPONSE_HAS_CREDIT_FIELD = False  # spec:610,624 无 reasoning_tokens / credits_used
 CLIENT_SIDE_UNIT_COST_IS_ZERO = True  # spec:625 cost 硬编码 0 ⇒ 金额由服务端额度系统决定
 # spec:596 网关允许 usage 分批下发：message_delta 可能不带 input_tokens，
 # 客户端用 message_start 的值兜底 ⇒ 本通道累计时同样以 message_start 为准做缺省。
 USAGE_FALLBACK_FROM_MESSAGE_START = True  # spec:596
+
+# --- count_tokens 端点（**仅登记，不实现**；MITM 实测 2026-09-30）---
+# 实测：`POST https://agent.minimax.cn/mavis/api/v1/llm/v1/messages/count_tokens`
+# （dump-001:4 / dump-002:4），两次均 200 + `application/json`（非 SSE）。
+# 形状对照（MITM-VERIFIED-FINDINGS §1D / §4）：`stream:false`、**无 max_tokens**、
+# **无 output_config**、`thinking` 带 `display`、tools[] **不带** eager_input_streaming。
+# 任务口径是"不需要实现，仅登记" ⇒ 这里只留端点常量供审计，chat/translate 不使用它。
+COUNT_TOKENS_PATH = ANTHROPIC_MESSAGES_PATH + "/count_tokens"  # MITM 实测 2026-09-30 dump-001:4
+COUNT_TOKENS_URL_CN = AGENT_HOST_CN + LLM_BASE_PATH + COUNT_TOKENS_PATH  # MITM 实测 2026-09-30 dump-001:4
+COUNT_TOKENS_METHOD = "POST"  # MITM 实测 2026-09-30 dump-001:5
+COUNT_TOKENS_IMPLEMENTED = False  # 仅登记：本通道不实现该端点（任务口径）
 
 # --- 上游错误码表（spec §7.2:627-655 + §9:5:692）---
 # 语义名 → 上游业务码（LLM_ERROR_STATUS_CODES）
@@ -654,11 +782,19 @@ def thinking_payload_for(model: str, mode: str | bool | None) -> dict:
         enabled = lowered == "on"
     else:
         enabled = bool(thinking.get("default_enabled", DEFAULT_THINKING_ENABLED))
-    return {"thinking": {"type": thinking.get("on" if enabled else "off")}}
+    return {"thinking": {
+        "type": thinking.get("on" if enabled else "off"),
+        # MITM 实测 2026-09-30 dump-001:67-69：display 是 thinking 的伴生字段。
+        THINKING_DISPLAY_FIELD: THINKING_DISPLAY_SUMMARIZED,
+    }}
 
 
 def _self_check() -> None:
-    """把「/v1 只有一个」和「目录派生一致」钉成导入期不变量（spec:111-119,689）。"""
+    """把「/v1 只有一个」和「目录派生一致」钉成导入期不变量（spec:111-119,689）。
+
+    2026-09-30 MITM 实测新增的断言标 `MITM 实测 2026-09-30` 并给出 dump 行号
+    （实测优先于旧静态断言，但不放宽成无断言）。
+    """
     assert CHAT_PATH == "/mavis/api/v1/llm/v1/messages", CHAT_PATH  # spec:131,689
     assert CHAT_PATH.count("/v1") == 2, CHAT_PATH  # 恰好两处：网关前缀 /mavis/api/v1/llm + SDK 的 /v1/messages
     assert "/v1/v1/" not in CHAT_PATH, CHAT_PATH  # 净效果**不是** /v1/v1/messages（spec:689 的头号坑）
@@ -667,13 +803,44 @@ def _self_check() -> None:
     assert LLM_BASE_PATH == PRESET_CHAT_BASE_PATH.removesuffix("/v1"), LLM_BASE_PATH  # spec:100-111
     assert REQUEST_STATIC_HEADERS["x-api-key"] == "sk-xxx"  # spec:202,343 占位符别删
     assert ALIASES["auto"] in MODEL_CATALOG  # "auto" 必须指向真实目录项
-    assert DEFAULT_MODEL in MODEL_CATALOG  # spec:518
+    assert DEFAULT_MODEL in MODEL_CATALOG
     assert set(STATIC_MODELS) == set(MODEL_CATALOG)  # 派生列表与目录同源
     assert {USAGE_LIMIT_EXCEEDED, LLM_CREDITS_EXHAUSTED, LLM_RATE_LIMITED,
             LLM_AUTH_ERROR, LLM_UPSTREAM_ERROR, LLM_TPM_RATE_LIMITED,
             LLM_CLUSTER_OVERLOADED} <= set(UPSTREAM_ERROR_CODES)  # spec:632-639
     assert set(UPSTREAM_STATUS_CODE_MAP) == {1400010161, 2056, 2067}  # spec:642-646
     assert set(UPSTREAM_STATUS_CODE_MAP.values()) <= set(UPSTREAM_ERROR_CODES)
+
+    # --- MITM 实测 2026-09-30 的不变量（dump 行号见各常量注释） ---
+    # G01：主请求实测必发该头，且**没有** anthropic-beta 配套（capture.jsonl:8）。
+    assert REQUEST_STATIC_HEADERS[
+        HEADER_ANTHROPIC_DANGEROUS_DIRECT_BROWSER_ACCESS
+    ] == "true"  # MITM 实测 2026-09-30 dump-003:27
+    assert HEADER_ANTHROPIC_BETA not in REQUEST_STATIC_HEADERS  # MITM 实测 2026-09-30（未发）
+    # G02：实测默认模型进目录且在首位（STATIC_MODELS 顺序 = 目录声明顺序）。
+    assert DEFAULT_MODEL == "MiniMax-M3.1-Flash-Preview"  # MITM 实测 2026-09-30 dump-003:53
+    assert STATIC_MODELS[0] == DEFAULT_MODEL  # MITM 实测 2026-09-30（放首位）
+    assert MODEL_CATALOG[DEFAULT_MODEL]["max_output_tokens"] == 128_000  # MITM 实测 dump-003:68
+    for legacy in ("MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"):
+        assert legacy in MODEL_CATALOG, legacy  # 旧条目必须保留（不删）
+    # G03：effort 实测值 default 在允许集合里（旧值域 low|medium|high|xhigh|max 漏了它）。
+    assert EFFORT_DEFAULT == "default"  # MITM 实测 2026-09-30 dump-003:1823
+    assert EFFORT_DEFAULT in EFFORT_VALUES and set(EFFORT_LEVELS) <= set(EFFORT_VALUES)
+    # G05：thinking 实测带 display（count_tokens），常量形状必须含它。
+    assert THINKING_ON["thinking"][THINKING_DISPLAY_FIELD] == "summarized"  # MITM 实测 dump-001:69
+    assert THINKING_OFF["thinking"][THINKING_DISPLAY_FIELD] == "summarized"  # MITM 实测 dump-001:69
+    assert thinking_payload_for("MiniMax-M3", "on")["thinking"][THINKING_DISPLAY_FIELD] == "summarized"
+    # G07：session id 实测 = mvs_ + 32 位 hex。
+    assert MAVIS_SESSION_ID_PREFIX == "mvs_" and MAVIS_SESSION_ID_HEX_LEN == 32  # MITM 实测 dump-003:34
+    # 次要3：usage 第 5 个嵌套字段登记在案，但**不进** total 的四项口径。
+    assert TOTAL_TOKENS_IS_SUM_OF_USAGE_FOUR is True  # MITM 实测（thinking_tokens 是 output 子集）
+    assert USAGE_OUTPUT_TOKENS_DETAILS not in USAGE_FIELDS  # 不扩四字段口径
+    assert USAGE_THINKING_TOKENS == "thinking_tokens"  # MITM 实测 capture.jsonl:11
+    # G09：count_tokens 仅登记（不实现），端点形状与实测一致。
+    assert COUNT_TOKENS_PATH == "/v1/messages/count_tokens"  # MITM 实测 dump-001:4
+    assert COUNT_TOKENS_IMPLEMENTED is False  # 任务口径：仅登记
+    # 次要2：eager_input_streaming 实测为 true 且不依赖 anthropic-beta。
+    assert EAGER_INPUT_STREAMING is True  # MITM 实测 2026-09-30 dump-003:83
 
 
 _self_check()

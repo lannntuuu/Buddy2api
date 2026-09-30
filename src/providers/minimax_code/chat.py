@@ -74,6 +74,8 @@ from providers.minimax_code.constants import (
     LLM_TPM_RATE_LIMITED,
     LLM_TPM_RATE_LIMIT_MESSAGE_CODES,
     LLM_UPSTREAM_ERROR,
+    MAVIS_SESSION_ID_HEX_LEN,
+    MAVIS_SESSION_ID_PREFIX,
     MODEL_CATALOG,
     PROD_PROHIBITED_HEADERS,
     REQUEST_STATIC_HEADERS,
@@ -202,32 +204,59 @@ def _timezone_offset_seconds() -> int:
     return int(offset.total_seconds()) if offset else 0
 
 
-def request_headers(account: dict, session_id: str = "") -> dict[str, str]:
-    """推理请求头全集（spec §3.1:334-375 + §9:3:690 的清单，逐条对应行号）。
+def new_session_id() -> str:
+    """生成 ``X-Mavis-Session-Id`` 的值：``mvs_`` + 32 位小写 hex（无连字符）。
 
-    静态四项（anthropic-version / x-api-key 占位符 / User-Agent / X-Mavis-Agent-Id）取
-    ``constants.REQUEST_STATIC_HEADERS``（值与出处都在契约层）；这里只补**含凭证/会话/
-    时区的动态四项**（spec:340,341,344,346,348）。
+    **MITM 实测 2026-09-30**：实测值形如
+    ``mvs_312d6855b7a74b4990b9faf170aecd4f``
+    （dump-003:34 主请求 / dump-001:31 / dump-002:31 两次 count_tokens 三处一致）。
+    出处：``.tmp/mitm/minimax-code-20260919/dumps/req-20260930-172559-003.json:34``、
+    ``MITM-VERIFIED-FINDINGS.md`` §1B#10 / §3 G07。
+    形状 = ``MAVIS_SESSION_ID_PREFIX``（``"mvs_"``）+ ``uuid4().hex``（32 位小写 hex）。
+
+    旧实现是 ``str(uuid.uuid4())`` —— **带连字符且无前缀**，与实测形状不符（G07）。
+    这里统一收敛成一个生成点：``request_headers``、``chat_completions`` 主路径、
+    ``test_chat`` 探活路径**全部**走本函数（不再有裸 ``uuid4()`` 调用点）。
+
+    语义说明（实测 vs 本通道）：实测三次请求**复用同一个 id** ⇒ 客户端侧是**会话级**。
+    网关没有跨请求的会话概念（每个 HTTP 请求独立），故本通道按"一次客户端请求一个
+    会话 id"生成，但**格式严格对齐实测**（前缀 + 32 位 hex），并在 401 重放时沿用
+    同一个 id（重放是"同一次请求换票再发"，spec:313，不是新会话）。
+    """
+    return MAVIS_SESSION_ID_PREFIX + uuid.uuid4().hex
+
+
+def request_headers(account: dict, session_id: str = "") -> dict[str, str]:
+    """推理请求头全集（spec §3.1:334-375 + §9:3:690 的清单 + MITM 实测 2026-09-30）。
+
+    静态项取 ``constants.REQUEST_STATIC_HEADERS``（值与出处都在契约层）——含
+    anthropic-version / x-api-key 占位符 / User-Agent / X-Mavis-Agent-Id，以及
+    **MITM 实测 2026-09-30 新增的** ``anthropic-dangerous-direct-browser-access: true``
+    （dump-003:27；实测无 anthropic-beta 配套，见 constants 注释）。
+    这里只补**含凭证/会话/时区的动态项**（spec:340,341,344,346,348）。
 
     ⚠️ ``x-api-key: sk-xxx`` 是占位符、**不许删**（spec:202,343,690）：真实凭证只在
     Authorization，缺了这个头反而可能触发 Anthropic SDK 的认证方式解析失败。
     ⚠️ prod 不发 ``bedrock-lane``（spec:350,690）：那是 dev/test/staging 的泳道头，
     受管路径还会先删用户配置里的同名头 ⇒ 这里再兜一道按黑名单剔除。
-    ⚠️ spec:484-489 的残余不确定性：客户端还带了 Cookie 等会话头，**不能确认**受管
-    推理面对额外请求头的要求 ⇒ 只发 spec §3.1 明确列出的头，多一个都不发。
+    ⚠️ MITM 实测 2026-09-30 推翻了旧 docstring 的残余假设：实测 24 个请求头里
+    **没有 Cookie**（dump-003:24-48；capture.jsonl:8 的 headerNames 全集同样无）
+    ⇒ "客户端还带 Cookie 等会话头"这句不再成立（MITM-VERIFIED-FINDINGS §3 G12）。
+    策略方向不变：只发清单里的头，多一个都不发。
     """
     token = str(account.get("access_token") or "")
     if not token:
         # 空 Bearer 发出去只会被网关 401，而 401 恢复路径也救不回来（没 token 多半也没
         # 换票素材）；在出网前失败比让上游给一个语义模糊的 401 更好诊断。
         raise T.PayloadError("minimax-code account has no access_token")
-    headers: dict[str, str] = dict(REQUEST_STATIC_HEADERS)     # spec:342-345,347,690
+    headers: dict[str, str] = dict(REQUEST_STATIC_HEADERS)     # spec:342-345,347,690 + MITM 实测
     headers[HEADER_CONTENT_TYPE] = CONTENT_TYPE_JSON           # spec:340,690
     # spec:341,690：**流式也发 Accept: application/json**（stream:true 在 body 里，
     # 不是 text/event-stream）。这是客户端实测形状，照抄，别按"常识"改。
     headers[HEADER_ACCEPT] = CONTENT_TYPE_JSON                 # spec:341,690
     headers[HEADER_AUTHORIZATION] = f"{BEARER_PREFIX}{token}"   # spec:344,690 唯一真实凭证
-    headers[HEADER_MAVIS_SESSION_ID] = session_id or str(uuid.uuid4())  # spec:346,690
+    # MITM 实测 2026-09-30 dump-003:34：格式 = mvs_ + 32 位小写 hex（旧值裸 uuid4 被推翻）。
+    headers[HEADER_MAVIS_SESSION_ID] = session_id or new_session_id()  # spec:346,690
     headers[HEADER_MAVIS_TIMEZONE_OFFSET] = str(_timezone_offset_seconds())  # spec:348,690
     for banned in PROD_PROHIBITED_HEADERS:                     # spec:350,690 prod 恒空
         headers.pop(banned, None)
@@ -1238,9 +1267,9 @@ async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
 
     raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     url = chat_url()
-    # 会话 UUID：一次客户端请求一个（spec:346,690）。401 重放沿用同一个 id ——
-    # 重放是"同一次请求换票再发"（spec:313），不是新会话。
-    session_id = str(uuid.uuid4())
+    # 会话 id：一次客户端请求一个（spec:346,690 + MITM 实测 2026-09-30 的形状）。
+    # 401 重放沿用同一个 id —— 重放是"同一次请求换票再发"（spec:313），不是新会话。
+    session_id = new_session_id()
 
     if wants_stream:
         return ("stream", _stream(raw, url, upstream_model, str(model_name), api_key_info, session_id))
@@ -1417,11 +1446,14 @@ async def test_chat(account: dict, model: str = "", prompt: str = "") -> dict:
             inner = translate_model(str(payload.get("model") or default_model))
             body = T.build_anthropic_payload(inner, payload)
             raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            headers = request_headers(account, str(uuid.uuid4()))
+            # 探活同样走 new_session_id()（MITM 实测 2026-09-30 的 mvs_+32hex 形状）：
+            # 以前这里有两处裸 uuid4()，会让探活发出与实测不符的 session id（G07）。
+            session_id = new_session_id()
+            headers = request_headers(account, session_id)
         except T.PayloadError as exc:
             return 400, str(exc)[:240], None
         response, _used, auth_dead = await _post_with_auth_recovery(
-            _get_client(), chat_url(), raw, account, str(uuid.uuid4())
+            _get_client(), chat_url(), raw, account, session_id
         )
         status = int(response.status_code)
         if status >= 400 or auth_dead:
@@ -1465,12 +1497,18 @@ def _self_check() -> None:  # pragma: no cover - 离线自检脚本
     })
     account = db.get_account(aid)
 
-    # --- 1) URL 形状 + 头清单（spec §3.1 / §9:3）---
+    # --- 1) URL 形状 + 头清单（spec §3.1 / §9:3 + MITM 实测 2026-09-30）---
     url = chat_url()
     assert url == f"{LLM_HOST}{CHAT_PATH}", url                          # spec:131
     assert url.endswith("/mavis/api/v1/llm/v1/messages"), url
     assert "/v1/v1/" not in url, url                                     # spec:689 头号坑
-    sid = "6f0ddc5b-0000-4000-8000-000000000001"
+    sid = new_session_id()
+    # G07：实测形状 = mvs_ + 32 位小写 hex，无连字符（dump-003:34）。
+    assert sid.startswith(MAVIS_SESSION_ID_PREFIX), sid
+    assert len(sid) == len(MAVIS_SESSION_ID_PREFIX) + MAVIS_SESSION_ID_HEX_LEN, sid
+    assert "-" not in sid, sid                                           # 旧裸 uuid4 带连字符
+    assert all(c in "0123456789abcdef" for c in sid[len(MAVIS_SESSION_ID_PREFIX):]), sid
+    assert sid != new_session_id(), sid                                  # 每次生成不同
     headers = request_headers(account, sid)
     assert headers["x-api-key"] == "sk-xxx", headers                     # spec:202,343 占位符别删
     assert headers["Authorization"] == f"Bearer {fake_at}", headers       # spec:344
@@ -1479,9 +1517,14 @@ def _self_check() -> None:  # pragma: no cover - 离线自检脚本
     assert headers["X-Mavis-Agent-Id"] == "main", headers                 # spec:347
     assert headers["Content-Type"] == "application/json", headers         # spec:340
     assert headers["Accept"] == "application/json", headers               # spec:341 流式也是 json
-    assert headers["X-Mavis-Session-Id"] == sid, headers                  # spec:346
+    assert headers["X-Mavis-Session-Id"] == sid, headers                  # spec:346（调用方值优先）
     assert int(headers["X-Mavis-Timezone-Offset"]) % 900 == 0, headers    # spec:348 整刻钟
     assert "bedrock-lane" not in headers and "bedrock_lane" not in headers  # spec:350,690
+    # G01：MITM 实测 2026-09-30 dump-003:27 主请求必发该头；且**无** anthropic-beta 配套。
+    assert headers[K.HEADER_ANTHROPIC_DANGEROUS_DIRECT_BROWSER_ACCESS] == "true", headers
+    assert K.HEADER_ANTHROPIC_BETA not in headers, headers               # 实测未发（capture.jsonl:8）
+    # G12：实测 24 个请求头里没有 cookie（dump-003:24-48）⇒ 我们也不发。
+    assert "cookie" not in {k.lower() for k in headers}, headers
     assert all(fake_at not in v for v in headers.values()) or True        # 凭证只在 Bearer
 
     # --- 2) 流式：SSEDecoder → 状态机 → OpenAI chunk → [DONE] ---
@@ -1502,10 +1545,18 @@ def _self_check() -> None:  # pragma: no cover - 离线自检脚本
         assert request.url.path == CHAT_PATH, request.url.path
         assert request.headers["x-api-key"] == "sk-xxx"
         assert request.headers["Authorization"] == f"Bearer {fake_at}"
+        # G01/G07：实测主请求的两个头形状（MITM 2026-09-30 dump-003:27,34）。
+        assert request.headers[
+            K.HEADER_ANTHROPIC_DANGEROUS_DIRECT_BROWSER_ACCESS
+        ] == "true", dict(request.headers)
+        sent_sid = str(request.headers["X-Mavis-Session-Id"])
+        assert sent_sid.startswith(MAVIS_SESSION_ID_PREFIX) and "-" not in sent_sid, sent_sid
         sent = json.loads(request.content.decode("utf-8"))
         assert sent["stream"] is True, sent                                # spec:691
         assert sent["model"] == "MiniMax-M3", sent
         assert sent["max_tokens"] > 0, sent                                # spec:692 必填
+        # G03：推理路径实测总带 output_config.effort（MITM 2026-09-30 dump-003:1822-1823）。
+        assert sent["output_config"]["effort"] == K.EFFORT_DEFAULT, sent
         return httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"})
 
     set_transport(httpx.MockTransport(handler))
@@ -1648,6 +1699,79 @@ def _self_check() -> None:  # pragma: no cover - 离线自检脚本
     assert tested["usage"]["total_tokens"] == 5, tested                     # 四者和（此例无 cache）
     bad = asyncio.run(test_chat({"access_token": ""}))                      # 无凭证 ⇒ 本地拒
     assert bad["ok"] is False and bad["status_code"] == 400, bad
+
+    # --- 11) MITM 实测 2026-09-30：默认模型 / usage.thinking_tokens / eager_input_streaming ---
+    # 第 8) 步把该账号标成了 expired 并留了 30s 失败冷却（mark_account_failure(401)）
+    # ⇒ 先恢复 active 并清冷却，否则选号阶段就挑不到号（handler 一次都不会被调用）。
+    rate_limits.clear()
+    db.update_account(aid, {"status": "active"})
+    auth_manager.mark_account_success(aid)  # 清掉第 8) 步留下的失败冷却
+    # G02：实测默认模型 = MiniMax-M3.1-Flash-Preview（dump-003:53）⇒ 目录首位 + DEFAULT_MODEL。
+    assert DEFAULT_MODEL == "MiniMax-M3.1-Flash-Preview", DEFAULT_MODEL
+    assert K.STATIC_MODELS[0] == DEFAULT_MODEL and DEFAULT_MODEL in MODEL_CATALOG
+    assert ALIASES["auto"] == DEFAULT_MODEL, ALIASES["auto"]
+    assert MODEL_CATALOG[DEFAULT_MODEL]["max_output_tokens"] == 128_000  # 实测 max_tokens=128000
+    for legacy in ("MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"):
+        assert legacy in MODEL_CATALOG, legacy                            # 旧条目保留
+    assert translate_model("auto") == DEFAULT_MODEL                       # 保留字翻成实测默认模型
+    assert model_meta(DEFAULT_MODEL)["display_name"] == DEFAULT_MODEL     # 不再落宽松兜底
+
+    # G06/次要3：实测 usage 带 output_tokens_details.thinking_tokens=57（capture.jsonl:11）
+    # ⇒ 必须提取出来，但**不进** total（thinking 是 output 的子集，口径不变）。
+    seen_models: list[str] = []
+
+    def mitm_handler(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content.decode("utf-8"))
+        seen_models.append(str(sent.get("model")))
+        # 次要2/G04：实测 27/27 个 tool 都带 eager_input_streaming: true（dump-003:83）。
+        for tool in sent.get("tools") or []:
+            assert tool["eager_input_streaming"] is True, tool
+        return httpx.Response(200, content=(
+            b'data: {"type":"message_start","message":{"id":"msg_mitm",'
+            b'"usage":{"input_tokens":21769,"cache_read_input_tokens":2627}}}\n\n'
+            b'data: {"type":"content_block_delta","index":0,'
+            b'"delta":{"type":"text_delta","text":"ok"}}\n\n'
+            b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},'
+            b'"usage":{"output_tokens":85,"output_tokens_details":{"thinking_tokens":57}}}\n\n'
+            b'data: {"type":"message_stop"}\n\n'
+        ), headers={"content-type": "text/event-stream"})
+
+    set_transport(httpx.MockTransport(mitm_handler))
+    mitm_payload = {
+        "model": "auto", "stream": True,
+        "messages": [{"role": "user", "content": "ping"}],
+        "tools": [{"type": "function", "function": {"name": "lookup"}}],
+    }
+    _kind, stream = asyncio.run(chat_completions(mitm_payload, None))
+    mitm_text = asyncio.run(_drain(stream))
+    assert seen_models == [DEFAULT_MODEL], seen_models                    # auto → 实测默认模型
+    assert '"completion_tokens_details": {"reasoning_tokens": 57}' in mitm_text, mitm_text
+    assert '"output_tokens_details": {"thinking_tokens": 57}' in mitm_text, mitm_text
+    # total 口径不变：input 21769 + cache_read 2627 + output 85 = 24481（thinking 57 不加）
+    assert '"prompt_tokens": 24396' in mitm_text, mitm_text               # 21769 + 2627
+    assert '"completion_tokens": 85' in mitm_text, mitm_text
+    assert '"total_tokens": 24481' in mitm_text, mitm_text
+    assert '"total_tokens": 24538' not in mitm_text, mitm_text            # 不是 +57
+
+    # 次要1/G05：thinking 必须带 display（实测 count_tokens dump-001:67-69）。
+    assert T._resolve_thinking(
+        "MiniMax-M3", {"thinking": {"type": "adaptive"}}, K.model_entry("MiniMax-M3")
+    ) == {"type": "adaptive", "display": "summarized"}
+    # 实测默认模型（M3.1-Flash-Preview）同样带 display（目录按 M3 同族声明 on/off 开关）。
+    assert T._resolve_thinking(
+        DEFAULT_MODEL, {}, K.model_entry(DEFAULT_MODEL)
+    ) == {"type": "adaptive", "display": "summarized"}
+    # G03：reasoning_effort 合法值映射到 output_config.effort；缺省即实测的 default。
+    assert T._effort_from_reasoning_effort({}) == K.EFFORT_DEFAULT
+    assert T._effort_from_reasoning_effort({"reasoning_effort": "high"}) == "high"
+    assert T._effort_from_reasoning_effort({"reasoning_effort": "none"}) == K.EFFORT_DEFAULT
+    built = T.build_anthropic_payload("MiniMax-M3", {
+        "model": "MiniMax-M3", "messages": [{"role": "user", "content": "x"}],
+        "response_format": {"type": "json_schema", "json_schema": {"schema": {"type": "object"}}},
+    })
+    # format 与 effort **共存**于同一个 output_config（不互相覆盖）。
+    assert built["output_config"]["effort"] == K.EFFORT_DEFAULT, built["output_config"]
+    assert built["output_config"]["format"]["type"] == "json_schema", built["output_config"]
 
     set_transport(None)
     print("minimax-code chat.py self-check OK (offline: MockTransport + temp sqlite, 零真实请求)")

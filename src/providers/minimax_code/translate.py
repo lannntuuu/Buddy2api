@@ -65,6 +65,9 @@ from providers.minimax_code.constants import (
     DELTA_TEXT,
     DELTA_THINKING,
     DOCUMENT_BLOCK_TYPE,
+    EAGER_INPUT_STREAMING,
+    EFFORT_DEFAULT,
+    EFFORT_VALUES,
     FILES_UPLOAD_PATH,
     MANAGED_MODEL_REF_PREFIX,
     MAX_ATTACHMENTS_COUNT,
@@ -72,7 +75,9 @@ from providers.minimax_code.constants import (
     MAX_REQUEST_BODY_BYTES,
     MAX_VIDEO_BYTES_INLINE,
     MODEL_KEY_SEPARATOR,
+    OUTPUT_CONFIG_FIELD,
     OUTPUT_CONFIG_FORMAT_TYPE_JSON_SCHEMA,
+    REASONING_EFFORT_OFF_VALUES,
     SSE_EVENT_CONTENT_BLOCK_DELTA,
     SSE_EVENT_CONTENT_BLOCK_START,
     SSE_EVENT_CONTENT_BLOCK_STOP,
@@ -87,13 +92,19 @@ from providers.minimax_code.constants import (
     SUPPORTS_DOCUMENT_BLOCK,
     SUPPORT_JSON_OBJECT_OUTPUT,
     THINKING_CONTROL_ON_OFF,
+    THINKING_DISPLAY_FIELD,
+    THINKING_DISPLAY_SUMMARIZED,
     THINKING_TYPE_ADAPTIVE,
     THINKING_TYPE_DISABLED,
     USAGE_CACHE_CREATION_INPUT_TOKENS,
     USAGE_CACHE_READ_INPUT_TOKENS,
+    USAGE_COMPLETION_TOKENS_DETAILS,
     USAGE_FIELDS,
     USAGE_INPUT_TOKENS,
     USAGE_OUTPUT_TOKENS,
+    USAGE_OUTPUT_TOKENS_DETAILS,
+    USAGE_REASONING_TOKENS,
+    USAGE_THINKING_TOKENS,
     model_entry,
 )
 
@@ -164,17 +175,43 @@ class AnthropicStreamTruncatedError(AnthropicStreamError):
 # 超了上游 400；spec 未记录网关行为，clamp 是更贴合客户端预期的兜底选择）。
 DEFAULT_MAX_TOKENS = 32_000
 
-# 思考开关（thinking）只对 M3 实证：spec:526-533 的 isMiniMaxM3ThinkingMode /
+# 思考开关（thinking）只对 M3 **族**实证：spec:526-533 的 isMiniMaxM3ThinkingMode /
 # resolveMiniMaxM3ThinkingProtocol 覆盖的是 MiniMax-M3；M2.7 系目录没有
 # thinking_config（spec:512-515），spec:708 也承认网关行为静态无法枚举
-# ⇒ 任务约束：**非 M3 不发 thinking**。若实测 M2.7 也吃这个字段，
+# ⇒ 任务约束：**非 M3 族不发 thinking**。若实测 M2.7 也吃这个字段，
 # 往这个元组里加即可，不必动映射逻辑（constants 里 M2.7 的可配置 thinking 段
 # 仍保留，两处取交集）。
-THINKING_MODEL_IDS = ("MiniMax-M3",)  # spec:500-511,526-533
+# MITM 实测 2026-09-30：实测在用的 `MiniMax-M3.1-Flash-Preview` **确实吃 thinking**
+# —— count_tokens 请求实测 `thinking:{"type":"adaptive","display":"summarized"}`
+# （dump-001:67-69 / dump-002:1783-1785），且实测默认模型就是它
+# ⇒ 必须把该 id 加进来，否则实测默认模型会走"非 M3 族 ⇒ 不发 thinking"的旧分支。
+# （推理路径实测**不发** thinking，dump-003 全文 0 处；但那是客户端的选择，
+#   不等于该模型不支持该字段 —— 见 _resolve_thinking 的说明。）
+THINKING_MODEL_IDS = ("MiniMax-M3", "MiniMax-M3.1-Flash-Preview")  # spec:500-511,526-533 + MITM 实测 2026-09-30
 
-# output_config.effort 是「通用非 M3 Anthropic 路径」的东西（spec:541-544），
-# MiniMax 受管思考是开关不是档位（spec:524-533）⇒ 恒 False；仅留开关防将来实测打脸。
-SEND_OUTPUT_CONFIG_EFFORT = False  # TODO(spec:541-544)：受管路径未实证 effort，不发
+# output_config.effort —— **旧判断已被 MITM 实测 2026-09-30 推翻**。
+#
+# 旧判断（错在哪）：原来这里是 `SEND_OUTPUT_CONFIG_EFFORT = False`，理由写的是
+# "受管 MiniMax 思考是开关不是档位（spec:524-533）⇒ 通用 Anthropic 的 effort 档位
+# 不发"。实测证明这条推论**只对 count_tokens 成立**：
+#   * 推理路径 `/v1/messages` 实测 `output_config: {"effort":"default"}`（dump-003:1822-1823），
+#     且**完全不发** `thinking`（dump-003 全文 0 处 `"thinking"`）；
+#   * count_tokens 实测发 `thinking:{type,display}`、**不发** output_config（dump-001:67-69）。
+# ⇒ 同一个客户端在两条端点上用两套互斥的思考控制方言（MITM-VERIFIED-FINDINGS §4）。
+# 所以"受管路径不发 effort"是**错误的外推**：spec:541-544 记录的
+# `if (selection.enabled && selection.effort) outputConfig.effort = selection.effort`
+# 在推理路径上确实生效，只是取值含实测的 `"default"`。
+#
+# 现在的语义（实测优先）：
+#   * 推理路径**总是**产出 `output_config.effort`（缺省 `"default"`，与客户端行为一致）；
+#   * 调用方给了合法的 OpenAI `reasoning_effort` ⇒ 映射到 `output_config.effort`；
+#   * 两者可同时存在：`output_config` 里 `format`（json_schema）与 `effort` 合并进
+#     同一个 dict，**互不覆盖**（见 `_output_config_from_response_format` /
+#     `_effort_from_reasoning_effort` 与 build 里的合并逻辑）。
+# ⚠️ 残余不确定（R03）：实测只观测到 `"default"` 一个值，`low/medium/high/xhigh/max`
+#    是否被接受**未证实** ⇒ 调用方给的值只做"在白名单内才透传"，非法值回退 default，
+#    绝不把没实测过的字符串原样撞上游。
+SEND_OUTPUT_CONFIG_EFFORT = True  # MITM 实测 2026-09-30 dump-003:1822-1823（旧值 False 被推翻）
 
 # 图片远程 URL 引用形态：Anthropic 官方 messages 方言里 image.source 支持
 # {type:"url"}，spec:12 声明 MiniMax 网关是 "Anthropic Messages 兼容"，但 spec 的
@@ -273,6 +310,16 @@ def normalize_usage(anthropic_usage) -> dict:
     （KNOWN_CACHE_KEYS 检查 cache_read_input_tokens，store_common.py:318-329）按
     真实命中记 live —— 否则 cache 统计会被记 0。
     上游 usage **没有** credit 字段（spec:610,624），额度以错误码回报，本函数不涉及。
+
+    **思考 token（MITM 实测 2026-09-30 新增）**：实测响应 usage 带嵌套字段
+    ``output_tokens_details: {"thinking_tokens": 57}``
+    （capture.jsonl:11 的 ``usage_snapshots[0]``；MITM-VERIFIED-FINDINGS §1E / §3 G06）。
+    本函数把它**提取并保留**，两种口径同时给出：
+      * OpenAI 风格：``completion_tokens_details = {"reasoning_tokens": N}``
+        （与 ``upstream/responses.py:624`` 同键，观测面可直接统一读取）；
+      * 原生键：``output_tokens_details = {"thinking_tokens": N}``（原样保留实测形状）。
+    ⚠️ ``thinking_tokens`` 是 ``output_tokens`` 的**子集**（实测 57 / 85），
+    **绝不**加进 total —— ``total_tokens`` 仍是四项之和（口径不变，见自检断言）。
     """
     src = anthropic_usage if isinstance(anthropic_usage, dict) else {}
     inp = _as_int(src.get(USAGE_INPUT_TOKENS))
@@ -284,6 +331,7 @@ def normalize_usage(anthropic_usage) -> dict:
         "prompt_tokens": prompt,
         "completion_tokens": out,
         # spec:619,693 —— 总量恒为四字段之和（客户端就是这么算的）。
+        # ⚠️ MITM 实测的 thinking_tokens 是 output 的子集，**不**参与求和（口径不变）。
         "total_tokens": prompt + out,
         # 保留 Anthropic 原生键：cache 统计链路的键名判定依赖它们（见 docstring）。
         USAGE_CACHE_READ_INPUT_TOKENS: cache_read,
@@ -297,6 +345,15 @@ def normalize_usage(anthropic_usage) -> dict:
         details["cache_creation_tokens"] = cache_creation
     if details:
         usage["prompt_tokens_details"] = details
+    # MITM 实测 2026-09-30 capture.jsonl:11：usage.output_tokens_details.thinking_tokens。
+    raw_details = src.get(USAGE_OUTPUT_TOKENS_DETAILS)
+    thinking = 0
+    if isinstance(raw_details, dict):
+        thinking = _as_int(raw_details.get(USAGE_THINKING_TOKENS))
+    if thinking:
+        usage[USAGE_OUTPUT_TOKENS_DETAILS] = {USAGE_THINKING_TOKENS: thinking}  # 原生实测键
+        # OpenAI 风格槽位（键名对齐 upstream/responses.py:624，便于观测面统一消费）。
+        usage[USAGE_COMPLETION_TOKENS_DETAILS] = {USAGE_REASONING_TOKENS: thinking}
     return usage
 
 
@@ -624,9 +681,16 @@ def _translate_messages(payload: dict, entry) -> tuple[list[dict], list[dict]]:
 def _map_tools(tools) -> list[dict]:
     """OpenAI tools[] → Anthropic tools[]（{name,description,input_schema}，spec:563）。
 
-    TODO(spec:349,563)：eager_input_streaming（constants.EAGER_INPUT_STREAMING=True
-    仅是客户端能力位）属 anthropic-beta 细粒度工具流式特性，spec:349 表明该 beta 头
-    在 MiniMax 路径**通常不下发** ⇒ 本期不给 tools[] 加该字段。
+    **eager_input_streaming 实测要发**：MITM 实测 2026-09-30 的推理请求里
+    **27 个 tool 全部**带 ``eager_input_streaming: true``（dump-003:83 首个，共 27 处）；
+    对照两次 count_tokens 的同一批 tool **0/27 带** ⇒ 该字段是**推理路径专属**。
+    出处：MITM-VERIFIED-FINDINGS.md §1C/§1D、§3 G04。
+
+    旧 TODO 说"属 anthropic-beta 细粒度工具流式特性，spec:349 表明该 beta 头通常不下发
+    ⇒ 本期不给 tools[] 加该字段"—— **该推论被实测推翻**：实测
+    ``headerPresence["anthropic-beta"] = null``（capture.jsonl:8）却照样发了该字段
+    ⇒ 它**不依赖** anthropic-beta 头（旧注释把 SDK 能力位与 wire 字段混为一谈）。
+    现按实测补发（值取 constants.EAGER_INPUT_STREAMING，实测为 true）。
     """
     out: list[dict] = []
     for item in tools or []:
@@ -643,6 +707,8 @@ def _map_tools(tools) -> list[dict]:
             "name": name,
             "description": str(fn.get("description") or ""),
             "input_schema": schema,  # spec:563 input_schema{type:object,properties,required}
+            # MITM 实测 2026-09-30 dump-003:83（27/27，推理路径专属；无 anthropic-beta 配套）。
+            "eager_input_streaming": bool(EAGER_INPUT_STREAMING),
         }
         cc = _sanitize_cache_control(_cache_control_of(fn) or _cache_control_of(item))
         if cc:
@@ -710,11 +776,16 @@ def _resolve_thinking(model: str, payload: dict, entry) -> dict | None:
     且目录思考控制语义必须是 on/off 开关（constants.THINKING_CONTROL_ON_OFF，
     spec:527-528），否则不发（宁缺毋滥）。
 
-    ⚠️ 绝不把 ``reasoning_effort`` 引进这条路径：``reasoning:{effort:...}`` 只在
-    openai-responses 方言存在（spec:530），Anthropic 路径的 MiniMax 思考是开关
-    不是档位（spec:524-533）。网关上游若注入了 reasoning_effort，本函数**故意无视**
-    （TODO：如将来要映射 effort→output_config.effort，那是通用 Anthropic 路径的
-    事，见 spec:541-544，与 MiniMax 受管开关无关，开关 SEND_OUTPUT_CONFIG_EFFORT）。
+    **display 伴生字段**：MITM 实测 2026-09-30（dump-001:67-69 / dump-002:1783-1785）
+    实测 ``thinking: {"type":"adaptive","display":"summarized"}``。出处：
+    MITM-VERIFIED-FINDINGS.md §1D / §3 G05。⚠️ 实测来自 **count_tokens 请求**；
+    推理路径实测**不发** thinking（dump-003 全文 0 处 `"thinking"`），但我们仍按
+    调用方意图支持它（网关是 Anthropic 兼容面）。
+
+    ⚠️ 本函数**不读** ``reasoning_effort`` —— 但那不再是"故意无视"，而是**分工**：
+    实测证明 effort 走**另一条载体** ``output_config.effort``（dump-003:1822-1823），
+    不是 thinking 的档位。旧注释的"受管路径不发 effort"推论已被实测推翻，映射改在
+    :func:`_effort_from_reasoning_effort` 里做（见那里的长注释）。
     """
     if model not in THINKING_MODEL_IDS:
         return None
@@ -743,7 +814,7 @@ def _resolve_thinking(model: str, payload: dict, entry) -> dict | None:
     if enabled is None and isinstance(payload.get("thinking_enabled"), bool):
         enabled = payload["thinking_enabled"]  # 网关自有布尔位（可配置入口）
     if enabled is None:
-        # 通用 bool 位兜底；reasoning_effort **故意不读**（见 docstring 红线）。
+        # 通用 bool 位兜底；reasoning_effort 归 output_config.effort（见 docstring 的分工说明）。
         for key in ("reasoning", "include_reasoning"):
             value = payload.get(key)
             if isinstance(value, bool):
@@ -755,7 +826,12 @@ def _resolve_thinking(model: str, payload: dict, entry) -> dict | None:
     if enabled is None:
         default = (entry or {}).get("thinking", {}).get("default_enabled")
         enabled = DEFAULT_THINKING_ENABLED if default is None else bool(default)
-    return {"type": THINKING_TYPE_ADAPTIVE if enabled else THINKING_TYPE_DISABLED}
+    return {
+        "type": THINKING_TYPE_ADAPTIVE if enabled else THINKING_TYPE_DISABLED,
+        # MITM 实测 2026-09-30 dump-001:67-69：display 是 thinking 的伴生字段，
+        # 实测值 summarized（on/off 都带 ⇒ 与开关状态无关地照发）。
+        THINKING_DISPLAY_FIELD: THINKING_DISPLAY_SUMMARIZED,
+    }
 
 
 def _resolve_max_tokens(payload: dict, entry) -> int:
@@ -792,8 +868,11 @@ def _output_config_from_response_format(payload: dict) -> dict | None:
     spec:565：``payload.output_config.format = {type:'json_schema', schema}``；
     ``json_object`` 需要目录声明 support_json_object_output —— 内置目录**未**声明
     （constants.SUPPORT_JSON_OBJECT_OUTPUT=False）⇒ 显式报错而不是降级成"尽力而为"。
-    TODO(spec:544,565)：output_config.effort 属通用 Anthropic 档位路径，受管
-    MiniMax 不发（SEND_OUTPUT_CONFIG_EFFORT=False）。
+
+    返回的 dict **只承载 format**；effort 由 :func:`_effort_from_reasoning_effort`
+    单独产出，两者在 :func:`build_anthropic_payload` 里**合并进同一个
+    output_config**（互不覆盖）。旧版这里只有 format、且断言"受管不发 effort"
+    —— 该断言已被 MITM 实测 2026-09-30 推翻（dump-003:1822-1823）。
     """
     rf = payload.get("response_format")
     if not isinstance(rf, dict):
@@ -817,6 +896,38 @@ def _output_config_from_response_format(payload: dict) -> dict | None:
     raise PayloadError(f"unsupported response_format type {typ!r}")
 
 
+def _effort_from_reasoning_effort(payload: dict) -> str:
+    """OpenAI ``reasoning_effort`` → Anthropic ``output_config.effort``。
+
+    **MITM 实测 2026-09-30 推翻了旧判断**（旧版恒 `SEND_OUTPUT_CONFIG_EFFORT=False`，
+    理由是"受管 MiniMax 思考是 on/off 开关、不是档位"）：
+      * 推理路径实测 ``output_config: {"effort":"default"}``（dump-003:1822-1823），
+        且**完全不发** thinking（dump-003 全文无该键）⇒ 推理路径的思考档位**就是**
+        由 output_config.effort 承载的（MITM-VERIFIED-FINDINGS §4.3）。
+      * 取值 ``"default"`` **不在** spec:544 的 low|medium|high|xhigh|max 里
+        ⇒ 它是"未显式选档"的**显式表达**（constants.EFFORT_DEFAULT）。
+
+    映射规则（**实测优先，但不编造未验证值**）：
+      * 调用方给合法值（在 constants.EFFORT_VALUES 内）⇒ 透传该值；
+      * 给了 "none"/"minimal" 等"关思考"词 ⇒ 回退 default（实测客户端不省字段，
+        总是显式下发一个 effort；关思考由 thinking 开关表达，与 effort 不同轴）；
+      * 没给 / 非法值 ⇒ **`"default"`**（与实测客户端行为一致，不再"故意无视"）。
+    ⚠️ 残余不确定（R03）：实测只观测到 `"default"`，其余档位是否被上游接受**未证实**
+    ⇒ 只白名单透传，非法值绝不原样撞上游。
+    """
+    raw = payload.get("reasoning_effort")
+    if isinstance(raw, str):
+        value = raw.strip().lower()
+        if value in REASONING_EFFORT_OFF_VALUES:
+            # "none"/"minimal" 是**关思考**词、不是 effort 档位（关思考由 thinking 开关
+            # 表达，与 effort 不同轴）⇒ 回退实测基线值，绝不把非档位词原样撞上游。
+            return EFFORT_DEFAULT
+        if value in EFFORT_VALUES:
+            return value
+        # 其余非法值：不猜，回退实测基线值。
+    return EFFORT_DEFAULT  # MITM 实测 2026-09-30 dump-003:1823
+
+
 def build_anthropic_payload(inner_model, openai_payload) -> dict:
     """OpenAI Chat Completions 请求体 → MiniMax Code 的 Anthropic Messages 请求体。
 
@@ -830,8 +941,10 @@ def build_anthropic_payload(inner_model, openai_payload) -> dict:
       （spec:688 落地要点 1；spec:691 元素形状 {type:"text",text:...}）。
     * content block 化 / tool_use / tool_result：spec:563,688。
     * max_tokens 必填 + 兜底：spec:176,691（见 _resolve_max_tokens 注释）。
-    * 思考 on/off：spec:441,524-533,691 —— 仅 M3；``reasoning.effort`` 不引
-      （spec:530 属 openai-responses 方言）。
+    * 思考 on/off + display：spec:441,524-533,691 + MITM 实测 2026-09-30（dump-001:67-69）
+      —— 仅 M3 族；``reasoning_effort`` **不**进 thinking，而是映射到
+      ``output_config.effort``（实测 dump-003:1822-1823，见 _effort_from_reasoning_effort）。
+    * tools[].eager_input_streaming：MITM 实测 2026-09-30（dump-003:83，27/27）⇒ 补发。
     * cache_control 只留 {type:"ephemeral"}、**ttl 剥掉**：spec:564。
     * **不发** document：spec:562（PDF 走本地转换，本期未实现 ⇒ 显式拒绝）。
     * 体积/附件上限 spec:554-557：超限**直接报错**（本期不做 files/upload，
@@ -894,8 +1007,19 @@ def build_anthropic_payload(inner_model, openai_payload) -> dict:
         anthropic["thinking"] = thinking  # spec:441,531,691
 
     output_config = _output_config_from_response_format(payload)
+    # MITM 实测 2026-09-30（dump-003:1822-1823）：推理路径实测 `output_config:{effort:"default"}`。
+    # ⚠️ format 与 effort **必须合并进同一个 dict**，不能互相覆盖：
+    #   * 只有 format（json_schema）时 → {"format": {...}, "effort": "default"}
+    #   * 只有 effort 时            → {"effort": "default"}（实测形状，客户端就是这么发的）
+    #   * 两者都有时                → {"format": {...}, "effort": <值>}
+    if SEND_OUTPUT_CONFIG_EFFORT:  # 实测为 True；开关保留只为"实测再变时可回退"
+        effort = _effort_from_reasoning_effort(payload)
+        if output_config is None:
+            output_config = {"effort": effort}
+        else:
+            output_config.setdefault("effort", effort)  # 不覆盖调用方可能已给的 effort
     if output_config:
-        anthropic["output_config"] = output_config  # spec:176,565
+        anthropic[OUTPUT_CONFIG_FIELD] = output_config  # spec:176,565 + MITM 实测 2026-09-30
 
     user = payload.get("user")
     if isinstance(user, (str, int)) and str(user):
@@ -1011,6 +1135,12 @@ class AnthropicStreamState:
         message_start 的值兜底 ⇒ 网关允许 usage 分批下发」。
         逐字段合并：delta 有值取 delta，否则回退 start（多次 message_delta 已在
         feed 里合并更新，这里只处理"缺字段"）。
+
+        ⚠️ MITM 实测 2026-09-30（capture.jsonl:11）：usage 还带第 5 个嵌套字段
+        ``output_tokens_details.thinking_tokens``。它**不在** ``USAGE_FIELDS`` 四项
+        口径里（那是 total 的求和口径，不能扩），但必须**一并合并**，否则思考 token
+        在流式路径上会被丢掉（只有 message_delta 或只有 message_start 时都可能缺）。
+        合并后由 ``normalize_usage`` 提取（见那里的实现）。
         """
         merged: dict = {}
         for field in USAGE_FIELDS:
@@ -1021,6 +1151,14 @@ class AnthropicStreamState:
                 value = self.usage_start.get(field)
             if value is not None:
                 merged[field] = value
+        # MITM 实测 2026-09-30：第 5 个嵌套字段单独合并（不进 USAGE_FIELDS，故不影响 total）。
+        details = None
+        for source in (self.usage_delta, self.usage_start):
+            if isinstance(source, dict) and isinstance(source.get(USAGE_OUTPUT_TOKENS_DETAILS), dict):
+                details = source[USAGE_OUTPUT_TOKENS_DETAILS]
+                break
+        if details is not None:
+            merged[USAGE_OUTPUT_TOKENS_DETAILS] = details
         self.usage_final = normalize_usage(merged)
         return self.usage_final
 
@@ -1438,3 +1576,112 @@ def to_openai_completion(anthropic_body, requested_model: str | None = None) -> 
         "choices": [{"index": 0, "message": message, "finish_reason": finish}],
         "usage": normalize_usage(body.get("usage")),
     }
+
+
+# ============================================================
+# __main__ 自检：纯函数、全程离线（零网络、零 IO、零凭证）
+# ============================================================
+
+def _self_check() -> None:  # pragma: no cover - 离线自检脚本
+    """把 2026-09-30 MITM 实测的方言结论钉成不变量（每条标 dump 出处）。
+
+    实测优先于旧静态断言：旧断言里"受管路径不发 effort / tools 不带
+    eager_input_streaming / thinking 只有 type"三条已被实测推翻，这里改成
+    断言**实测形状**（不放宽成无断言）。
+    """
+    base = {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}]}
+
+    # --- G03：output_config.effort 实测必发，值 default（dump-003:1822-1823）---
+    out = build_anthropic_payload("MiniMax-M3", dict(base))
+    assert out["output_config"] == {"effort": EFFORT_DEFAULT} == {"effort": "default"}, out
+    # 合法 reasoning_effort 映射到 output_config.effort（不再"故意无视"）。
+    out = build_anthropic_payload("MiniMax-M3", dict(base, reasoning_effort="high"))
+    assert out["output_config"]["effort"] == "high", out
+    assert build_anthropic_payload(
+        "MiniMax-M3", dict(base, reasoning_effort="ultra")
+    )["output_config"]["effort"] == EFFORT_DEFAULT  # 非法值回退实测基线，不撞上游
+    assert build_anthropic_payload(
+        "MiniMax-M3", dict(base, reasoning_effort="none")
+    )["output_config"]["effort"] == EFFORT_DEFAULT  # "关思考"词不是档位
+    # format 与 effort **共存**于同一个 output_config，互不覆盖。
+    merged = build_anthropic_payload("MiniMax-M3", dict(base, response_format={
+        "type": "json_schema", "json_schema": {"schema": {"type": "object"}}}))
+    assert merged["output_config"]["effort"] == EFFORT_DEFAULT, merged["output_config"]
+    assert merged["output_config"]["format"]["type"] == OUTPUT_CONFIG_FORMAT_TYPE_JSON_SCHEMA
+    # 只有 effort 时形状与实测逐字一致（客户端就是这么发的）。
+    assert list(out["output_config"]) == ["effort"], out["output_config"]
+
+    # --- G05/次要1：thinking 带 display（实测 dump-001:67-69，来自 count_tokens）---
+    entry = model_entry("MiniMax-M3")
+    assert _resolve_thinking("MiniMax-M3", {}, entry) == {
+        "type": THINKING_TYPE_ADAPTIVE, THINKING_DISPLAY_FIELD: "summarized"}
+    assert _resolve_thinking(
+        "MiniMax-M3", {"thinking": {"type": "disabled"}}, entry
+    ) == {"type": THINKING_TYPE_DISABLED, THINKING_DISPLAY_FIELD: "summarized"}
+    # 实测默认模型同样吃 thinking（dump-001:42,67-69 同一模型）。
+    assert _resolve_thinking(DEFAULT_MODEL, {}, model_entry(DEFAULT_MODEL))[
+        THINKING_DISPLAY_FIELD] == "summarized"
+    # M2.7 系仍不发（spec:512-515 无 thinking_config；实测未覆盖）。
+    assert _resolve_thinking("MiniMax-M2.7", {}, model_entry("MiniMax-M2.7")) is None
+
+    # --- 次要2/G04：tools[].eager_input_streaming 实测 27/27 全带（dump-003:83）---
+    tools = _map_tools([{"type": "function", "function": {"name": "t"}}])
+    assert tools[0]["eager_input_streaming"] is True, tools[0]
+    # 它不依赖 anthropic-beta（实测 headerPresence 为 null）⇒ 本模块绝不产该头。
+    assert "anthropic-beta" not in json.dumps(tools)
+
+    # --- G06/次要3：usage.output_tokens_details.thinking_tokens 提取，但不进 total ---
+    usage = normalize_usage({
+        "input_tokens": 21769, "output_tokens": 85,
+        "cache_read_input_tokens": 2627,
+        "output_tokens_details": {"thinking_tokens": 57},
+    })
+    assert usage["output_tokens_details"] == {"thinking_tokens": 57}, usage      # 原生键
+    assert usage["completion_tokens_details"] == {"reasoning_tokens": 57}, usage  # OpenAI 风格
+    assert usage["prompt_tokens"] == 21769 + 2627 == 24396, usage
+    assert usage["completion_tokens"] == 85, usage
+    # ⚠️ total 仍是四项之和（thinking 是 output 的子集，绝不 +57）。
+    assert usage["total_tokens"] == 24396 + 85 == 24481, usage
+    assert usage["total_tokens"] != 24481 + 57, usage
+    # 流式路径同样要合并该字段（message_delta 或 message_start 任一携带都行）。
+    state = AnthropicStreamState(model="MiniMax-M3", created=1)
+    feed_event(state, {"type": "message_start", "message": {
+        "id": "m", "usage": {"input_tokens": 10, "cache_read_input_tokens": 5}}})
+    feed_event(state, {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                       "usage": {"output_tokens": 7,
+                                 "output_tokens_details": {"thinking_tokens": 4}}})
+    feed_event(state, {"type": "message_stop"})
+    streamed = finish_state(state)
+    assert streamed["output_tokens_details"] == {"thinking_tokens": 4}, streamed
+    assert streamed["total_tokens"] == 15 + 7 == 22, streamed                    # 10+5+7
+    assert get_terminal_chunk(state)["usage"] == streamed
+
+    # --- G02：实测默认模型进目录（constants 负责），这里钉住翻译层能路由它 ---
+    assert build_anthropic_payload(DEFAULT_MODEL, {
+        "model": DEFAULT_MODEL, "messages": [{"role": "user", "content": "x"}],
+    })["model"] == DEFAULT_MODEL
+    assert _normalize_model_ref("minimax/" + DEFAULT_MODEL) == DEFAULT_MODEL
+
+    # --- 回归：既有铁律不能被上面的改动带坏 ---
+    assert normalize_usage({
+        "input_tokens": 11, "output_tokens": 5,
+        "cache_read_input_tokens": 7, "cache_creation_input_tokens": 2,
+    })["total_tokens"] == 25                                                     # spec:619 四项之和
+    assert map_stop_reason("end_turn") == "stop" and map_stop_reason("tool_use") == "tool_calls"
+    assert parse_event_data(b"[DONE]") is None                                   # spec:595 上游无哨兵
+    truncated = AnthropicStreamState(model="MiniMax-M3", created=1)
+    feed_event(truncated, {"type": "message_start", "message": {"id": "m"}})
+    try:
+        finish_state(truncated)
+        raise AssertionError("缺 message_stop 必须抛截断错误（spec:591）")
+    except AnthropicStreamTruncatedError as exc:
+        assert "message_stop" in str(exc)
+    # 无 tools 时绝不凭空造 tools/output_config 之外的键。
+    plain = build_anthropic_payload("MiniMax-M3", dict(base))
+    assert "tools" not in plain and "thinking" in plain, plain
+
+    print("minimax-code translate.py self-check OK (offline: 纯函数, 零网络, 零凭证)")
+
+
+if __name__ == "__main__":
+    _self_check()

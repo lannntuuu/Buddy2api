@@ -28,7 +28,7 @@ python -m src.gateway.server
 | Bailian | 关(opt-in) | Web 配置：通道管理页选 Bailian 通道后粘贴 API Key 即可 |
 | MiniMax Code | 关（opt-in） | `%USERPROFILE%\.minimax\auth\prod\cn\mcode-public\auth.json`（桌面端明文 JSON，只读快照） |
 
-路径不对时可用 `CB_AUTH_DIR`、`CB_QCLAW_AUTH_DIR`、`CB_QWENWORK_AUTH_DIR`、`CB_QODERCN_AUTH_DIR`、`CB_TRAEWORK_AUTH_DIR` 指定。各通道的登录文件不要混在同一个目录里。Trae SOLO 的凭证 JSON 可用 `CB_TRAESOLO_AUTH_DIR` 指定扫描目录（可选）。Qoder 默认为 opt-in：本机 Qoder CN 登录缓存可导入、查额度、发起对话（协议已冻结，见设计文档 Appendix A）；机器指纹默认读 `%USERPROFILE%\.qoder-cn\.auth\machine_id`，可用 `CB_QODERCN_MACHINE_ID` 覆盖。GMI 不读本机登录目录，靠管理页导入 API Key。MiniMax Code 同为 opt-in，登录目录可用 `CB_MINIMAX_CODE_AUTH_DIR` 覆盖；它只**只读**读取桌面端那份 `auth.json`，不回写（与运行中的桌面客户端共用同一份登录态会互相顶掉，详见 [docs/minimax-code-usage.md](docs/minimax-code-usage.md)）。
+路径不对时可用 `CB_AUTH_DIR`、`CB_QCLAW_AUTH_DIR`、`CB_QWENWORK_AUTH_DIR`、`CB_QODERCN_AUTH_DIR`、`CB_TRAEWORK_AUTH_DIR` 指定。各通道的登录文件不要混在同一个目录里。Trae SOLO 的凭证 JSON 可用 `CB_TRAESOLO_AUTH_DIR` 指定扫描目录（可选）。Qoder 默认为 opt-in：本机 Qoder CN 登录缓存可导入、查额度、发起对话（协议已冻结，见设计文档 Appendix A）；机器指纹默认读 `%USERPROFILE%\.qoder-cn\.auth\machine_id`，可用 `CB_QODERCN_MACHINE_ID` 覆盖。GMI 不读本机登录目录，靠管理页导入 API Key。MiniMax Code 同为 opt-in，登录目录可用 `CB_MINIMAX_CODE_AUTH_DIR` 覆盖；它只**只读**读取桌面端那份 `auth.json`，不回写（与运行中的桌面客户端共用同一份登录态会互相顶掉，详见 [docs/minimax-code-usage.md](docs/minimax-code-usage.md)）。MiniMax Code 默认模型是 `MiniMax-M3.1-Flash-Preview`（2026-09-30 抓包实测客户端在用；原 `MiniMax-M3` / `MiniMax-M2.7` / `MiniMax-M2.7-highspeed` 三档仍在白名单）。
 
 ## 注意事项
 
@@ -180,7 +180,7 @@ python -m src.gateway.server
 |---|---|
 | Base URL | `http://127.0.0.1:8787/v1` |
 | API Key | 管理页创建，已绑定通道 |
-| 模型 | WorkBuddy：`auto` / `glm-5.2`。QClaw：`auto` 或 `qclaw/default`。QwenWork：`auto` 或 `qwork-advanced`。TraeWork：`auto` 或 `qwen-3.7-plus`。Trae SOLO：`auto` / `glm-5.2` / `traesolo/...`（官方可见模型 15 个，完整列表见 `/v1/models`；可用「模型配置 → 刷新官方模型表」弹窗勾选） |
+| 模型 | WorkBuddy：`auto` / `glm-5.2`。QClaw：`auto` 或 `qclaw/default`。QwenWork：`auto` 或 `qwork-advanced`。TraeWork：`auto` 或 `qwen-3.7-plus`。Trae SOLO：`auto` / `glm-5.2` / `traesolo/...`（官方可见模型 15 个，完整列表见 `/v1/models`；可用「模型配置 → 刷新官方模型表」弹窗勾选）。MiniMax Code：`auto`（= `MiniMax-M3.1-Flash-Preview`）/ `minimax/MiniMax-M3.1-Flash-Preview` / `MiniMax-M3` / `MiniMax-M2.7` / `MiniMax-M2.7-highspeed` |
 | Stream | 建议开 |
 
 接口：`/v1/chat/completions`、`/v1/responses`、`/v1/models`。没加前缀的 `auto` 走这把 Key 绑定的通道。Codex 用 Responses 接口；管理页选 Codex 类型的 Key 会按 Codex 特征 prompt 做清洗（其它客户端借用这把 Key、但没有 Codex 特征时不改写）。

@@ -28,6 +28,9 @@
      请求头 ``x-api-key: sk-xxx`` + ``Authorization: Bearer``；``/v1`` 净效果只一份；
      绝不回写客户端 auth.json（哨兵文件内容 + mtime 双重校验）。
  10. facade 可用性 —— 9 核心方法齐备 + ``fetch_quota`` 恒 ``unsupported=True``。
+ 11. **MITM 实测 2026-09-30 回归（文末 §11）** —— 会话 id 形状 / 浏览器直连头 /
+     output_config.effort 与 format 共存 / 新默认模型目录 / thinking.display /
+     tools[].eager_input_streaming / usage.thinking_tokens 提取且 total 口径不变。
 
 凭证安全：全程只用假值 ``AT-FAKE`` / ``RT-FAKE``；零真实网络（MockTransport 拦截
 全部请求），不向 MiniMax 生产 API 发任何包。
@@ -35,6 +38,7 @@
 
 import asyncio
 import json
+import re
 import shutil
 import time
 import uuid
@@ -50,12 +54,18 @@ from providers.minimax_code import chat, store
 from providers.minimax_code import translate as T
 from providers.minimax_code.constants import (
     ALIASES,
+    ANTHROPIC_DANGEROUS_DIRECT_BROWSER_ACCESS,
     ANTHROPIC_ERROR_TYPE_TO_CODE,
     API_KEY_PLACEHOLDER,
     CHANNEL_ID,
     CHAT_PATH,
     DEFAULT_MODEL,
     DISPLAY_NAME,
+    EAGER_INPUT_STREAMING,
+    EFFORT_DEFAULT,
+    EFFORT_LEVELS,
+    HEADER_ANTHROPIC_BETA,
+    HEADER_ANTHROPIC_DANGEROUS_DIRECT_BROWSER_ACCESS,
     LLM_AUTH_ERROR,
     LLM_CLUSTER_OVERLOADED,
     LLM_CREDITS_EXHAUSTED,
@@ -63,11 +73,19 @@ from providers.minimax_code.constants import (
     LLM_RATE_LIMITED,
     LLM_TPM_RATE_LIMITED,
     LLM_UPSTREAM_ERROR,
+    MAVIS_SESSION_ID_HEX_LEN,
+    MAVIS_SESSION_ID_PREFIX,
     STATIC_MODELS,
+    THINKING_DISPLAY_FIELD,
+    THINKING_DISPLAY_SUMMARIZED,
     TOKEN_PATH,
     UPSTREAM_ERROR_CODES,
     UPSTREAM_STATUS_CODE_MAP,
+    USAGE_COMPLETION_TOKENS_DETAILS,
     USAGE_LIMIT_EXCEEDED,
+    USAGE_OUTPUT_TOKENS_DETAILS,
+    USAGE_REASONING_TOKENS,
+    USAGE_THINKING_TOKENS,
 )
 from storage import database as db
 
@@ -453,21 +471,30 @@ def test_build_payload_max_tokens_default_and_clamp():
 
 
 def test_build_payload_thinking_only_for_m3():
-    """M3 发 thinking{adaptive|disabled}；M2.7 系**不发**（spec:526-533 只实证 M3）。"""
+    """M3 族发 thinking{adaptive|disabled}（**带 display 伴生字段**）；M2.7 系不发。
+
+    ⚠️ MITM 实测 2026-09-30（dump-001:67-69）把 thinking 的形状补成
+    ``{type, display:"summarized"}`` —— 旧断言只比 ``{"type": ...}`` 已不成立；
+    display 的专项回归见文末 §11 的 ``test_thinking_carries_display_field``。
+    """
     base = {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}]}
-    assert T.build_anthropic_payload("MiniMax-M3", dict(base, thinking={"type": "adaptive"}))["thinking"] == {"type": "adaptive"}
-    assert T.build_anthropic_payload("MiniMax-M3", dict(base, thinking={"type": "disabled"}))["thinking"] == {"type": "disabled"}
+    assert T.build_anthropic_payload("MiniMax-M3", dict(base, thinking={"type": "adaptive"}))["thinking"] == {
+        "type": "adaptive", "display": "summarized"}
+    assert T.build_anthropic_payload("MiniMax-M3", dict(base, thinking={"type": "disabled"}))["thinking"] == {
+        "type": "disabled", "display": "summarized"}
     # 默认（未给开关）跟随目录 default_enabled=True
-    assert T.build_anthropic_payload("MiniMax-M3", dict(base))["thinking"] == {"type": "adaptive"}
+    assert T.build_anthropic_payload("MiniMax-M3", dict(base))["thinking"] == {
+        "type": "adaptive", "display": "summarized"}
 
     m27 = {"model": "MiniMax-M2.7", "messages": [{"role": "user", "content": "hi"}]}
     for model in ("MiniMax-M2.7", "MiniMax-M2.7-highspeed"):
         out = T.build_anthropic_payload(model, dict(m27, model=model, thinking={"type": "adaptive"}))
         assert "thinking" not in out, model
-    # reasoning_effort 属 openai-responses 方言（spec:530），Anthropic 路径绝不翻译它
+    # reasoning_effort 不进 thinking（它是另一条载体）：MITM 实测 2026-09-30 证明
+    # 推理路径用 output_config.effort（dump-003:1822-1823），thinking 仍是 on/off。
     out = T.build_anthropic_payload("MiniMax-M3", dict(base, reasoning_effort="high"))
-    assert out["thinking"] == {"type": "adaptive"}
-    assert "output_config" not in out  # effort 档位不下发（SEND_OUTPUT_CONFIG_EFFORT=False）
+    assert out["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert out["output_config"] == {"effort": "high"}  # 档位走 output_config（旧断言"不发"被推翻）
 
 
 def test_build_payload_keeps_cache_control_but_drops_ttl():
@@ -1267,13 +1294,18 @@ def test_facade_fetch_quota_is_honestly_unsupported():
 
 
 def test_facade_models_aliases_and_translation():
-    """facade 的模型面：目录三档、别名翻回原生 id、目录外 id 宽松兜底。"""
+    """facade 的模型面：目录四档、别名翻回原生 id、目录外 id 宽松兜底。
+
+    ⚠️ MITM 实测 2026-09-30（dump-003:53）：默认模型已改为
+    ``MiniMax-M3.1-Flash-Preview``（旧断言写死 ``MiniMax-M3`` 已不成立），
+    目录随之多出该档；模型目录的专项回归见文末 §11。
+    """
     assert [item["id"] for item in PROVIDER.list_models()] == list(STATIC_MODELS)
     for item in PROVIDER.list_models():
         assert item["display_name"] and item["max_input_tokens"] > 0
     assert PROVIDER.alias_map() == dict(ALIASES)
     assert PROVIDER.accepts_model("auto") is True
-    assert PROVIDER.translate_model("auto") == DEFAULT_MODEL == "MiniMax-M3"
+    assert PROVIDER.translate_model("auto") == DEFAULT_MODEL == "MiniMax-M3.1-Flash-Preview"
     assert PROVIDER.translate_model("minimax/MiniMax-M2.7") == "MiniMax-M2.7"
     # 目录外 id 走宽松兜底（spec:520,710 的远端目录），不编造能力。
     assert PROVIDER.accepts_model("MiniMax-M3.1") is False
@@ -1311,3 +1343,289 @@ def test_facade_parse_credentials_adapts_paste_wrapping():
     # 已是凭证文档形状时原样交给 store（不被包装键嗅探打偏）。
     direct = PROVIDER.parse_credentials(json.dumps(FROZEN_AUTH_DOC))
     assert direct["uid"] == "uid-fake-subject"
+
+
+# ============================================================
+# 11) MITM 实测 2026-09-30 回归（抓包已结束；全部离线，零真实请求）
+# ------------------------------------------------------------
+# 证据来源：.tmp/mitm/minimax-code-20260919/dumps/req-20260930-172559-00{1,2,3}.json
+#   * 003 = POST /v1/messages（主请求，HTTP/2 + TLSv1.3，1 条真实消息、零重放）
+#   * 001/002 = POST /v1/messages/count_tokens（对照，本通道不实现）
+# 每个用例都对应一条"实测把静态推断推翻/补全"的缺口，不是覆盖率凑数。
+# 全程只用假凭证；凭证在 dump 里已脱敏为 ***，本文件不还原、不落任何 token。
+# ============================================================
+
+# 实测会话 id（dump-003:34）：mvs_ + 32 位小写 hex。
+# 这里只用它的**形状**做正则，不把抓包里的 id 当测试输入。
+SESSION_ID_RE = re.compile(r"^mvs_[0-9a-f]{32}$")
+
+
+def test_session_id_shape_is_mvs_plus_32_hex():
+    """缺口 1 回归：``new_session_id()`` 恒为 ``mvs_`` + 32 位小写 hex。
+
+    MITM 实测 2026-09-30（dump-003:34 / dump-001:31 / dump-002:31）：
+    ``x-mavis-session-id: mvs_312d6855b7a74b4990b9faf170aecd4f``。
+    旧实现是 ``str(uuid.uuid4())``（带连字符、无前缀）⇒ 形状不符。
+    多次调用都断言（防止"只是恰好第一次对"的假修复），并覆盖两条出网路径：
+    ``request_headers`` 缺省生成、以及显式传入的 id 被原样保留。
+    """
+    assert MAVIS_SESSION_ID_PREFIX == "mvs_"
+    assert MAVIS_SESSION_ID_HEX_LEN == 32
+
+    seen: set[str] = set()
+    for _ in range(64):
+        session_id = chat.new_session_id()
+        assert SESSION_ID_RE.match(session_id), session_id
+        assert "-" not in session_id           # 旧值 uuid4 带连字符 ⇒ 这条直接钉死回归
+        assert session_id == session_id.lower()  # 实测是小写 hex
+        seen.add(session_id)
+    assert len(seen) == 64                     # 每请求一个，不复用（实测的会话级语义见 docstring）
+
+    # 请求头里的实际取值同样满足形状（两条路径共用同一个生成点）。
+    headers = chat.request_headers({"access_token": FAKE_AT})
+    assert SESSION_ID_RE.match(headers["X-Mavis-Session-Id"]), headers["X-Mavis-Session-Id"]
+    # 显式传入的 session_id 原样透传（401 重放沿用同一个 id，不新开会话）。
+    pinned = chat.request_headers({"access_token": FAKE_AT}, session_id="mvs_" + "0" * 32)
+    assert pinned["X-Mavis-Session-Id"] == "mvs_" + "0" * 32
+
+
+def test_request_headers_send_dangerous_direct_browser_access_without_beta(
+    isolated_db, no_retry_delay
+):
+    """缺口 2 回归：实测必发 ``anthropic-dangerous-direct-browser-access: true``，且**无** beta。
+
+    MITM 实测 2026-09-30（dump-003:27）：主请求 24 个头里有该头；而
+    ``capture.jsonl:8`` 的 ``headerPresence["anthropic-beta"] = null`` 且 dump-003
+    全文无 ``anthropic-beta`` ⇒ 两者**不是**配套关系，别顺手加 beta。
+    反面断言（``anthropic-beta`` 必须缺席）是本节的重点：只断言"有前者"会漏掉
+    "有人为了保险把 beta 一起加上"这种回归。
+    """
+    headers = chat.request_headers({"access_token": FAKE_AT})
+    assert HEADER_ANTHROPIC_DANGEROUS_DIRECT_BROWSER_ACCESS == "anthropic-dangerous-direct-browser-access"
+    assert ANTHROPIC_DANGEROUS_DIRECT_BROWSER_ACCESS == "true"
+    assert headers[HEADER_ANTHROPIC_DANGEROUS_DIRECT_BROWSER_ACCESS] == "true"
+    # 大小写不敏感比对（httpx 头名大小写不敏感，避免用错拼法写出假绿）。
+    lowered = {name.lower(): value for name, value in headers.items()}
+    assert lowered["anthropic-dangerous-direct-browser-access"] == "true"
+    assert HEADER_ANTHROPIC_BETA not in lowered
+    assert "anthropic-beta" not in lowered
+    assert not any("beta" in name for name in lowered)
+
+    # 端到端：假 200 请求真的把这套头发上去了（头清单不是只活在常量表里）。
+    _add_account("uid-mitm-headers")
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={
+            "id": "msg_h", "type": "message", "role": "assistant", "model": DEFAULT_MODEL,
+            "content": [{"type": "text", "text": "pong"}], "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    chat.set_transport(httpx.MockTransport(handler))
+    kind, _completion = asyncio.run(chat.chat_completions(
+        {"model": DEFAULT_MODEL, "messages": [{"role": "user", "content": "hi"}], "stream": False},
+        None))
+    assert kind == "json"
+    assert len(requests) == 1
+    sent = {name.lower(): value for name, value in requests[0].headers.items()}
+    assert sent["anthropic-dangerous-direct-browser-access"] == "true"
+    assert "anthropic-beta" not in sent
+    assert SESSION_ID_RE.match(sent["x-mavis-session-id"]), sent["x-mavis-session-id"]
+
+
+def test_build_payload_always_sends_output_config_effort():
+    """缺口 3 回归：无 ``response_format`` 时也产出 ``output_config == {"effort":"default"}``。
+
+    MITM 实测 2026-09-30（dump-003:1822-1823）：推理路径实测
+    ``output_config: {"effort":"default"}`` ⇒ 旧实现 ``SEND_OUTPUT_CONFIG_EFFORT=False``
+    恒不发 effort 已被推翻（客户端把"未显式选档"也**显式下发**）。
+    映射规则：合法档位透传；"关思考"词（none/minimal/…）与非法值回退 ``default``。
+    """
+    assert T.SEND_OUTPUT_CONFIG_EFFORT is True
+    assert EFFORT_DEFAULT == "default"
+    base = {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}]}
+
+    # 没给 reasoning_effort ⇒ 仍然显式发 default（这就是实测形状）。
+    assert T.build_anthropic_payload("MiniMax-M3", dict(base))["output_config"] == {"effort": "default"}
+    # 合法档位逐个透传（含实测基线 default 与 spec:544 的通用档位）。
+    for effort in (EFFORT_DEFAULT,) + EFFORT_LEVELS:
+        out = T.build_anthropic_payload("MiniMax-M3", dict(base, reasoning_effort=effort))
+        assert out["output_config"] == {"effort": effort}, effort
+    # 大小写/空白归一后仍命中白名单。
+    assert T.build_anthropic_payload("MiniMax-M3", dict(base, reasoning_effort=" HIGH "))["output_config"] == {
+        "effort": "high"}
+    # "关思考"词与非法值**绝不原样撞上游**（残余不确定 R03：只白名单透传）。
+    for bogus in ("none", "minimal", "disabled", "off", "ultra", "", "   ", 42, True, None, ["high"]):
+        out = T.build_anthropic_payload("MiniMax-M3", dict(base, reasoning_effort=bogus))
+        assert out["output_config"] == {"effort": "default"}, bogus
+
+
+def test_build_payload_output_config_format_and_effort_coexist():
+    """缺口 3 重点：``response_format=json_schema`` 时 **format 与 effort 共存**、互不覆盖。
+
+    实现里两者合并进同一个 ``output_config``（``setdefault``）—— 最危险的回归是
+    其中一条把另一条**整个 dict 覆盖掉**（历史 bug 形状：只有 format、或只有 effort）。
+    故这里同时断言：两个键都在、format 内容一字不差、effort 跟随 reasoning_effort。
+    """
+    base = {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}]}
+    schema = {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}
+    rf = {"response_format": {"type": "json_schema", "json_schema": {"name": "lookup", "schema": schema}}}
+
+    only_format = T.build_anthropic_payload("MiniMax-M3", dict(base, **rf))["output_config"]
+    assert only_format["format"] == {"type": "json_schema", "schema": schema}
+    assert only_format["effort"] == "default"          # format 存在时 effort 也不能丢
+
+    both = T.build_anthropic_payload("MiniMax-M3", dict(base, **rf, reasoning_effort="low"))["output_config"]
+    assert both == {"format": {"type": "json_schema", "schema": schema}, "effort": "low"}
+    # 键集合恰好两个：既没丢，也没被塞进未实测的第三个键。
+    assert set(both) == {"format", "effort"}
+
+    # 非法 effort 与 format 共存时只把 effort 打回 default，format 一字不变。
+    degraded = T.build_anthropic_payload("MiniMax-M3", dict(base, **rf, reasoning_effort="none"))["output_config"]
+    assert degraded == {"format": {"type": "json_schema", "schema": schema}, "effort": "default"}
+
+    # json_object 仍显式拒绝（目录未声明 support_json_object_output，spec:565），不因 effort 改动而放宽。
+    with pytest.raises(T.PayloadError):
+        T.build_anthropic_payload("MiniMax-M3", dict(base, response_format={"type": "json_object"}))
+
+
+def test_model_catalog_gains_m3_1_flash_preview_as_default():
+    """缺口 4 回归：``MiniMax-M3.1-Flash-Preview`` 进目录且是默认；原三档仍在。
+
+    MITM 实测 2026-09-30（dump-003:53 / dump-001:42 / dump-002:42 三处一致）：
+    客户端在用的模型就是这一档，而旧 catalog 没有它 ⇒ 请求会落到宽松兜底（能力位全靠猜）。
+    同时钉住 ``max_tokens=128000``（dump-003:68）与 ``ALIASES["auto"]`` 的指向。
+    """
+    assert "MiniMax-M3.1-Flash-Preview" in STATIC_MODELS
+    assert DEFAULT_MODEL == "MiniMax-M3.1-Flash-Preview"
+    assert STATIC_MODELS[0] == DEFAULT_MODEL                    # 目录首位 = 默认档
+    assert ALIASES["auto"] == DEFAULT_MODEL                     # auto 别名指向它
+    assert ALIASES["minimax/MiniMax-M3.1-Flash-Preview"] == DEFAULT_MODEL
+    assert PROVIDER.translate_model("auto") == DEFAULT_MODEL
+
+    # 原三档一个都没被删（仍是可路由目录项）。
+    for legacy in ("MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"):
+        assert legacy in STATIC_MODELS, legacy
+        assert ALIASES[f"minimax/{legacy}"] == legacy
+        assert PROVIDER.accepts_model(legacy) is True
+
+    entry = chat.model_meta(DEFAULT_MODEL)
+    assert entry["id"] == DEFAULT_MODEL and entry["display_name"] == DEFAULT_MODEL
+    assert entry["max_output_tokens"] == 128_000                # dump-003:68 max_tokens=128000
+    assert entry["tool_call"] is True                           # dump-003 带 27 个 tools
+    # 目录外 id 仍走宽松兜底、且**不**进目录（无后缀的 M3.1 实测未见，禁止擅自加）。
+    assert PROVIDER.accepts_model("MiniMax-M3.1") is False
+    assert "MiniMax-M3.1" not in STATIC_MODELS
+
+
+def test_thinking_carries_display_field():
+    """缺口 5 回归：产出的 thinking 带 ``display: "summarized"`` 伴生字段。
+
+    MITM 实测 2026-09-30（dump-001:67-69 / dump-002:1783-1785，count_tokens）：
+    ``thinking: {"type":"adaptive","display":"summarized"}`` —— 旧静态假设只知 ``type``。
+    on/off **都带** display（它与开关状态无关），故两个方向都断言。
+    """
+    assert THINKING_DISPLAY_FIELD == "display"
+    assert THINKING_DISPLAY_SUMMARIZED == "summarized"
+    base = {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}]}
+
+    on = T.build_anthropic_payload("MiniMax-M3", dict(base, thinking={"type": "adaptive"}))["thinking"]
+    off = T.build_anthropic_payload("MiniMax-M3", dict(base, thinking={"type": "disabled"}))["thinking"]
+    assert on == {"type": "adaptive", "display": THINKING_DISPLAY_SUMMARIZED}
+    assert off == {"type": "disabled", "display": THINKING_DISPLAY_SUMMARIZED}
+    # 值域不编造：实测只见 summarized，别扩成 low/high 之类的臆测档。
+    assert on["display"] == "summarized" and off["display"] == "summarized"
+
+    # 目录里两个 M3 族条目的 variants 同样带 display（目录与翻译层不得漂移）。
+    from providers.minimax_code.constants import MODEL_CATALOG
+
+    for model in ("MiniMax-M3", "MiniMax-M3.1-Flash-Preview"):
+        variants = MODEL_CATALOG[model]["variants"]
+        assert variants["thinking"]["thinking"][THINKING_DISPLAY_FIELD] == THINKING_DISPLAY_SUMMARIZED, model
+        assert variants["none-thinking"]["thinking"][THINKING_DISPLAY_FIELD] == THINKING_DISPLAY_SUMMARIZED, model
+
+
+def test_tools_all_carry_eager_input_streaming():
+    """缺口 6 回归：每个 tool 都带 ``eager_input_streaming is True``（27/27 实测）。
+
+    MITM 实测 2026-09-30（dump-003:83，共 27 处）：推理路径的 tools 全部带该字段，
+    而两次 count_tokens 的同一批 tool **0/27 带** ⇒ 推理路径专属，且**不依赖**
+    ``anthropic-beta`` 头（实测该头为 null）。旧 TODO"属 beta 特性故不发"已被推翻。
+    """
+    assert EAGER_INPUT_STREAMING is True
+    payload = T.build_anthropic_payload(DEFAULT_MODEL, {
+        "model": DEFAULT_MODEL,
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [
+            {"type": "function", "function": {
+                "name": f"tool_{index}",
+                "description": f"第 {index} 个",
+                "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+            }}
+            for index in range(27)   # 与实测规模一致（27 个工具）
+        ],
+    })
+    tools = payload["tools"]
+    assert len(tools) == 27
+    for tool in tools:
+        assert tool["eager_input_streaming"] is True, tool["name"]
+    # 一个都不能漏：字段出现次数 == 工具数（防"只给第一个加"的假修复）。
+    assert json.dumps(payload).count('"eager_input_streaming": true') == 27
+    # 该字段不依赖 anthropic-beta：请求头清单里没有它（与缺口 2 的断言互相印证）。
+    assert HEADER_ANTHROPIC_BETA not in chat.request_headers({"access_token": FAKE_AT})
+
+
+def test_usage_extracts_thinking_tokens_without_changing_total():
+    """缺口 7 回归：``output_tokens_details.thinking_tokens`` 被提取，**total 口径不变**。
+
+    MITM 实测 2026-09-30（capture.jsonl:11 / dump-003 响应）：
+    ``usage: {"input_tokens":21769,"output_tokens":85,"cache_read_input_tokens":2627,
+    "output_tokens_details":{"thinking_tokens":57}}``。
+    ``thinking_tokens`` 是 ``output_tokens`` 的**子集**（57/85）⇒ 绝不能加进 total
+    （total 恒 = input + output + cache_read + cache_creation 四项求和）。
+    """
+    assert USAGE_OUTPUT_TOKENS_DETAILS == "output_tokens_details"
+    assert USAGE_THINKING_TOKENS == "thinking_tokens"
+
+    # 与实测同形的样本（只搬数字形状，不含任何凭证）。
+    sample = {
+        "input_tokens": 21_769, "output_tokens": 85,
+        "cache_read_input_tokens": 2_627,
+        "output_tokens_details": {"thinking_tokens": 57},
+    }
+    usage = T.normalize_usage(sample)
+    assert usage[USAGE_OUTPUT_TOKENS_DETAILS] == {USAGE_THINKING_TOKENS: 57}      # 原生实测键保留
+    assert usage[USAGE_COMPLETION_TOKENS_DETAILS] == {USAGE_REASONING_TOKENS: 57}  # OpenAI 风格槽位
+    # 口径不变：total 仍是四项求和，**不含** thinking_tokens。
+    assert usage["total_tokens"] == 21_769 + 85 + 2_627 == 24_481
+    assert usage["total_tokens"] != 24_481 + 57
+    assert usage["completion_tokens"] == 85          # 不因 thinking 变成 85+57
+    assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+
+    # 无 thinking 时两个明细键都不出现（不虚增、不塞 0）。
+    plain = T.normalize_usage({"input_tokens": 3, "output_tokens": 1})
+    assert USAGE_OUTPUT_TOKENS_DETAILS not in plain
+    assert USAGE_COMPLETION_TOKENS_DETAILS not in plain
+
+    # 流式路径：thinking_tokens 只在 message_start 或只在 message_delta 时都要能合并上来。
+    start_only = T.AnthropicStreamState(model=DEFAULT_MODEL, created=1)
+    T.feed_event(start_only, {"type": "message_start", "message": {
+        "id": "msg_t1", "usage": dict(sample)}})
+    T.feed_event(start_only, {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                              "usage": {"output_tokens": 85}})
+    T.feed_event(start_only, {"type": "message_stop"})
+    merged = T.finish_state(start_only)   # 返回**归一 usage 本体**（不是包一层的 dict）
+    assert merged[USAGE_OUTPUT_TOKENS_DETAILS] == {USAGE_THINKING_TOKENS: 57}
+    assert merged["total_tokens"] == 24_481
+
+    delta_only = T.AnthropicStreamState(model=DEFAULT_MODEL, created=1)
+    T.feed_event(delta_only, {"type": "message_start", "message": {
+        "id": "msg_t2", "usage": {"input_tokens": 10}}})
+    T.feed_event(delta_only, {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                              "usage": {"output_tokens": 4,
+                                        "output_tokens_details": {"thinking_tokens": 2}}})
+    T.feed_event(delta_only, {"type": "message_stop"})
+    final = T.finish_state(delta_only)
+    assert final[USAGE_OUTPUT_TOKENS_DETAILS] == {USAGE_THINKING_TOKENS: 2}
+    assert final["total_tokens"] == 10 + 4        # 仍不含 thinking_tokens
