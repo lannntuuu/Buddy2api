@@ -148,9 +148,28 @@ _ANTHROPIC_ERROR_TYPES: dict[str, int] = {
 # 与 qclaw / qwenwork / qodercn 的同名单行拷贝收敛：见 store_common.make_translator。
 # reserved=内置 ALIASES：管理员自定义别名表却没带 "auto" 时，"auto" 仍落到 M3 ——
 # 上游目录（spec:499-516）里没有 "auto" 这个 id，保留字必须在本侧翻成具体模型。
-translate_model = store_common.make_translator(
+_base_translate_model = store_common.make_translator(
     lambda: channel_aliases(CHANNEL_ID, ALIASES), DEFAULT_MODEL, reserved=dict(ALIASES)
 )
+
+
+def translate_model(model: str) -> str:
+    """别名映射 + **通道 id 前缀剥离**（本通道包一层，不改 store_common 的共享实现）。
+
+    ⚠️ 实机回归 2026-09-30：OpenAI 客户端的标准写法 ``minimax_code/auto`` **整串没被
+    剥掉**，原样发给上游 ⇒ 400 ``invalid params, invalid reasoning_effort: "default"
+    (allowed: low, medium, high, xhigh, max) (2013)``。
+
+    注意这个错误信息是**误导性的**：真凶是模型名不合法（上游把未知 model 当参数解析），
+    不是 effort。实测对照过——``model="auto"`` 与显式 ``reasoning_effort="default"``
+    都**成功**（HTTP 200），证明 ``"default"`` 上游是接受的。
+
+    前缀有三套命名，别混：
+      * ``minimax/`` ``minimax_api/`` —— spec:518 上游 model-ref 的 provider 名；
+      * ``minimax_code/`` —— **本网关的通道 id**，OpenAI 客户端侧 ``<channel>/<model>`` 写法。
+    make_translator 只查别名表、不剥前缀；剥离逻辑统一走 T._normalize_model_ref。
+    """
+    return _base_translate_model(T._normalize_model_ref(model))
 
 
 # ============================================================

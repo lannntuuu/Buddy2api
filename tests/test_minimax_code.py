@@ -1668,3 +1668,34 @@ def test_opaque_token_falls_back_to_login_epoch_uid(monkeypatch, tmp_path):
     # 同一 loginEpoch 两次导入 ⇒ 同一 uid ⇒ upsert 走更新而不是新增。
     again, _ = S._parse_auth_json(doc, source="test://auth.json")
     assert again["uid"] == parsed["uid"]
+
+
+def test_channel_id_prefix_is_stripped():
+    """实机回归：``minimax_code/<model>`` 的**通道 id 前缀**必须被剥掉。
+
+    2026-09-30 真机：``model="minimax_code/auto"`` 整串发给上游 ⇒ 400
+    ``invalid params, invalid reasoning_effort: "default" (allowed: low, medium,
+    high, xhigh, max) (2013)``。
+
+    ⚠️ 这个错误信息是**误导性的**：真凶是模型名不合法（上游把未知 model 当参数解析），
+    不是 effort。同一批真机对照证明 ``model="auto"`` 与显式 ``reasoning_effort=
+    "default"`` 都返回 200 ⇒ ``"default"`` 上游是接受的，别再去"修" effort。
+
+    三套前缀不是同一层命名，都要剥：``minimax/``、``minimax_api/``（spec:518 上游
+    model-ref 的 provider 名）与 ``minimax_code/``（**本网关通道 id**，OpenAI 客户端
+    侧 ``<channel>/<model>`` 写法）。剥离后还必须能落到具体模型（带 thinking），
+    不能只剥成 ``"auto"`` 就完事。
+    """
+    from providers.minimax_code import chat as C
+
+    for spelling in ("auto", "minimax_code/auto", "minimax/auto", "minimax_api/auto",
+                     "minimax_code/MiniMax-M3.1-Flash-Preview"):
+        inner = C.translate_model(spelling)
+        assert inner == DEFAULT_MODEL, f"{spelling} -> {inner}"
+        built = T.build_anthropic_payload(inner, {
+            "model": spelling, "messages": [{"role": "user", "content": "hi"}]})
+        # 关键：发给上游的是具体模型 id，绝不能带任何前缀/保留字。
+        assert built["model"] == DEFAULT_MODEL, f"{spelling} -> {built['model']}"
+        assert "/" not in built["model"]
+        # 落到具体模型 ⇒ 该带的方言字段也跟着对（M3 族发 thinking）。
+        assert built["thinking"] == {"type": "adaptive", "display": THINKING_DISPLAY_SUMMARIZED}

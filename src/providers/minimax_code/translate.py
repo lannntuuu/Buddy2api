@@ -362,15 +362,22 @@ def normalize_usage(anthropic_usage) -> dict:
 # ============================================================
 
 def _normalize_model_ref(value: str) -> str:
-    """去掉客户端可能带的 ``minimax/`` / ``minimax_api/`` 前缀（spec:518）。
+    """去掉客户端可能带的 ``minimax/`` / ``minimax_api/`` / ``minimax_code/`` 前缀。
 
     客户端 model 引用键 = provider/modelId；constants.ALIASES 已收录带前缀写法，
     这里是最后一道兜底（调用方传裸 id 时是恒等操作）。
+
+    ⚠️ 实机回归 2026-09-30：``minimax_code/auto`` **整串没被剥掉**，直接当模型名发给
+    上游 ⇒ 400 ``invalid params ... (2013)``。原因是 spec:518 的 ``minimax`` /
+    ``minimax_api`` 是**上游 model-ref 的 provider 名**，而 ``minimax_code`` 是
+    **本网关的通道 id**（OpenAI 客户端侧的标准写法 ``<channel>/<model>``），两者
+    不是同一层命名 ⇒ 原先只剥前两个，第三个漏了。
     """
     text = str(value or "").strip()
     for prefix in (
         MANAGED_MODEL_REF_PREFIX + MODEL_KEY_SEPARATOR,
         BYOK_MODEL_REF_PREFIX + MODEL_KEY_SEPARATOR,
+        CHANNEL_ID + MODEL_KEY_SEPARATOR,   # 通道 id 前缀（实机回归）
     ):
         if text.lower().startswith(prefix.lower()):
             return text[len(prefix):]
