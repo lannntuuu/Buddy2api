@@ -1632,3 +1632,39 @@ def test_usage_extracts_thinking_tokens_without_changing_total():
     final = T.finish_state(delta_only)
     assert final[USAGE_OUTPUT_TOKENS_DETAILS] == {USAGE_THINKING_TOKENS: 2}
     assert final["total_tokens"] == 10 + 4        # 仍不含 thinking_tokens
+
+
+def test_opaque_token_falls_back_to_login_epoch_uid(monkeypatch, tmp_path):
+    """实机回归：``accessToken`` 是不透明串 ⇒ 回退 ``loginEpoch`` 做 uid 才能去重。
+
+    2026-09-30 本机真实 ``auth.json`` 实测：记录只有 accessToken/refreshToken/
+    clientId/expiresAtMs/generation/loginEpoch/audience/scopes/tokenType/schemaVersion，
+    **没有** ``subject``/``accountId``，且 ``accessToken`` 是 **60 字符、只有 1 段、
+    不是 JWT**（base64 解不出 header ⇒ ``_jwt_claims`` 恒空）⇒ uid 恒为空。
+
+    后果实测过：连导 2 次得到 **2 行**（``store_common.upsert_account`` 只在 uid
+    非空时匹配）。修法是回退 ``loginEpoch``（spec:294 同一次登录内不变；刷新只轮
+    ``generation`` 不动它）。这里用与真实记录**同形**的合成数据锁定该行为。
+    """
+    import time
+    from providers.minimax_code import store as S
+
+    opaque = "x" * 60   # 与实测同长、同样只有 1 段（不是 JWT）
+    doc = {"schemaVersion": 1, "records": {
+        "mcode-public": {
+            "accessToken": opaque, "refreshToken": "y" * 60,
+            "clientId": "mcode-public", "audience": "agent-backend",
+            "expiresAtMs": int(time.time() * 1000) + 3_600_000,
+            "generation": 7, "loginEpoch": "ef8e9a66-082b-4263-ba0d-571f58610883",
+            "scopes": ["agent.default"], "tokenType": "Bearer", "schemaVersion": 1,
+        }
+    }}
+    parsed, reason = S._parse_auth_json(doc, source="test://auth.json")
+    assert parsed is not None and reason == "", reason
+    # 关键：uid 非空且锚定在 loginEpoch 上（不是空串、也不是 -user 兜底）。
+    assert parsed["uid"] == "loginEpoch:ef8e9a66-082b-4263-ba0d-571f58610883"
+    # 不透明 token 不得被误当成 JWT 去解（解不出就当没有 claim，不抛异常）。
+    assert parsed["access_token"] == opaque
+    # 同一 loginEpoch 两次导入 ⇒ 同一 uid ⇒ upsert 走更新而不是新增。
+    again, _ = S._parse_auth_json(doc, source="test://auth.json")
+    assert again["uid"] == parsed["uid"]

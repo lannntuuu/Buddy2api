@@ -441,6 +441,19 @@ def _record_to_account(record: dict, *, source: str = "") -> tuple[dict | None, 
     # subject/accountId 是可选键（spec:293，types.js:44-45），来自 JWT 的 sub / account_id
     # claim（oauth-client.js:205-206）；都没有时 uid 为空 ⇒ upsert 无法按 uid 去重，
     # 只会新增行，管理页需人工合并。
+    #
+    # ⚠️ 实测（2026-09-30 本机真实 auth.json）：这两类键**一次都没出现**——
+    # 真实记录只有 accessToken/refreshToken/clientId/expiresAtMs/generation/
+    # loginEpoch/audience/scopes/tokenType/schemaVersion，且 `accessToken` 是
+    # **60 字符不透明串、只有 1 段、不是 JWT**（base64 解不出 header）⇒ 上面的
+    # JWT 兜底恒为空，uid 永远拿不到。后果不是"标签丑"，而是**每次导入都新增一行**
+    # （store_common.upsert_account 只在 uid 非空时做匹配，实测连导 2 次得 2 行）。
+    # ⇒ 回退到 `loginEpoch`：spec:294 明确"同一次登录内不变"，刷新只轮 generation
+    # 不动它（实测 generation=7 而 loginEpoch 稳定），是本机唯一稳定可用的账号标识。
+    if not uid:
+        login_epoch = _as_str(record.get("loginEpoch") or record.get("login_epoch"))
+        if login_epoch:
+            uid = f"loginEpoch:{login_epoch}"
     scope_text = " ".join(scopes) if scopes else " ".join(_scope_list(claims.get("scope") or claims.get("scp")))
     return (
         _account_dict(
