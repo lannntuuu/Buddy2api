@@ -13,12 +13,19 @@ from providers.workbuddy import PROVIDER as WORKBUDDY
 
 
 @pytest.fixture()
-def fake_settings(monkeypatch):
-    """In-memory settings store; avoids touching the real DB / tmp dirs."""
+def fake_settings(isolated_db, monkeypatch):
+    """In-memory settings store; avoids touching the real DB / tmp dirs.
+
+    isolated_db 是必需的：模型限额重构（584d35a）之后 channel_model_view 会直接读
+    accounts / settings 两张表（`db.setting_exists` 判通道级自定义、workbuddy 分支的
+    `db.list_accounts_summary` 取账号名），这些调用**绕过**下面的 get_setting 桩，
+    没有真库就 `sqlite3.OperationalError: no such table`（本文件 11 个用例曾因此全红）。
+    """
     store: dict = {}
     monkeypatch.setattr(db, "get_setting", lambda key, default=None: store.get(key, default))
     monkeypatch.setattr(db, "set_setting", lambda key, value: store.__setitem__(key, value))
     monkeypatch.setattr(db, "delete_setting", lambda key: store.pop(key, None))
+    monkeypatch.setattr(db, "setting_exists", lambda key: key in store)
     return store
 
 
@@ -177,6 +184,37 @@ def test_qodercn_channel_model_view_exposes_native_keys_with_display_names(fake_
     assert details["dmodel"]["context_window"] == 96_000
     # 每个 id 都应有非空展示名
     assert all(d.get("display_name") for d in view["model_details"])
+
+
+def test_minimax_code_channel_model_view_exposes_static_models(isolated_db, fake_settings):
+    """MiniMax Code 通道必须能在「模型配置」页打开。
+
+    回归点：`_CHANNEL_DEFAULTS` 曾漏掉 minimax_code —— 与 qodercn 那次事故**同一个
+    坑**：新通道注册进 providers/_LOADED 后忘了在 control_plane 补默认表，
+    `channel_model_view` 直接抛 KeyError，管理页该通道的「模型配置」整页打不开
+    （`channel_model_view` 由 admin 路由直调，异常冒泡成 500）。
+
+    这里额外钉住：models == STATIC_MODELS（目录三档，顺序一致）且每项
+    display_name 非空 —— 展示名靠 chat.model_meta 从 MODEL_CATALOG 取，
+    空展示名会让前端下拉出现空白项。
+    """
+    from providers.minimax_code.constants import STATIC_MODELS
+
+    view = control_plane.channel_model_view("minimax_code")
+    assert view["channel"] == "minimax_code"
+    assert view["models"] == list(STATIC_MODELS)
+    assert view["defaults"]["models"] == list(STATIC_MODELS)
+    assert view["customized"] == {"models": False, "aliases": False}
+
+    details = {d["id"]: d for d in view["model_details"]}
+    assert set(details) == set(STATIC_MODELS)
+    for model in STATIC_MODELS:
+        assert details[model]["display_name"], f"{model} 缺展示名"
+        # 没有官方倍率表 ⇒ rate=None + official=False（不编造价格）
+        assert details[model]["rate"] is None
+        assert details[model]["official"] is False
+        assert details[model]["context_window"] > 0
+    assert details["MiniMax-M3"]["display_name"] == "MiniMax-M3"
 
 
 def test_set_channel_models_roundtrip_and_reset(fake_settings):

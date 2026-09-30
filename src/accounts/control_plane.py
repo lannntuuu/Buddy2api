@@ -30,6 +30,8 @@ from providers.traework.constants import ALIASES as _TRAEWORK_DEFAULT_ALIASES
 from providers.traework.constants import STATIC_MODELS as _TRAEWORK_DEFAULT_MODELS
 from providers.traesolo.constants import ALIASES as _TRAESOLO_DEFAULT_ALIASES
 from providers.traesolo.constants import STATIC_MODELS as _TRAESOLO_DEFAULT_MODELS
+from providers.minimax_code.constants import ALIASES as _MINIMAX_CODE_DEFAULT_ALIASES
+from providers.minimax_code.constants import STATIC_MODELS as _MINIMAX_CODE_DEFAULT_MODELS
 
 logger = logging.getLogger(__name__)
 
@@ -366,6 +368,12 @@ _CHANNEL_DEFAULTS: dict[str, tuple[list[str], dict[str, str]]] = {
     "qodercn": (list(_QODERCN_DEFAULT_MODELS), dict(_QODERCN_DEFAULT_ALIASES)),
     "traework": (list(_TRAEWORK_DEFAULT_MODELS), dict(_TRAEWORK_DEFAULT_ALIASES)),
     "traesolo": (list(_TRAESOLO_DEFAULT_MODELS), dict(_TRAESOLO_DEFAULT_ALIASES)),
+    # minimax_code：缺这条会让「模型配置」页 channel_model_view 抛 KeyError
+    # （同 tests/test_channel_models.py 里 qodercn 的回归先例）。
+    "minimax_code": (
+        list(_MINIMAX_CODE_DEFAULT_MODELS),
+        dict(_MINIMAX_CODE_DEFAULT_ALIASES),
+    ),
 }
 
 

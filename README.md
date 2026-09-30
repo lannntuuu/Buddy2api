@@ -26,8 +26,9 @@ python -m src.gateway.server
 | Qoder | 关（opt-in） | `%APPDATA%\com.qodercn.app.stable` / `%APPDATA%\QoderCN` |
 | GMI | 关（opt-in） | Web 配置：通道管理页选 GMI 通道后粘 API Key 即可 |
 | Bailian | 关(opt-in) | Web 配置：通道管理页选 Bailian 通道后粘贴 API Key 即可 |
+| MiniMax Code | 关（opt-in） | `%USERPROFILE%\.minimax\auth\prod\cn\mcode-public\auth.json`（桌面端明文 JSON，只读快照） |
 
-路径不对时可用 `CB_AUTH_DIR`、`CB_QCLAW_AUTH_DIR`、`CB_QWENWORK_AUTH_DIR`、`CB_QODERCN_AUTH_DIR`、`CB_TRAEWORK_AUTH_DIR` 指定。各通道的登录文件不要混在同一个目录里。Trae SOLO 的凭证 JSON 可用 `CB_TRAESOLO_AUTH_DIR` 指定扫描目录（可选）。Qoder 默认为 opt-in：本机 Qoder CN 登录缓存可导入、查额度、发起对话（协议已冻结，见设计文档 Appendix A）；机器指纹默认读 `%USERPROFILE%\.qoder-cn\.auth\machine_id`，可用 `CB_QODERCN_MACHINE_ID` 覆盖。GMI 不读本机登录目录，靠管理页导入 API Key。
+路径不对时可用 `CB_AUTH_DIR`、`CB_QCLAW_AUTH_DIR`、`CB_QWENWORK_AUTH_DIR`、`CB_QODERCN_AUTH_DIR`、`CB_TRAEWORK_AUTH_DIR` 指定。各通道的登录文件不要混在同一个目录里。Trae SOLO 的凭证 JSON 可用 `CB_TRAESOLO_AUTH_DIR` 指定扫描目录（可选）。Qoder 默认为 opt-in：本机 Qoder CN 登录缓存可导入、查额度、发起对话（协议已冻结，见设计文档 Appendix A）；机器指纹默认读 `%USERPROFILE%\.qoder-cn\.auth\machine_id`，可用 `CB_QODERCN_MACHINE_ID` 覆盖。GMI 不读本机登录目录，靠管理页导入 API Key。MiniMax Code 同为 opt-in，登录目录可用 `CB_MINIMAX_CODE_AUTH_DIR` 覆盖；它只**只读**读取桌面端那份 `auth.json`，不回写（与运行中的桌面客户端共用同一份登录态会互相顶掉，详见 [docs/minimax-code-usage.md](docs/minimax-code-usage.md)）。
 
 ## 注意事项
 
@@ -360,7 +361,7 @@ path = "/var/lib/buddy2api/codebuddy_gateway.db"
 ### 核心 / 启动
 | 变量 | 说明 |
 |---|---|
-| `CB_GATEWAY_PROVIDERS` | 启用哪些通道，逗号分隔。默认 `workbuddy,qclaw,qwenwork,traework,traesolo`。GMI 与 Bailian 是 opt-in，启用加在末尾：`workbuddy,qclaw,qwenwork,traework,traesolo,gmi` 或 `...,bailian` |
+| `CB_GATEWAY_PROVIDERS` | 启用哪些通道，逗号分隔。默认 `workbuddy,qclaw,qwenwork,traework,traesolo`。GMI、Bailian 与 MiniMax Code 是 opt-in，启用加在末尾：`workbuddy,qclaw,qwenwork,traework,traesolo,gmi`、`...,bailian` 或 `...,minimax_code` |
 | `CB_BAILIAN_API_KEY` | 阿里百炼 API Key（opt-in 通道：通道管理页粘贴或此环境变量导入；无活跃账号时自动导入） |
 | `CB_GATEWAY_AUTO_IMPORT` | 设 `1` 则启动时自动扫描导入账号。默认 `0` |
 | `CB_GATEWAY_CHECKIN_GAP_MS` | 一键领取时相邻账号的间隔毫秒（防风控，不可设太小）。默认 `800` |
@@ -382,6 +383,7 @@ path = "/var/lib/buddy2api/codebuddy_gateway.db"
 | TraeWork | `CB_TRAEWORK_AUTH_DIR` | `storage.json` 所在目录 |
 | Trae SOLO | `CB_TRAESOLO_CALLBACK_BASE` | 登录回调基地址（远程部署时指向能从外网访问服务的地址，默认用请求自身地址） |
 | Trae SOLO | `CB_TRAESOLO_AUTH_DIR` * | 凭证 JSON 扫描目录（可选；该通道默认不扫目录，走 Web 登录） |
+| MiniMax Code | `CB_MINIMAX_CODE_AUTH_DIR` * | MiniMax Code 桌面端 auth 根或凭证目录（默认扫 `%USERPROFILE%\.minimax\auth\prod\cn\mcode-public`；只认 prod/cn 命名空间，其它 env/region 目录永不入选） |
 
 > `CB_HOST_AUTH_DIR` 是 Docker 部署脚本内部使用（挂载的本机 WorkBuddy 目录），`CB_CONTAINER_AUTH_DIR` 是容器内的挂载点（默认 `/auth`），一般不用管。
 

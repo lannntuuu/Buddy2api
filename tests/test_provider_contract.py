@@ -1,8 +1,11 @@
 """WS-B provider 协议契约测试(35号方案 §2.3)。
 
-遍历已加载的五家 provider,钉住两层契约:
-- Core:Provider Protocol 的 9 方法 + 3 属性,五家齐备,异步方法必须可 await;
+遍历已加载的六家 provider,钉住两层契约:
+- Core:Provider Protocol 的 9 方法 + 3 属性,六家齐备,异步方法必须可 await;
 - 能力集:各家拥有哪些能力 Protocol 的方法集,声明与实现一致(防漂移)。
+
+minimax_code 是 opt-in 通道(与 gmi/bailian 同列 OPT_IN_PROVIDER_IDS),默认不在启用集,
+故 `_instance` 显式把 ALL_PROVIDERS 写进 CB_GATEWAY_PROVIDERS 才拿得到实例。
 
 仅做存在性/可调用性/异步性检查,不校验参数签名细节(各家能力签名本就允许差异)。
 """
@@ -31,7 +34,8 @@ CORE_METHODS = [
 ]
 CORE_ASYNC = {"pick_account_with_fallback", "has_usable_account", "chat_completions"}
 
-ALL_PROVIDERS = ["workbuddy", "qclaw", "qwenwork", "qodercn", "traework", "traesolo"]
+ALL_PROVIDERS = ["workbuddy", "qclaw", "qwenwork", "qodercn", "traework", "traesolo",
+                 "minimax_code"]
 
 
 def _instance(channel: str, monkeypatch=None):
@@ -75,6 +79,13 @@ def test_capability_matrix(monkeypatch):
         "traework": {"store", "refresh", "test_chat", "quota", "upsert", "checkin"},
         "traesolo": {"store", "refresh", "test_chat", "quota", "upsert", "checkin",
                      "solo_login", "dynamic_models"},
+        # minimax_code（MiniMax Code 桌面受管登录态）：能力集按
+        # providers/minimax_code/__init__.py 的真实实现填 —— Store/Upsert/Refresh/
+        # TestChat/Quota 五顶齐备；无签到面、无登录流（凭证来自客户端 auth.json 只读
+        # 快照）、无动态模型目录 ⇒ 这三个能力**必须**为空。fetch_quota 已实现即标 quota，
+        # 但它是**恒 unsupported** 的诚实占位（spec:663 无额度查询接口）——"有方法"与
+        # "能查到额度"是两回事，能力矩阵只测前者。
+        "minimax_code": {"store", "refresh", "test_chat", "quota", "upsert"},
     }
     for channel, expected in matrix.items():
         provider = _instance(channel, monkeypatch)

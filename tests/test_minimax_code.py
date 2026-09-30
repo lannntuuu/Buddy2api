@@ -1,0 +1,1313 @@
+"""MiniMax Code (``minimax_code``) 通道回归测试：凭证入库 / 目录硬边界 / 方言翻译 /
+流式状态机 / 错误分类 / 限流登记 / 端到端（全程离线，httpx.MockTransport）。
+
+协议权威来源：``.tmp/mitm/minimax-code-20260919/MINIMAX-CODE-LLM-PROTOCOL-SPEC.md``
+（下文 ``spec:NNN`` = 该文件行号）；实现以 ``src/providers/minimax_code/`` 为准。
+
+钉住的回归点（每条都对应一次真实会踩的坑，不是覆盖率凑数）：
+  1. ``store.auth_json_to_account`` —— auth.json 文档 → 账号；凭证原文只准出现在
+     ``access_token``/``refresh_token`` 两个字段里，**绝不进** ``extra``/``name``/
+     ``uid``/``domain`` 等诊断面（脱敏红线）。
+  2. ``store.minimax_auth_dirs`` —— 多实例硬边界（spec:8,669）：只挑 ``prod/cn``，
+     排除 ``en/staging/test/dev``；env 覆盖也**不许**突破该边界。
+  3. ``translate.build_anthropic_payload`` —— OpenAI → Anthropic Messages：
+     system 拆分、tool_calls→tool_use、role:tool→tool_result、input_schema、
+     max_tokens 兜底、thinking 只对 M3 发、cache_control 保留但 ttl 剥掉、
+     document block 显式拒绝（spec:562）。
+  4. 流式状态机 —— 分类**只认** ``data["type"]``，不认 ``event:`` 行
+     （``upstream/sse.py:105`` 丢弃 event 行；本用例故意让 event 标签与内部 type
+     不一致来证明这一点）。
+  5. 截断流（无 ``message_stop``）必须显式判错（spec:591），绝不静默半截回复。
+  6. ``stop_reason`` 四条映射 + usage total = 四字段求和（spec:594,619）。
+  7. ``_classify_error`` —— 八个业务码 + 内层私有码 2056/2067/1400010161 +
+     两套信封（MiniMax / Anthropic）；流内只带 ``error.type`` 时经
+     ``ANTHROPIC_ERROR_TYPE_TO_CODE`` 补出业务码（否则对外错误帧缺 code）。
+  8. 限流 —— record/预判跳过/全限返回体字段名；两套信封的"将在 … UTC+8 重置"
+     都要能解析成解除时刻（按 UTC+8 减 30s 余量）。
+  9. ``chat_completions`` 端到端 —— 假 200 与 假 401→刷新→**单次**重放；
+     请求头 ``x-api-key: sk-xxx`` + ``Authorization: Bearer``；``/v1`` 净效果只一份；
+     绝不回写客户端 auth.json（哨兵文件内容 + mtime 双重校验）。
+ 10. facade 可用性 —— 9 核心方法齐备 + ``fetch_quota`` 恒 ``unsupported=True``。
+
+凭证安全：全程只用假值 ``AT-FAKE`` / ``RT-FAKE``；零真实网络（MockTransport 拦截
+全部请求），不向 MiniMax 生产 API 发任何包。
+"""
+
+import asyncio
+import json
+import shutil
+import time
+import uuid
+from pathlib import Path
+
+import httpx
+import pytest
+
+import upstream.rate_limits as rate_limits
+from accounts import auth_manager
+from providers.minimax_code import PROVIDER
+from providers.minimax_code import chat, store
+from providers.minimax_code import translate as T
+from providers.minimax_code.constants import (
+    ALIASES,
+    ANTHROPIC_ERROR_TYPE_TO_CODE,
+    API_KEY_PLACEHOLDER,
+    CHANNEL_ID,
+    CHAT_PATH,
+    DEFAULT_MODEL,
+    DISPLAY_NAME,
+    LLM_AUTH_ERROR,
+    LLM_CLUSTER_OVERLOADED,
+    LLM_CREDITS_EXHAUSTED,
+    LLM_MIGRATION_ERROR,
+    LLM_RATE_LIMITED,
+    LLM_TPM_RATE_LIMITED,
+    LLM_UPSTREAM_ERROR,
+    STATIC_MODELS,
+    TOKEN_PATH,
+    UPSTREAM_ERROR_CODES,
+    UPSTREAM_STATUS_CODE_MAP,
+    USAGE_LIMIT_EXCEEDED,
+)
+from storage import database as db
+
+FAKE_AT = "AT-FAKE"
+FAKE_RT = "RT-FAKE"
+FAKE_AT_GEN2 = "AT-FAKE-GEN2"
+FAKE_RT_ROTATED = "RT-FAKE-ROTATED"
+
+# 冻结的 auth.json 样本（spec:287-295 的 schemaVersion=1 / records / 逐字段形状）。
+# 键的 ``<account>`` 段是 sha256(authHome\0clientId) 的 base64url（spec:268），
+# 本用例只关心前缀 ``com.minimax.mcode.oauth.prod.cn``，故用可读假哈希。
+FROZEN_RECORD_KEY = "com.minimax.mcode.oauth.prod.cn\0acct-hash-fake"
+FROZEN_AUTH_DOC = {
+    "schemaVersion": 1,
+    "records": {
+        FROZEN_RECORD_KEY: {
+            "schemaVersion": 1,
+            "accessToken": FAKE_AT,
+            "refreshToken": FAKE_RT,
+            "tokenType": "Bearer",
+            "clientId": "mcode-public",
+            "scopes": ["agent.default"],
+            "audience": "agent-backend",
+            "expiresAtMs": 1_893_427_200_000,  # 2030-01-01 00:00:00 UTC+8
+            "generation": 3,
+            "subject": "uid-fake-subject",
+            "loginEpoch": "epoch-fake-1",
+        }
+    },
+}
+
+# 冻结的 Anthropic SSE 序列（spec:578-593 的事件形状）。
+# ⚠️ 每一行的 ``event:`` 标签都**故意**与 data 内层 ``type`` 不一致 —— 回归点：
+#    分类只认 data["type"]（仓库唯一的 SSEDecoder 在 upstream/sse.py:105 丢弃 event 行）。
+#    若有人把实现改成"读 event 行分派"，本序列会立刻崩成解析错/空流。
+FROZEN_ANTHROPIC_SSE = (
+    b'event: content_block_delta\n'
+    b'data: {"type":"message_start","message":{"id":"msg_frozen_1","model":"MiniMax-M3",'
+    b'"usage":{"input_tokens":11,"cache_read_input_tokens":7}}}\n\n'
+    b'event: message_start\n'
+    b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+    b'event: message_stop\n'
+    b'data: {"type":"ping"}\n\n'
+    b'event: content_block_stop\n'
+    b'data: {"type":"content_block_delta","index":0,'
+    # 中文用 JSON \uXXXX 转义写（bytes 字面量只能是 ASCII；解析后仍是"先想"）。
+    b'"delta":{"type":"thinking_delta","thinking":"\\u5148\\u60f3"}}\n\n'
+    b'event: content_block_start\n'
+    b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"pong"}}\n\n'
+    b'event: content_block_delta\n'
+    b'data: {"type":"content_block_start","index":1,'
+    b'"content_block":{"type":"tool_use","id":"toolu_frozen_1","name":"lookup"}}\n\n'
+    b'data: {"type":"content_block_delta","index":1,'
+    b'"delta":{"type":"input_json_delta","partial_json":"{\\"q\\":"}}\n\n'
+    b'data: {"type":"content_block_delta","index":1,'
+    b'"delta":{"type":"input_json_delta","partial_json":"\\"x\\"}"}}\n\n'
+    b'data: {"type":"content_block_delta","index":1,'
+    b'"delta":{"type":"signature_delta","signature":"sig-fake"}}\n\n'
+    b'data: {"type":"content_block_stop","index":1}\n\n'
+    b'event: error\n'
+    b'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},'
+    b'"usage":{"output_tokens":5,"cache_creation_input_tokens":2}}\n\n'
+    b'event: message_start\n'
+    b'data: {"type":"message_stop"}\n\n'
+)
+
+
+# ============================================================
+# fixtures
+# ============================================================
+
+@pytest.fixture(autouse=True)
+def _clean_process_state(monkeypatch):
+    """清进程级全局态 + **焊死出网闸门**。
+
+    清理项：限流表 / 账号失败冷却 / sticky / 刷新负缓存 / 测试 transport。
+    照 ``tests/test_rate_limit_failover.py`` 的 autouse 清理写；漏掉任何一项都会让
+    用例随执行顺序飘红（例如上一个用例把账号打 expired 后下一个用例选不到号）。
+
+    出网闸门（风控红线）：把 chat 与 token 两条链路的 client 工厂默认换成
+    "**拒绝一切真实请求**"的 MockTransport，任何忘记装假 transport 的新用例都会
+    立刻炸成断言失败，而不是悄悄向 MiniMax 生产 API 发包。用例里显式
+    ``chat.set_transport(...)`` / ``monkeypatch token.get_client`` 会覆盖本兜底。
+    """
+    from providers import trae_shared
+    from providers.minimax_code import token as token_module
+
+    def _offline(request: httpx.Request):
+        raise AssertionError(f"测试禁止真实网络请求：{request.method} {request.url}")
+
+    rate_limits.clear()
+    auth_manager._account_failures.clear()
+    auth_manager._sticky_account_id.clear()
+    trae_shared.reset_refresh_failures()
+    chat.set_transport(httpx.MockTransport(_offline))
+    monkeypatch.setattr(
+        token_module, "get_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(_offline)),
+    )
+    yield
+    chat.set_transport(None)
+    rate_limits.clear()
+    auth_manager._account_failures.clear()
+    auth_manager._sticky_account_id.clear()
+    trae_shared.reset_refresh_failures()
+
+
+@pytest.fixture()
+def auth_root():
+    """仓库内临时目录（不用 pytest 的 ``tmp_path``）。
+
+    同 ``tests/conftest.py`` 的 isolated_db 注释：系统 TEMP 根在沙箱下不可枚举，
+    ``tmp_path`` 建目录会慢/失败；仓库 ``.tmp/`` 下自建唯一子目录，测完即删。
+    """
+    workdir = Path(__file__).resolve().parent.parent / ".tmp" / f"minimax-code-{uuid.uuid4().hex[:8]}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    yield workdir
+    shutil.rmtree(workdir, ignore_errors=True)
+
+
+@pytest.fixture()
+def frozen_now(monkeypatch):
+    """冻结 ``rate_limits`` 时钟（epoch 秒），返回可推进的 state dict。"""
+    state = {"now": 1_800_000_000.0}
+    monkeypatch.setattr(rate_limits, "_now", lambda: state["now"])
+    return state
+
+
+@pytest.fixture()
+def no_retry_delay(monkeypatch):
+    """把退避换成零延迟（本文件只验证语义，不验证睡多久）。"""
+    calls: list[tuple] = []
+
+    async def _delay(attempt, retry_after=None):
+        calls.append((attempt, retry_after))
+
+    monkeypatch.setattr(chat, "retry_delay", _delay)
+    return calls
+
+
+@pytest.fixture()
+def fake_settings(monkeypatch):
+    """内存 settings，避免碰真实 DB（同 test_qodercn.py 的 fake_settings）。"""
+    store_: dict = {}
+    monkeypatch.setattr(db, "get_setting", lambda key, default=None: store_.get(key, default))
+    monkeypatch.setattr(db, "set_setting", lambda key, value: store_.__setitem__(key, value))
+    monkeypatch.setattr(db, "delete_setting", lambda key: store_.pop(key, None))
+    return store_
+
+
+def _add_account(uid: str = "uid-e2e-1", *, access: str = FAKE_AT, refresh: str = FAKE_RT) -> dict:
+    """往隔离 DB 里塞一个 active 账号，返回账号行。"""
+    aid = db.add_account({
+        "name": f"{CHANNEL_ID}-{uid[:8]}",
+        "uid": uid,
+        "provider": CHANNEL_ID,
+        "access_token": access,
+        "refresh_token": refresh,
+        "expires_at": int(time.time() * 1000) + 3_600_000,
+        "status": "active",
+        "extra": {"generation": 1},
+    })
+    return db.get_account(aid)
+
+
+async def _drain(stream) -> bytes:
+    """把 ``chat_completions`` 返回的流式 generator 收干成原始 SSE 字节。"""
+    return b"".join([frame async for frame in stream])
+
+
+def _drain_text(kind_result) -> str:
+    """收干流式 generator 并解码成文本（同步包装，供非 async 用例调用）。"""
+    _kind, stream = kind_result
+    return asyncio.run(_drain(stream)).decode("utf-8")
+
+
+def _sse_payloads(raw: bytes) -> list[dict]:
+    """从对外 SSE 文本里抠出非 [DONE] 的 JSON 帧。"""
+    out: list[dict] = []
+    for line in raw.decode("utf-8").splitlines():
+        if line.startswith("data:") and line[5:].strip() != "[DONE]":
+            out.append(json.loads(line[5:].strip()))
+    return out
+
+
+def _write_auth_sentinel(root: Path) -> Path:
+    """在 ``<root>/prod/cn/mcode-public/auth.json`` 写一份哨兵凭证文件（只读快照来源）。"""
+    folder = root / "prod" / "cn" / "mcode-public"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / store.CREDENTIALS_FILENAME
+    path.write_text(json.dumps(FROZEN_AUTH_DOC, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+# ============================================================
+# 1) store.auth_json_to_account
+# ============================================================
+
+def test_auth_json_to_account_maps_frozen_doc():
+    """脱敏 auth.json 样本 → provider/uid/expires_at(整数 ms)/extra 键齐全。"""
+    account = store.auth_json_to_account(FROZEN_AUTH_DOC, source="frozen")
+    assert account is not None
+    assert account["provider"] == CHANNEL_ID
+    assert account["uid"] == "uid-fake-subject"
+    # 仓库约定：expires_at **一律毫秒**（spec:293 expiresAtMs），且必须是 int。
+    assert isinstance(account["expires_at"], int)
+    assert account["expires_at"] == 1_893_427_200_000
+    assert account["account_type"] == "personal"
+
+    extra = account["extra"]
+    for key in ("login_epoch", "generation", "scope", "audience", "build_env", "region",
+                "client_id", "auth_path", "token_type", "source", "shared_credential"):
+        assert key in extra, f"extra 缺键 {key}"
+    assert extra["build_env"] == "prod" and extra["region"] == "cn"  # spec:673 硬边界
+    assert extra["client_id"] == "mcode-public"                       # spec:235
+    assert extra["audience"] == "agent-backend"                       # spec:237
+    assert extra["scope"] == "agent.default"                          # spec:236
+    assert extra["generation"] == 3                                   # spec:294
+    assert extra["login_epoch"] == "epoch-fake-1"                     # spec:294
+    assert extra["shared_credential"] is False                        # 粘贴/文档入口非客户端共用
+    assert account["domain"] == "agent.minimax.cn"                    # spec:88
+
+
+def test_auth_json_to_account_keeps_tokens_out_of_diagnostic_surface():
+    """凭证红线：token 原文只准在 ``access_token``/``refresh_token`` 两个键上。
+
+    ``extra`` / ``name`` / ``nickname`` / ``uid`` / ``domain`` 是日志与管理页诊断面，
+    一旦把 token 抄进去就等于把凭证写进日志（spec:694 的共用凭证尤其致命）。
+    """
+    account = store.auth_json_to_account(FROZEN_AUTH_DOC, source="frozen")
+    assert account is not None
+    assert account["access_token"] == FAKE_AT
+    assert account["refresh_token"] == FAKE_RT
+
+    credential_keys = {"access_token", "refresh_token"}
+    for key, value in account.items():
+        if key in credential_keys:
+            continue
+        assert FAKE_AT not in json.dumps(value, ensure_ascii=False, default=str), key
+        assert FAKE_RT not in json.dumps(value, ensure_ascii=False, default=str), key
+
+    # discover/import 的错误串同样不许含原文（这里走的是解析失败分支）。
+    _parsed, reason = store._parse_auth_json({"schemaVersion": 1, "records": {"x": {}}})
+    assert FAKE_AT not in reason and FAKE_RT not in reason
+
+
+def test_auth_json_to_account_rejects_unknown_schema_version():
+    """文件级与记录级 schemaVersion 不认识 ⇒ None（spec:290，不猜未来格式）。"""
+    assert store.auth_json_to_account({"schemaVersion": 2, "records": {}}) is None
+    assert store.auth_json_to_account({"records": {}}) is None  # 缺 schemaVersion
+    bad_record = json.loads(json.dumps(FROZEN_AUTH_DOC))
+    bad_record["records"][FROZEN_RECORD_KEY]["schemaVersion"] = 99
+    assert store.auth_json_to_account(bad_record) is None
+    assert store.auth_json_to_account("not-a-dict") is None
+
+
+def test_auth_json_to_account_rejects_foreign_namespace_record_key():
+    """第二道硬边界（spec:267,289）：记录键前缀不是 prod.cn 的记录即使被拷进本目录也拒。"""
+    doc = json.loads(json.dumps(FROZEN_AUTH_DOC))
+    doc["records"] = {
+        "com.minimax.mcode.oauth.staging.cn\0acct-hash-fake": doc["records"][FROZEN_RECORD_KEY]
+    }
+    assert store.auth_json_to_account(doc) is None
+
+
+# ============================================================
+# 2) store.minimax_auth_dirs —— 多实例硬边界
+# ============================================================
+
+def test_minimax_auth_dirs_picks_only_prod_cn(monkeypatch, auth_root):
+    """只挑 prod/cn/mcode-public；en/staging/test/dev 目录永不入选（spec:8,669）。"""
+    root = auth_root / "auth"
+    for build_env in ("prod", "staging", "test", "dev"):
+        for region in ("cn", "en"):
+            (root / build_env / region / "mcode-public").mkdir(parents=True)
+    # 干扰项：prod 下别的 clientId、cn 之外的 region 目录。
+    (root / "prod" / "cn" / "some-other-client").mkdir(parents=True)
+    (root / "prod" / "us" / "mcode-public").mkdir(parents=True)
+
+    monkeypatch.setenv(store.ENV_AUTH_DIR, str(root))
+    dirs = [str(p).replace("\\", "/") for p in store.minimax_auth_dirs()]
+
+    assert len(dirs) == 1, dirs
+    assert dirs[0].endswith("/prod/cn/mcode-public"), dirs
+    for banned in ("/en/", "/staging/", "/test/", "/dev/", "some-other-client", "/prod/us/"):
+        assert not any(banned in item for item in dirs), (banned, dirs)
+
+
+def test_minimax_auth_dirs_override_cannot_escape_prod_cn(monkeypatch, auth_root):
+    """env 覆盖指向末段明写着 staging/en 的凭证目录时必须跳过（硬边界不许被覆盖突破）。"""
+    root = auth_root / "auth"
+    foreign = root / "staging" / "cn" / "mcode-public"
+    foreign.mkdir(parents=True)
+    (foreign / store.CREDENTIALS_FILENAME).write_text("{}", encoding="utf-8")
+
+    monkeypatch.setenv(store.ENV_AUTH_DIR, str(foreign))
+    assert store.minimax_auth_dirs() == []
+
+    # 同一路径换成 prod/cn：覆盖是"目录本身就是凭证目录"的合法形态，必须放行。
+    legit = root / "prod" / "cn" / "mcode-public"
+    legit.mkdir(parents=True)
+    (legit / store.CREDENTIALS_FILENAME).write_text("{}", encoding="utf-8")
+    monkeypatch.setenv(store.ENV_AUTH_DIR, str(legit))
+    resolved = [Path(p) for p in store.minimax_auth_dirs()]
+    assert resolved == [legit]
+
+
+def test_minimax_auth_dirs_env_key_name_is_the_documented_one():
+    """覆盖键名 = CB_MINIMAX_CODE_AUTH_DIR（运维文档/脚本按此拼，改名即静默失效）。"""
+    assert store.ENV_AUTH_DIR == "CB_MINIMAX_CODE_AUTH_DIR"
+
+
+# ============================================================
+# 3) translate.build_anthropic_payload
+# ============================================================
+
+def test_build_payload_splits_system_and_maps_tool_calls():
+    """system 提到顶层数组；assistant.tool_calls→tool_use；role:tool→tool_result。"""
+    payload = T.build_anthropic_payload("MiniMax-M3", {
+        "model": "MiniMax-M3",
+        "messages": [
+            {"role": "system", "content": "你是助手"},
+            {"role": "user", "content": "帮我查"},
+            {"role": "assistant", "content": "好的", "tool_calls": [{
+                "id": "call_1", "type": "function",
+                "function": {"name": "lookup", "arguments": '{"q": "x"}'},
+            }]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "结果"},
+        ],
+        "stream": False,
+    })
+    # system 是顶层数组（spec:176,691），**不**留在 messages 里。
+    assert payload["system"] == [{"type": "text", "text": "你是助手"}]
+    assert [m["role"] for m in payload["messages"]] == ["user", "assistant", "user"]
+
+    assistant_blocks = payload["messages"][1]["content"]
+    assert assistant_blocks[0] == {"type": "text", "text": "好的"}
+    tool_use = assistant_blocks[1]
+    assert tool_use["type"] == "tool_use" and tool_use["id"] == "call_1"
+    assert tool_use["name"] == "lookup"
+    assert tool_use["input"] == {"q": "x"}  # arguments 字符串被解析成对象（spec:563）
+
+    tool_result = payload["messages"][2]["content"][0]
+    assert tool_result["type"] == "tool_result"
+    assert tool_result["tool_use_id"] == "call_1"
+    assert tool_result["content"] == [{"type": "text", "text": "结果"}]
+    assert payload["stream"] is False
+
+
+def test_build_payload_maps_tools_to_input_schema():
+    """tools[] → {name,description,input_schema}；缺 parameters 时补空 object。"""
+    payload = T.build_anthropic_payload("MiniMax-M3", {
+        "model": "MiniMax-M3",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [
+            {"type": "function", "function": {
+                "name": "lookup", "description": "查",
+                "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+            }},
+            {"type": "function", "function": {"name": "noargs"}},
+        ],
+    })
+    tools = payload["tools"]
+    assert tools[0]["name"] == "lookup"
+    assert tools[0]["description"] == "查"
+    assert tools[0]["input_schema"] == {
+        "type": "object", "properties": {"q": {"type": "string"}}
+    }
+    assert tools[1]["input_schema"] == {"type": "object", "properties": {}}
+
+
+def test_build_payload_max_tokens_default_and_clamp():
+    """max_tokens 必填（spec:691）：缺失兜底 DEFAULT_MAX_TOKENS，超上限 clamp。"""
+    assert T.DEFAULT_MAX_TOKENS == 32_000  # 网关自择兜底（spec:691 未给默认值）
+    base = {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}]}
+    assert T.build_anthropic_payload("MiniMax-M3", dict(base))["max_tokens"] == T.DEFAULT_MAX_TOKENS
+    assert T.build_anthropic_payload("MiniMax-M3", dict(base, max_tokens=0))["max_tokens"] == T.DEFAULT_MAX_TOKENS
+    assert T.build_anthropic_payload("MiniMax-M3", dict(base, max_tokens=-5))["max_tokens"] == T.DEFAULT_MAX_TOKENS
+    # max_completion_tokens 是 max_tokens 的同义新名
+    assert T.build_anthropic_payload("MiniMax-M3", dict(base, max_completion_tokens=77))["max_tokens"] == 77
+    # 超目录 limit.output（M3=128000）被 clamp 而不是原样撞上游 400
+    assert T.build_anthropic_payload("MiniMax-M3", dict(base, max_tokens=999_999))["max_tokens"] == 128_000
+
+
+def test_build_payload_thinking_only_for_m3():
+    """M3 发 thinking{adaptive|disabled}；M2.7 系**不发**（spec:526-533 只实证 M3）。"""
+    base = {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}]}
+    assert T.build_anthropic_payload("MiniMax-M3", dict(base, thinking={"type": "adaptive"}))["thinking"] == {"type": "adaptive"}
+    assert T.build_anthropic_payload("MiniMax-M3", dict(base, thinking={"type": "disabled"}))["thinking"] == {"type": "disabled"}
+    # 默认（未给开关）跟随目录 default_enabled=True
+    assert T.build_anthropic_payload("MiniMax-M3", dict(base))["thinking"] == {"type": "adaptive"}
+
+    m27 = {"model": "MiniMax-M2.7", "messages": [{"role": "user", "content": "hi"}]}
+    for model in ("MiniMax-M2.7", "MiniMax-M2.7-highspeed"):
+        out = T.build_anthropic_payload(model, dict(m27, model=model, thinking={"type": "adaptive"}))
+        assert "thinking" not in out, model
+    # reasoning_effort 属 openai-responses 方言（spec:530），Anthropic 路径绝不翻译它
+    out = T.build_anthropic_payload("MiniMax-M3", dict(base, reasoning_effort="high"))
+    assert out["thinking"] == {"type": "adaptive"}
+    assert "output_config" not in out  # effort 档位不下发（SEND_OUTPUT_CONFIG_EFFORT=False）
+
+
+def test_build_payload_keeps_cache_control_but_drops_ttl():
+    """cache_control 保留成 {type:"ephemeral"}，长保留 ttl:'1h' 必须剥掉（spec:564）。"""
+    payload = T.build_anthropic_payload("MiniMax-M3", {
+        "model": "MiniMax-M3",
+        "messages": [
+            {"role": "system", "content": [
+                {"type": "text", "text": "长提示", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+            ]},
+            {"role": "user", "content": "hi"},
+        ],
+        "tools": [{"type": "function", "function": {
+            "name": "lookup",
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        }}],
+    })
+    assert payload["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert payload["tools"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "ttl" not in json.dumps(payload, ensure_ascii=False)
+
+    # 未知缓存类型（spec 未枚举）宁缺毋滥：整块标记不发。
+    unknown = T.build_anthropic_payload("MiniMax-M3", {
+        "model": "MiniMax-M3",
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "x", "cache_control": {"type": "persistent"}},
+        ]}],
+    })
+    assert "cache_control" not in unknown["messages"][0]["content"][0]
+
+
+def test_build_payload_rejects_document_block():
+    """document/file 块显式拒绝（spec:562：上游没有 document content block）。"""
+    for part_type in ("document", "file", "input_file"):
+        with pytest.raises(T.PayloadError) as excinfo:
+            T.build_anthropic_payload("MiniMax-M3", {
+                "model": "MiniMax-M3",
+                "messages": [{"role": "user", "content": [{"type": part_type, "source": {}}]}],
+            })
+        assert "spec:562" in str(excinfo.value)
+
+    # system 里的 document 同样拒绝（不是静默丢内容）
+    with pytest.raises(T.PayloadError):
+        T.build_anthropic_payload("MiniMax-M3", {
+            "model": "MiniMax-M3",
+            "messages": [
+                {"role": "system", "content": [{"type": "document", "source": {}}]},
+                {"role": "user", "content": "hi"},
+            ],
+        })
+
+
+def test_build_payload_rejects_empty_messages_and_bad_tool_call():
+    """Anthropic 要求非空 messages；tool_calls 缺 name 直接报错（不静默丢工具）。"""
+    with pytest.raises(T.PayloadError):
+        T.build_anthropic_payload("MiniMax-M3", {"model": "MiniMax-M3", "messages": []})
+    with pytest.raises(T.PayloadError):
+        T.build_anthropic_payload("MiniMax-M3", {
+            "model": "MiniMax-M3",
+            "messages": [{"role": "assistant", "tool_calls": [{"id": "c", "function": {}}]}],
+        })
+
+
+def test_build_payload_strips_managed_model_prefix():
+    """``minimax/MiniMax-M3`` 这类客户端 model-ref 前缀要被剥成上游裸 id（spec:518）。"""
+    payload = T.build_anthropic_payload("minimax/MiniMax-M3", {
+        "model": "minimax/MiniMax-M3",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert payload["model"] == "MiniMax-M3"
+
+
+# ============================================================
+# 4) 流式状态机：冻结 SSE → OpenAI chunk + usage
+# ============================================================
+
+def _pump_frozen_sse() -> tuple[T.AnthropicStreamState, list[dict]]:
+    """用仓库唯一的 SSEDecoder 解冻 FROZEN_ANTHROPIC_SSE，喂进状态机。"""
+    from upstream.sse import SSEDecoder
+
+    decoder = SSEDecoder()
+    payloads = decoder.feed(FROZEN_ANTHROPIC_SSE) + decoder.finish()
+    assert not decoder.parser_error, decoder.parser_error
+
+    state = T.AnthropicStreamState(model="MiniMax-M3", chunk_id="chatcmpl-test", created=1)
+    chunks: list[dict] = []
+    for data in payloads:
+        chunks.extend(T.feed(state, data))
+    return state, chunks
+
+
+def test_stream_classifies_by_inner_type_not_event_line():
+    """只认 ``data["type"]``：event 标签与内部 type 故意不一致也照样正确分派。"""
+    state, chunks = _pump_frozen_sse()
+
+    deltas = [chunk["choices"][0]["delta"] for chunk in chunks]
+    # 首帧 role；随后 thinking→reasoning_content；再 text→content。
+    assert deltas[0] == {"role": "assistant"}
+    assert {"reasoning_content": "先想"} in deltas
+    assert {"content": "pong"} in deltas
+    assert state.saw_message_start and state.saw_message_stop
+    assert state.text_parts == ["pong"]
+    assert state.reasoning_parts == ["先想"]
+
+    # 上游 message id 覆盖出口 chunk id（request 名做 model 覆盖）。
+    assert {chunk["id"] for chunk in chunks} == {"msg_frozen_1"}
+    assert {chunk["model"] for chunk in chunks} == {"MiniMax-M3"}
+    assert all(chunk["object"] == "chat.completion.chunk" for chunk in chunks)
+
+
+def test_stream_accumulates_input_json_delta_into_tool_arguments():
+    """input_json_delta 拼进 tool_calls.arguments；signature_delta 丢弃。"""
+    state, chunks = _pump_frozen_sse()
+
+    tool_frames = [
+        delta["tool_calls"][0]
+        for delta in (chunk["choices"][0]["delta"] for chunk in chunks)
+        if "tool_calls" in delta
+    ]
+    # 第一帧报 id/name，后两帧只带 arguments 增量。
+    assert tool_frames[0]["id"] == "toolu_frozen_1"
+    assert tool_frames[0]["function"]["name"] == "lookup"
+    assert tool_frames[0]["index"] == 0
+    assert "".join(frame["function"]["arguments"] for frame in tool_frames[1:]) == '{"q":"x"}'
+
+    assert state.tool_calls == [{"id": "toolu_frozen_1", "name": "lookup", "arguments": '{"q":"x"}'}]
+    assert state.saw_tool is True
+    # signature_delta 在 OpenAI 方言无槽位 ⇒ 显式丢弃，不进任何帧。
+    assert "sig-fake" not in json.dumps(chunks, ensure_ascii=False)
+
+
+def test_stream_finish_state_emits_terminal_chunk_with_usage():
+    """终结块（finish_reason + usage 合体）只发一次；usage total = 四字段求和。"""
+    state, chunks = _pump_frozen_sse()
+    assert len(chunks) == 6  # role / thinking / text / tool_use / 2×input_json
+
+    usage = T.finish_state(state)
+    assert usage == {
+        "prompt_tokens": 20,           # 11 input + 7 cache_read + 2 cache_creation
+        "completion_tokens": 5,
+        "total_tokens": 25,            # spec:619 四项之和
+        "cache_read_input_tokens": 7,
+        "cache_creation_input_tokens": 2,
+        "prompt_tokens_details": {"cached_tokens": 7, "cache_creation_tokens": 2},
+    }
+    terminal = T.get_terminal_chunk(state)
+    assert terminal["choices"][0]["finish_reason"] == "tool_calls"  # spec:594
+    assert terminal["choices"][0]["delta"] == {}
+    assert terminal["usage"] == usage
+    # 终结块只取一次（重复取返回 None，防止 chat.py 误调两次把结束帧吞掉）。
+    assert T.get_terminal_chunk(state) is None
+
+
+def test_stream_usage_falls_back_to_message_start_when_delta_omits_input_tokens():
+    """spec:596：message_delta 可不带 input_tokens，用 message_start 的值兜底。"""
+    state = T.AnthropicStreamState(model="MiniMax-M3", created=1)
+    T.feed_event(state, {"type": "message_start", "message": {
+        "id": "m", "usage": {"input_tokens": 9, "cache_read_input_tokens": 1}}})
+    T.feed_event(state, {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                         "usage": {"output_tokens": 4}})
+    T.feed_event(state, {"type": "message_stop"})
+    usage = T.finish_state(state)
+    assert usage["prompt_tokens"] == 10  # 9 + 1（cache 只算一次）
+    assert usage["total_tokens"] == 14
+
+
+def test_parse_event_data_ignores_done_and_garbage():
+    """Anthropic 侧**没有** [DONE] 哨兵（spec:595）：字面量与坏 JSON 都按"无事件"处理。"""
+    assert T.parse_event_data(b"[DONE]") is None
+    assert T.parse_event_data("[DONE]") is None
+    assert T.parse_event_data(b"") is None
+    assert T.parse_event_data(b"{not json") is None
+    assert T.parse_event_data(None) is None
+    assert T.parse_event_data(b'{"type":"ping"}') == {"type": "ping"}
+
+
+# ============================================================
+# 5) 截断流必须显式判错（spec:591）
+# ============================================================
+
+def test_truncated_stream_raises_explicit_error():
+    """没有 message_stop ⇒ AnthropicStreamTruncatedError，绝不静默半截回复。"""
+    state = T.AnthropicStreamState(model="MiniMax-M3", created=1)
+    T.feed_event(state, {"type": "message_start", "message": {"id": "m", "usage": {"input_tokens": 1}}})
+    T.feed_event(state, {"type": "content_block_delta", "index": 0,
+                         "delta": {"type": "text_delta", "text": "half"}})
+    with pytest.raises(T.AnthropicStreamTruncatedError) as excinfo:
+        T.finish_state(state)
+    assert "message_stop" in str(excinfo.value)  # 诊断可定位（spec:591 原文措辞）
+    assert state.text_parts == ["half"]          # 半截内容仍在 state 里，供日志诊断
+
+    # 只有 message_stop、没有 message_start 同样不可诊断（spec:587）。
+    only_stop = T.AnthropicStreamState(model="MiniMax-M3", created=1)
+    T.feed_event(only_stop, {"type": "message_stop"})
+    with pytest.raises(T.AnthropicStreamTruncatedError):
+        T.finish_state(only_stop)
+
+
+def test_truncated_stream_end_to_end_never_emits_done(isolated_db, no_retry_delay):
+    """端到端：上游 200 但流被截断 ⇒ 成帧报错，且**不**补 [DONE]（那不是成功结束）。"""
+    _add_account("uid-truncated")
+    truncated = (
+        b'data: {"type":"message_start","message":{"id":"m","usage":{"input_tokens":1}}}\n\n'
+        b'data: {"type":"content_block_delta","index":0,'
+        b'"delta":{"type":"text_delta","text":"half"}}\n\n'
+    )
+    chat.set_transport(httpx.MockTransport(lambda request: httpx.Response(
+        200, content=truncated, headers={"content-type": "text/event-stream"})))
+
+    kind, stream = asyncio.run(chat.chat_completions(
+        {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        None))
+    assert kind == "stream"
+    text = _drain_text((kind, stream))
+    assert '"error"' in text
+    assert "[DONE]" not in text
+    assert "message_stop" in text  # 错误文案带 spec:591 的可定位措辞
+
+
+# ============================================================
+# 6) stop_reason 映射 + usage 归一
+# ============================================================
+
+def test_stop_reason_mapping_four_values():
+    """spec:594 四条映射；None 透传 None；未知词按 stop 兜底（表非封闭集合）。"""
+    assert T.map_stop_reason("end_turn") == "stop"
+    assert T.map_stop_reason("max_tokens") == "length"
+    assert T.map_stop_reason("tool_use") == "tool_calls"
+    assert T.map_stop_reason("refusal") == "content_filter"
+    assert T.map_stop_reason(None) is None
+    assert T.map_stop_reason("gateway_private_value") == "stop"
+
+
+def test_usage_total_is_sum_of_four_without_double_counting_cache():
+    """total = input + output + cache_read + cache_creation；cache 不重复计数。"""
+    usage = T.normalize_usage({
+        "input_tokens": 11, "output_tokens": 5,
+        "cache_read_input_tokens": 7, "cache_creation_input_tokens": 2,
+    })
+    assert usage["total_tokens"] == 11 + 5 + 7 + 2 == 25
+    # prompt 含 cache（OpenAI 不变量 prompt+completion==total），且 cache 只算一次：
+    # 若把 cache_read 重复计入，total 会是 32；若 input_tokens 已含 cache，则会是 18。
+    assert usage["prompt_tokens"] == 20
+    assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+    assert usage["total_tokens"] not in (18, 32)
+
+    # 脏值/负数/布尔一律归零，不炸也不虚增。
+    dirty = T.normalize_usage({"input_tokens": "x", "output_tokens": -3,
+                               "cache_read_input_tokens": True, "cache_creation_input_tokens": None})
+    assert dirty["total_tokens"] == 0
+    assert dirty["prompt_tokens_details"] == {} if "prompt_tokens_details" in dirty else True
+
+
+def test_usage_normalize_keeps_native_cache_keys_for_credit_source():
+    """保留 Anthropic 原生 cache 键：store_common.credit_source_of 靠它判 'live'。"""
+    from providers.store_common import credit_source_of
+
+    usage = T.normalize_usage({"input_tokens": 3, "output_tokens": 1,
+                               "cache_read_input_tokens": 4})
+    assert usage["cache_read_input_tokens"] == 4
+    assert usage["cache_creation_input_tokens"] == 0
+    assert credit_source_of(usage) == "live"
+
+
+def test_to_openai_completion_maps_non_stream_body():
+    """非流式 Anthropic JSON → OpenAI chat.completion（响应孪生形状，spec:176）。"""
+    completion = T.to_openai_completion({
+        "id": "msg_ns", "model": "MiniMax-M3",
+        "content": [
+            {"type": "thinking", "thinking": "想一下"},
+            {"type": "text", "text": "答案"},
+            {"type": "tool_use", "id": "t1", "name": "lookup", "input": {"q": 1}},
+        ],
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 2, "output_tokens": 3, "cache_read_input_tokens": 5},
+    }, "MiniMax-M3")
+    message = completion["choices"][0]["message"]
+    assert message["content"] == "答案"
+    assert message["reasoning_content"] == "想一下"
+    assert message["tool_calls"][0]["function"] == {"name": "lookup", "arguments": '{"q": 1}'}
+    assert completion["choices"][0]["finish_reason"] == "tool_calls"
+    assert completion["usage"]["total_tokens"] == 2 + 3 + 5
+
+
+# ============================================================
+# 7) _classify_error：业务码 / 内层私有码 / 两套信封
+# ============================================================
+
+@pytest.mark.parametrize(
+    ("label", "status", "payload", "code", "http", "name"),
+    [
+        # --- 八个业务码（spec:632-639）逐个走一遍 ---
+        ("usage_limit", 500, {"status_code": USAGE_LIMIT_EXCEEDED, "status_msg": "用量到顶"},
+         USAGE_LIMIT_EXCEEDED, 429, "USAGE_LIMIT_EXCEEDED"),
+        ("credits_exhausted", 402, {"error": {"code": LLM_CREDITS_EXHAUSTED, "message": "余额耗尽"}},
+         LLM_CREDITS_EXHAUSTED, 402, "LLM_CREDITS_EXHAUSTED"),
+        ("rate_limited", 429, {"status_code": LLM_RATE_LIMITED, "status_msg": "限流"},
+         LLM_RATE_LIMITED, 429, "LLM_RATE_LIMITED"),
+        ("auth_error", 401, {"error": {"type": "authentication_error", "message": "token 失效"}},
+         LLM_AUTH_ERROR, 401, "LLM_AUTH_ERROR"),
+        ("upstream_error", 503, {"status_code": LLM_UPSTREAM_ERROR, "status_msg": "上游抖动"},
+         LLM_UPSTREAM_ERROR, 502, "LLM_UPSTREAM_ERROR"),
+        ("migration_error", 500, {"status_code": LLM_MIGRATION_ERROR, "status_msg": "迁移中"},
+         LLM_MIGRATION_ERROR, 500, "LLM_MIGRATION_ERROR"),
+        ("tpm_limited", 429, {"statusInfo": {"code": LLM_TPM_RATE_LIMITED, "message": "TPM 超限"}},
+         LLM_TPM_RATE_LIMITED, 429, "LLM_TPM_RATE_LIMITED"),
+        ("cluster_overloaded", 529, {"error": {"type": "overloaded_error", "message": "集群过载"}},
+         LLM_CLUSTER_OVERLOADED, 529, "LLM_CLUSTER_OVERLOADED"),
+    ],
+)
+def test_classify_error_business_codes(label, status, payload, code, http, name):
+    """业务码逐个钉住：code/对外 HTTP/语义名三者一致（spec:632-639,692）。"""
+    classified = chat._classify_error(status, payload)
+    assert classified["code"] == code, label
+    assert classified["http"] == http, label
+    assert classified["name"] == name, label
+    assert classified["message"]  # 一定有可诊断文案（绝不空消息）
+
+
+@pytest.mark.parametrize(
+    ("private_code", "business"),
+    sorted(UPSTREAM_STATUS_CODE_MAP.items()),
+)
+def test_classify_error_inner_private_codes_take_priority(private_code, business):
+    """内层 MiniMax 私有码压过传输级 HTTP（spec:642-654），并双写原始码。"""
+    classified = chat._classify_error(500, {
+        "status_code": private_code, "status_msg": "私有码",
+        "base_resp": {"status_code": private_code},
+    })
+    assert classified["code"] == business
+    assert classified["upstream_code"] == private_code
+    body = chat._error_body(classified)
+    assert body["error"]["code"] == business
+    assert body["error"]["status_code"] == private_code  # spec:692 双写
+    assert body["error"]["provider"] == CHANNEL_ID
+
+
+def test_classify_error_inner_code_beats_outer_http():
+    """决定性顺序：内层业务码 > Anthropic error.type > HTTP 状态（spec:648-654）。"""
+    # 外层 HTTP 500（会兜底成 50113），内层 1400010161 必须压过它 → 402/50110。
+    classified = chat._classify_error(500, {"responseBody": '{"status_code": 1400010161}'})
+    assert classified["code"] == LLM_CREDITS_EXHAUSTED
+    assert classified["http"] == 402
+
+    # Anthropic error.type 也要压过 HTTP：403 + permission_error → 50112/401。
+    classified = chat._classify_error(403, {"type": "error", "error": {
+        "type": "permission_error", "message": "无权限"}})
+    assert classified["code"] == LLM_AUTH_ERROR
+    assert classified["auth"] is True
+
+
+def test_classify_error_two_envelopes_each():
+    """两套信封各一例：MiniMax base_resp 平铺 + Anthropic error 对象。"""
+    minimax = chat._classify_error(429, {
+        "base_resp": {"status_code": 50111, "status_msg": "将在 2030-01-01 00:00:00 UTC+8 重置"}})
+    assert minimax["code"] == LLM_RATE_LIMITED
+    assert minimax["rate_limited"] is True and minimax["quota"] is False
+    assert "重置" in minimax["message"]
+
+    anthropic = chat._classify_error(429, {"type": "error", "error": {
+        "type": "rate_limit_error", "message": "将在 2030-01-01 00:00:00 UTC+8 重置"}})
+    assert anthropic["code"] == LLM_RATE_LIMITED
+    assert anthropic["type"] == "rate_limit_error"
+    assert anthropic["upstream_code"] is None  # Anthropic 信封只有字符串类型，无数字码
+
+
+def test_classify_error_quota_family_does_not_switch_account():
+    """额度族（42212/50110）登记但**本请求不换号重放**（spec:660 Do NOT retry）。"""
+    for code in (USAGE_LIMIT_EXCEEDED, LLM_CREDITS_EXHAUSTED):
+        classified = chat._classify_error(429, {"status_code": code, "status_msg": "x"})
+        assert classified["quota"] is True
+        assert classified["rate_limited"] is True   # 两族都进 rate_limits 登记
+        assert classified["retryable"] is False     # constants 逐码注明 retryable
+    assert chat.QUOTA_SWITCH_ACCOUNT is False
+
+
+def test_classify_error_http_fallback_and_plain_text():
+    """认不出任何信封时退回 HTTP 状态分类；纯文本体不炸。"""
+    assert chat._classify_error(401, b"")["code"] == LLM_AUTH_ERROR
+    assert chat._classify_error(402, b"")["code"] == LLM_CREDITS_EXHAUSTED
+    assert chat._classify_error(529, b"")["code"] == LLM_CLUSTER_OVERLOADED
+    plain = chat._classify_error(503, "gateway down")
+    assert plain["code"] is None and plain["http"] == 503 and plain["message"] == "gateway down"
+    assert plain["type"] == "server_error"
+    # 400 invalid_request 不硬套业务码：留给 http 原样透传。
+    bad = chat._classify_error(400, {"error": {"type": "invalid_request_error", "message": "bad"}})
+    assert bad["code"] is None and bad["http"] == 400
+    assert bad["type"] == "invalid_request_error"
+
+
+def test_classify_error_maps_anthropic_error_type_only_stream_events():
+    """回归缺口：流内 error 事件常**只带** ``error.type``（无数字码）。
+
+    ``ANTHROPIC_ERROR_TYPE_TO_CODE`` 必须把它翻成业务码，否则对外错误帧缺 ``code``，
+    客户端与观测面都无法按业务码分类。overloaded_error → 50151（spec:639 的 529 语义）。
+    """
+    assert ANTHROPIC_ERROR_TYPE_TO_CODE["overloaded_error"] == LLM_CLUSTER_OVERLOADED
+
+    state = T.AnthropicStreamState(model="MiniMax-M3", created=1)
+    T.feed_event(state, {"type": "message_start", "message": {"id": "m", "usage": {"input_tokens": 1}}})
+    with pytest.raises(T.AnthropicStreamError) as excinfo:
+        T.feed_event(state, {"type": "error", "error": {
+            "type": "overloaded_error", "message": "cluster busy"}})
+    exc = excinfo.value
+    assert exc.code == LLM_CLUSTER_OVERLOADED == 50151
+    assert "cluster busy" in str(exc)
+
+    # 只带 type 的错误负载经 _classify_error 后同样带出业务码（对外成帧路径）。
+    classified = chat._classify_error(0, {"error": {"type": "overloaded_error", "message": "busy"}})
+    assert classified["code"] == LLM_CLUSTER_OVERLOADED
+    assert classified["upstream_code"] is None
+
+    # 词表整体回归：``ANTHROPIC_ERROR_TYPE_TO_CODE`` 的**归属方**是 translate
+    # （流内 error 事件的 _describe_upstream_error），每个条目都要能补出业务码。
+    for etype, expected in ANTHROPIC_ERROR_TYPE_TO_CODE.items():
+        message, code = T._describe_upstream_error({"error": {"type": etype, "message": "m"}})
+        assert code == expected, etype
+        assert message == "m"
+
+    # chat._classify_error 自己还有一张更窄的表（_ANTHROPIC_ERROR_TYPES）：
+    # 只认这几个语义类型，invalid_request_error 显式映射成 0（无业务码、对外 400）。
+    for etype, expected in {
+        "authentication_error": LLM_AUTH_ERROR,
+        "permission_error": LLM_AUTH_ERROR,
+        "rate_limit_error": LLM_RATE_LIMITED,
+        "overloaded_error": LLM_CLUSTER_OVERLOADED,
+        "api_error": LLM_UPSTREAM_ERROR,
+    }.items():
+        assert chat._classify_error(0, {"error": {"type": etype, "message": "m"}})["code"] == expected, etype
+
+    code_less = chat._classify_error(400, {"error": {"type": "invalid_request_error", "message": "m"}})
+    assert code_less["code"] is None          # 客户端请求问题：不硬套业务码
+    assert code_less["http"] == 400 and code_less["type"] == "invalid_request_error"
+    # 流内路径没有上游 HTTP 状态（已 200 成帧）⇒ 传 0 时走 502 兜底，但 type 仍归位。
+    stream_side = chat._classify_error(0, {"error": {"type": "invalid_request_error", "message": "m"}})
+    assert stream_side["code"] is None and stream_side["http"] == 502
+    assert stream_side["type"] == "invalid_request_error"
+
+
+def test_stream_error_event_frames_business_code_end_to_end(isolated_db, no_retry_delay):
+    """端到端：流内 error 事件 → 对外 SSE 错误帧带 50151（只带 error.type 的路径）。"""
+    _add_account("uid-stream-error")
+    body = (
+        b'data: {"type":"message_start","message":{"id":"m3","usage":{"input_tokens":1}}}\n\n'
+        b'data: {"type":"error","error":{"type":"overloaded_error","message":"cluster busy"}}\n\n'
+    )
+    chat.set_transport(httpx.MockTransport(lambda request: httpx.Response(
+        200, content=body, headers={"content-type": "text/event-stream"})))
+
+    kind, stream = asyncio.run(chat.chat_completions(
+        {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        None))
+    assert kind == "stream"
+    text = _drain_text((kind, stream))
+    assert '"code": 50151' in text
+    assert "cluster busy" in text
+    assert FAKE_AT not in text and FAKE_RT not in text  # 凭证不外泄
+
+
+# ============================================================
+# 8) 限流：记录 / 预判跳过 / 全限返回体 / 解除时刻解析
+# ============================================================
+
+def test_rate_limit_record_and_preemptive_skip(frozen_now):
+    """(账号, 模型) 级登记；预判跳过使该模型在该账号上不再被选中（零上游请求）。"""
+    until = rate_limits.record(11, "MiniMax-M3", frozen_now["now"] + 3600)
+    assert until == frozen_now["now"] + 3600
+    assert rate_limits.is_limited(11, "MiniMax-M3") is True
+    assert rate_limits.is_limited(11, "MiniMax-M2.7") is False   # 同账号其它模型不连坐
+    assert rate_limits.is_limited(12, "MiniMax-M3") is False     # 同模型其它账号不受影响
+    assert rate_limits.limited_account_ids("MiniMax-M3") == {11}
+
+    # 到期惰性清理（无需后台线程）
+    frozen_now["now"] += 3601
+    assert rate_limits.is_limited(11, "MiniMax-M3") is False
+    assert rate_limits.snapshot() == {}
+
+
+def test_rate_limit_unparseable_reset_falls_back_without_pretending(frozen_now):
+    """解析不出解除时刻 ⇒ 落 FALLBACK_COOLDOWN_S，**不假装知道**（spec:711）。"""
+    until = chat._record_limit({"id": 22}, "MiniMax-M3", None, {"error": {"message": "too many"}})
+    assert until == frozen_now["now"] + rate_limits.FALLBACK_COOLDOWN_S
+
+
+@pytest.mark.parametrize(
+    ("label", "payload"),
+    [
+        # MiniMax 信封：平铺 status_msg
+        ("minimax_status_msg", {"status_code": 50111,
+                                "status_msg": "将在 2030-01-01 00:00:00 UTC+8 重置"}),
+        # Anthropic 信封：error.message（_reset_text 必须下钻到 error 里）
+        ("anthropic_error_message", {"type": "error", "error": {
+            "type": "rate_limit_error", "message": "将在 2030-01-01 00:00:00 UTC+8 重置"}}),
+    ],
+)
+def test_reset_epoch_parsed_from_both_envelopes(label, payload):
+    """两套信封的"将在 … UTC+8 重置"都要解析成解除时刻（按 UTC+8 减 30s 余量）。
+
+    回归缺口：共享的 ``rate_limits.parse_reset_epoch`` 只认 workbuddy 的 ``msg`` 键，
+    不提取本通道两种信封就会把上游给的墙钟解除时刻丢掉，退化成 60s 兜底冷却
+    （表现为限流窗口被无谓拉长）。
+    """
+    expected = 1_893_427_200.0 - rate_limits.RESET_SAFETY_MARGIN_S  # 2030-01-01T00:00:00+08:00
+    epoch = chat._reset_epoch(None, payload)
+    assert epoch == expected, label
+    assert rate_limits.RESET_SAFETY_MARGIN_S == 30
+
+    # 解析不出时返回 None（由 record 落兜底），绝不编造时刻。
+    assert chat._reset_epoch(None, {"error": {"message": "too many"}}) is None
+    # Retry-After 数字秒是第二来源（spec:711：有就尊重，没有就算）。
+    header = httpx.Response(429, headers={"retry-after": "42"})
+    assert abs(chat._reset_epoch(header, {}) - (time.time() + 42)) < 5
+
+
+def test_all_accounts_limited_returns_documented_body_fields(isolated_db, frozen_now, no_retry_delay):
+    """全账号受限 ⇒ 429 + 受限视图，字段名逐一对齐 proxy._rate_limit_exhausted_error。"""
+    account = _add_account("uid-limited")
+    # 入口预判即全限：上游零请求。
+    calls: list[str] = []
+    chat.set_transport(httpx.MockTransport(
+        lambda request: calls.append(str(request.url)) or httpx.Response(200, json={})))
+
+    rate_limits.record(account["id"], "MiniMax-M3", frozen_now["now"] + 3600)
+    kind, (status, body) = asyncio.run(chat.chat_completions(
+        {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+        None))
+
+    assert kind == "error" and status == 429
+    assert calls == []  # 零上游请求（预判跳过生效）
+    error = body["error"]
+    for key in ("message", "type", "code", "reset_at", "reset_at_iso",
+                "limited_accounts", "tried_account_ids", "provider"):
+        assert key in error, f"全限返回体缺字段 {key}"
+    assert error["type"] == rate_limits.RATE_LIMIT_TYPE
+    assert error["code"] == LLM_RATE_LIMITED
+    assert error["provider"] == CHANNEL_ID
+    assert error["limited_accounts"][0]["account_id"] == account["id"]
+    assert error["reset_at"] == frozen_now["now"] + 3600
+    assert error["reset_at_iso"].endswith("UTC+8")
+
+
+def test_rate_limit_switch_account_on_429(isolated_db, no_retry_delay):
+    """限流族命中 ⇒ 登记该账号 + 零延迟换号（不叠加账号级连坐冷却）。
+
+    选号顺序由 auth_manager 的优先级/权重/粘住语义决定（不保证 1 号先中），
+    故断言"第一次被选中的账号吃 429、第二次换成**另一个**账号成功"，而不写死 id。
+    """
+    first = _add_account("uid-rl-1", access="AT-FAKE-RL-1")
+    second = _add_account("uid-rl-2", access="AT-FAKE-RL-2")
+    by_token = {f"Bearer {first['access_token']}": first, f"Bearer {second['access_token']}": second}
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        auth = request.headers.get("Authorization", "")
+        seen.append(auth)
+        if len(seen) == 1:
+            return httpx.Response(429, json={"status_code": 50111, "status_msg": "限流"})
+        return httpx.Response(200, json={
+            "id": "m", "type": "message", "role": "assistant", "model": "MiniMax-M3",
+            "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    chat.set_transport(httpx.MockTransport(handler))
+    kind, completion = asyncio.run(chat.chat_completions(
+        {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+        None))
+
+    assert kind == "json" and completion["choices"][0]["message"]["content"] == "ok"
+    # 两次请求打到**不同**账号；零延迟换号（限流族不进退避）。
+    assert len(seen) == 2 and seen[0] != seen[1], seen
+    assert all(item in by_token for item in seen), seen
+    assert no_retry_delay == []
+    limited_account = by_token[seen[0]]
+    other_account = by_token[seen[1]]
+    assert rate_limits.is_limited(limited_account["id"], "MiniMax-M3") is True
+    assert rate_limits.is_limited(other_account["id"], "MiniMax-M3") is False
+    assert auth_manager.account_is_cooling_down(limited_account["id"]) is False  # 无账号级连坐
+
+
+# ============================================================
+# 9) chat_completions 端到端（httpx.MockTransport，零真实网络）
+# ============================================================
+
+def test_chat_completions_non_stream_headers_url_and_no_writeback(
+    isolated_db, monkeypatch, auth_root
+):
+    """假 200 端到端：请求头/URL 形状正确，且**绝不回写**客户端 auth.json。"""
+    sentinel = _write_auth_sentinel(auth_root / "auth")
+    monkeypatch.setenv(store.ENV_AUTH_DIR, str(sentinel.parent))
+    before_bytes = sentinel.read_bytes()
+    before_mtime = sentinel.stat().st_mtime_ns
+
+    # 账号由哨兵文件只读导入（证明整条链路只读它）。
+    parsed = store.import_discovered(str(sentinel))
+    assert parsed["access_token"] == FAKE_AT
+    aid = db.add_account(parsed)
+    account = db.get_account(aid)
+    assert account["extra"]["shared_credential"] is True  # spec:694 与客户端共用
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={
+            "id": "msg_e2e", "type": "message", "role": "assistant", "model": "MiniMax-M3",
+            "content": [{"type": "text", "text": "pong"}], "stop_reason": "end_turn",
+            "usage": {"input_tokens": 3, "output_tokens": 2}})
+
+    chat.set_transport(httpx.MockTransport(handler))
+    kind, completion = asyncio.run(chat.chat_completions(
+        {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+        None))
+
+    assert kind == "json"
+    assert completion["choices"][0]["message"]["content"] == "pong"
+    assert completion["usage"]["total_tokens"] == 5
+
+    assert len(requests) == 1
+    request = requests[0]
+    # --- 请求头（spec §3.1:334-375 + §9:3:690）---
+    assert request.headers["x-api-key"] == API_KEY_PLACEHOLDER == "sk-xxx"  # 占位符别删
+    assert request.headers["Authorization"] == f"Bearer {FAKE_AT}"          # 唯一真实凭证
+    assert request.headers["anthropic-version"] == "2023-06-01"
+    assert request.headers["Accept"] == "application/json"                  # 流式也是 json
+    assert request.headers["X-Mavis-Agent-Id"] == "main"
+    assert "bedrock-lane" not in request.headers and "bedrock_lane" not in request.headers
+
+    # --- URL：/v1 净效果只一份（spec:111-131,689 的头号坑）---
+    url = str(request.url)
+    assert url == f"https://agent.minimax.cn{CHAT_PATH}"
+    assert url.endswith("/mavis/api/v1/llm/v1/messages")
+    assert "/v1/v1/" not in url                      # 预置末尾 /v1 已被剥掉，不是叠加
+    assert url.count("/v1") == 2                     # 网关前缀 /mavis/api/v1/llm + SDK 的 /v1/messages
+    assert CHAT_PATH == "/mavis/api/v1/llm/v1/messages"
+
+    # --- 明文 JSON body（无编码/加密/签名层，spec:417-487）---
+    body = json.loads(request.content.decode("utf-8"))
+    assert body["model"] == "MiniMax-M3"
+    assert body["max_tokens"] > 0 and body["stream"] is False
+    assert body["messages"] == [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+
+    # --- 只读快照：哨兵文件内容与 mtime 一字不变（spec:694 共存红线）---
+    from providers.minimax_code import token as token_module
+
+    assert token_module.WRITEBACK_TO_CLIENT_AUTH_JSON is False
+    assert sentinel.read_bytes() == before_bytes
+    assert sentinel.stat().st_mtime_ns == before_mtime
+    assert not (sentinel.parent / store.AUTH_STATE_FILENAME).exists()
+    assert not (sentinel.parent / "auth.lock").exists()
+    assert store.minimax_auth_dirs() == [sentinel.parent]
+
+
+def test_chat_completions_401_refreshes_then_replays_once(isolated_db, monkeypatch, no_retry_delay):
+    """假 401 → OAuth 刷新 → **单次**重放（spec:313）；刷新结果只进本网关 DB。"""
+    account = _add_account("uid-401")
+    upstream_calls: list[str] = []
+    token_calls: list[str] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        upstream_calls.append(request.headers.get("Authorization", ""))
+        if len(upstream_calls) == 1:
+            return httpx.Response(401, json={"type": "error", "error": {
+                "type": "authentication_error", "message": "token expired"}})
+        return httpx.Response(200, json={
+            "id": "msg_replay", "type": "message", "role": "assistant", "model": "MiniMax-M3",
+            "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    def token_endpoint(request: httpx.Request) -> httpx.Response:
+        token_calls.append(str(request.url))
+        return httpx.Response(200, json={
+            "access_token": FAKE_AT_GEN2, "token_type": "Bearer",
+            "refresh_token": FAKE_RT_ROTATED, "expires_in": 3600,
+            "scope": "agent.default", "audience": "agent-backend"})
+
+    # OAuth 刷新走 storage.http_pool 全局池 ⇒ 只装 chat transport 截不到，必须
+    # monkeypatch providers.minimax_code.token.get_client（token.py:57 的共享池入口）。
+    from providers.minimax_code import token as token_module
+
+    oauth_client = httpx.AsyncClient(transport=httpx.MockTransport(token_endpoint))
+    monkeypatch.setattr(token_module, "get_client", lambda: oauth_client)
+    chat.set_transport(httpx.MockTransport(upstream))
+
+    kind, completion = asyncio.run(chat.chat_completions(
+        {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+        None))
+
+    assert kind == "json" and completion["choices"][0]["message"]["content"] == "ok"
+    # 恰好两次上游请求：第一次旧 token 401，第二次换新 token 重放（不放大）。
+    assert upstream_calls == [f"Bearer {FAKE_AT}", f"Bearer {FAKE_AT_GEN2}"]
+    assert len(token_calls) == 1
+    assert token_calls[0] == f"https://account.minimax.cn{TOKEN_PATH}"
+    # 换代只落本网关 DB（generation+1），且零退避（401 不走通用重试）。
+    fresh = db.get_account(account["id"])
+    assert fresh["access_token"] == FAKE_AT_GEN2
+    assert fresh["refresh_token"] == FAKE_RT_ROTATED
+    assert fresh["extra"]["generation"] == 2
+    assert fresh["status"] == "active"
+    assert no_retry_delay == []
+
+
+def test_chat_completions_401_without_refresh_material_marks_expired(isolated_db, no_retry_delay):
+    """裸 JWT 导入（无 refresh_token）吃 401 ⇒ 标 expired 换号，不做无谓刷新。"""
+    account = _add_account("uid-no-rt", refresh="")
+    chat.set_transport(httpx.MockTransport(
+        lambda request: httpx.Response(401, json={"type": "error", "error": {
+            "type": "authentication_error", "message": "expired"}})))
+
+    kind, (status, body) = asyncio.run(chat.chat_completions(
+        {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+        None))
+
+    assert kind == "error" and status == 401
+    assert body["error"]["type"] == "authentication_error"
+    assert db.get_account(account["id"])["status"] == "expired"
+    assert FAKE_AT not in json.dumps(body, ensure_ascii=False)
+
+
+def test_chat_completions_payload_error_is_local_400(isolated_db, no_retry_delay):
+    """请求体不合法（document 块）⇒ 本地 400，**不打上游**、不烧额度。"""
+    _add_account("uid-400")
+    calls: list[str] = []
+    chat.set_transport(httpx.MockTransport(
+        lambda request: calls.append(str(request.url)) or httpx.Response(200, json={})))
+
+    kind, (status, body) = asyncio.run(chat.chat_completions(
+        {"model": "MiniMax-M3",
+         "messages": [{"role": "user", "content": [{"type": "document", "source": {}}]}],
+         "stream": False}, None))
+
+    assert kind == "error" and status == 400
+    assert body["error"]["type"] == "invalid_request_error"
+    assert calls == []
+
+
+def test_chat_completions_stream_end_to_end_emits_done(isolated_db, no_retry_delay):
+    """流式端到端：增量 → 终结块 → 对外补 [DONE]（上游无此哨兵，spec:595）。"""
+    _add_account("uid-stream-ok")
+    chat.set_transport(httpx.MockTransport(lambda request: httpx.Response(
+        200, content=FROZEN_ANTHROPIC_SSE, headers={"content-type": "text/event-stream"})))
+
+    kind, stream = asyncio.run(chat.chat_completions(
+        {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        None))
+    assert kind == "stream"
+    text = _drain_text((kind, stream))
+
+    assert text.rstrip().endswith("data: [DONE]")
+    frames = _sse_payloads(text.encode("utf-8"))
+    assert frames[-1]["choices"][0]["finish_reason"] == "tool_calls"
+    assert frames[-1]["usage"]["total_tokens"] == 25
+    assert '"content": "pong"' in text
+    assert '"reasoning_content": "先想"' in text
+    assert FAKE_AT not in text and FAKE_RT not in text
+
+
+# ============================================================
+# 10) facade 可用性
+# ============================================================
+
+CORE_METHODS = (
+    "list_models", "alias_map", "accepts_model", "translate_model",
+    "pick_account", "pick_account_with_fallback", "has_usable_account",
+    "chat_completions", "fetch_model_rates",
+)
+
+
+def test_facade_exposes_nine_core_methods():
+    """9 个核心方法 + 3 个属性齐备；异步方法必须是 coroutine function。"""
+    import inspect
+
+    for name in CORE_METHODS:
+        method = getattr(PROVIDER, name, None)
+        assert callable(method), f"facade 缺核心方法 {name}"
+    for name in ("pick_account_with_fallback", "has_usable_account", "chat_completions"):
+        assert inspect.iscoroutinefunction(getattr(PROVIDER, name)), f"{name} 应为 async"
+    assert PROVIDER.id == CHANNEL_ID == "minimax_code"  # 注册 id 用下划线
+    assert PROVIDER.display_name == DISPLAY_NAME
+    assert PROVIDER.checkin_supported is False          # 无签到面
+
+
+def test_facade_fetch_quota_is_honestly_unsupported():
+    """``fetch_quota`` 恒 unsupported=True 且**零探测请求**（spec:663 无额度接口）。"""
+    calls: list[str] = []
+    chat.set_transport(httpx.MockTransport(
+        lambda request: calls.append(str(request.url)) or httpx.Response(200, json={})))
+
+    snapshot = asyncio.run(PROVIDER.fetch_quota({"id": 7}))
+    assert snapshot.ok is False
+    assert snapshot.unsupported is True
+    assert snapshot.remaining is None      # KD-10：跨通道求和不得把"不知道"当 0
+    assert snapshot.channel == CHANNEL_ID
+    assert snapshot.account_id == 7
+    assert snapshot.unit == "unknown"
+    assert snapshot.message == "no quota API"
+    assert calls == []
+
+
+def test_facade_models_aliases_and_translation():
+    """facade 的模型面：目录三档、别名翻回原生 id、目录外 id 宽松兜底。"""
+    assert [item["id"] for item in PROVIDER.list_models()] == list(STATIC_MODELS)
+    for item in PROVIDER.list_models():
+        assert item["display_name"] and item["max_input_tokens"] > 0
+    assert PROVIDER.alias_map() == dict(ALIASES)
+    assert PROVIDER.accepts_model("auto") is True
+    assert PROVIDER.translate_model("auto") == DEFAULT_MODEL == "MiniMax-M3"
+    assert PROVIDER.translate_model("minimax/MiniMax-M2.7") == "MiniMax-M2.7"
+    # 目录外 id 走宽松兜底（spec:520,710 的远端目录），不编造能力。
+    assert PROVIDER.accepts_model("MiniMax-M3.1") is False
+    assert chat.model_meta("MiniMax-M3.1")["display_name"] == "MiniMax-M3.1"
+
+
+def test_facade_fetch_model_rates_is_honest_about_missing_pricing():
+    """没有官方倍率表 ⇒ rate=None + official=False（spec 全篇无 pricing 接口）。"""
+    rates = PROVIDER.fetch_model_rates()
+    assert [item["id"] for item in rates] == list(STATIC_MODELS)
+    for item in rates:
+        assert item["rate"] is None
+        assert item["official"] is False
+        assert item["context_window"] > 0
+        assert item["max_output_tokens"] > 0
+
+
+def test_facade_parse_credentials_adapts_paste_wrapping():
+    """管理页把粘贴内容平铺进请求体（{"api_key": "<jwt>"}）时门面要能取出原文。"""
+    import base64
+
+    payload = base64.urlsafe_b64encode(json.dumps({
+        "sub": "uid-pasted", "exp": 1_893_427_200, "scope": "agent.default",
+    }).encode("utf-8")).decode("ascii").rstrip("=")
+    jwt = f"header.{payload}.signature"
+
+    wrapped = PROVIDER.parse_credentials({"api_key": jwt})
+    assert wrapped["uid"] == "uid-pasted"
+    assert wrapped["access_token"] == jwt
+    assert wrapped["refresh_token"] == ""          # 裸 JWT 无换票素材（store 已注明）
+    assert wrapped["extra"]["import_shape"] == "bare_jwt"
+    assert wrapped["extra"]["can_refresh"] is False
+    assert wrapped["expires_at"] == 1_893_427_200_000
+
+    # 已是凭证文档形状时原样交给 store（不被包装键嗅探打偏）。
+    direct = PROVIDER.parse_credentials(json.dumps(FROZEN_AUTH_DOC))
+    assert direct["uid"] == "uid-fake-subject"

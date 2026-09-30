@@ -20,6 +20,10 @@ CHANNEL_HOST_FIELDS: dict[str, tuple[str, ...]] = {
     "qclaw": ("jprx_gateway", "aizone_base"),
     "traesolo": ("oauth_host", "console_host", "agent_host"),
     "traework": ("agent_host", "ug_host"),
+    # minimax_code: "llm" = agent.minimax.cn LLM gateway (chat.py), "oauth" =
+    # account.minimax.cn token endpoint (token.py). Field names must match the
+    # channel_host(CHANNEL_ID, ...) calls verbatim.
+    "minimax_code": ("llm", "oauth"),
 }
 
 def channel_host(channel_id: str, field: str, default: str) -> str:

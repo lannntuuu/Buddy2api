@@ -39,13 +39,20 @@ def test_phase_b_override(monkeypatch):
 def test_channel_host_fields():
     """gmi / bailian were removed: their base URL now lives in the seed
     definition (or admin-edited custom_channels entry), not in the
-    `channel_hosts` settings blob."""
+    `channel_hosts` settings blob.
+
+    minimax_code 是双 host 通道：``llm``（agent.minimax.cn，chat.py 的推理面）与
+    ``oauth``（account.minimax.cn，token.py 的换票面，spec:241,88）——字段名必须
+    与 ``channel_host(CHANNEL_ID, ...)`` 的调用**逐字一致**，差一个字符覆盖就失效
+    （整字典相等断言防的就是这个）。
+    """
     assert CHANNEL_HOST_FIELDS == {
         "qwenwork": ("gateway",),
         "qodercn": ("gateway", "openapi"),
         "qclaw": ("jprx_gateway", "aizone_base"),
         "traesolo": ("oauth_host", "console_host", "agent_host"),
         "traework": ("agent_host", "ug_host"),
+        "minimax_code": ("llm", "oauth"),
     }
 
 
