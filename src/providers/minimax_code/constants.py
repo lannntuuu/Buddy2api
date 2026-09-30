@@ -315,7 +315,9 @@ THINKING_ON = {
 }  # spec:441,531 + MITM 实测 2026-09-30 dump-001:67-69（补 display）
 THINKING_OFF = {
     "thinking": {"type": THINKING_TYPE_DISABLED, THINKING_DISPLAY_FIELD: THINKING_DISPLAY_SUMMARIZED}
-}  # spec:441,531 + MITM 实测 2026-09-30（display 是伴生字段，on/off 都带）
+}  # spec:441,531,508 —— ⚠️ `disabled` 与"off 也带 display"**均未实测**：
+   # 本次抓包只观测到 `adaptive`（count_tokens），3 个 dump 里 `disabled` 的命中
+   # 全是工具描述文本、**不是** thinking 取值 ⇒ 这一行是 spec 外推，不是实测结论。
 THINKING_MODE_VALUES = ("on", "off")  # spec:528 唯一合法取值（非 effort 档位）
 # effort 档位是「通用非 M3 Anthropic 路径」的东西：low|medium|high|xhigh|max（spec:544），
 # 随 output_config.effort 下发（spec:541-542）。
@@ -826,9 +828,11 @@ def _self_check() -> None:
     # G03：effort 实测值 default 在允许集合里（旧值域 low|medium|high|xhigh|max 漏了它）。
     assert EFFORT_DEFAULT == "default"  # MITM 实测 2026-09-30 dump-003:1823
     assert EFFORT_DEFAULT in EFFORT_VALUES and set(EFFORT_LEVELS) <= set(EFFORT_VALUES)
-    # G05：thinking 实测带 display（count_tokens），常量形状必须含它。
+    # G05：thinking 实测带 display（count_tokens 实测到 `adaptive`）。
     assert THINKING_ON["thinking"][THINKING_DISPLAY_FIELD] == "summarized"  # MITM 实测 dump-001:69
-    assert THINKING_OFF["thinking"][THINKING_DISPLAY_FIELD] == "summarized"  # MITM 实测 dump-001:69
+    # ⚠️ off 行的 display 是 spec 外推（`disabled` 未实测，见 THINKING_OFF 注释）：
+    # 这里只断言"形状与 on 对齐"，**不得**标成实测结论。
+    assert THINKING_OFF["thinking"][THINKING_DISPLAY_FIELD] == "summarized"  # spec 外推，非实测
     assert thinking_payload_for("MiniMax-M3", "on")["thinking"][THINKING_DISPLAY_FIELD] == "summarized"
     # G07：session id 实测 = mvs_ + 32 位 hex。
     assert MAVIS_SESSION_ID_PREFIX == "mvs_" and MAVIS_SESSION_ID_HEX_LEN == 32  # MITM 实测 dump-003:34

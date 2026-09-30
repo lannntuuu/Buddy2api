@@ -476,6 +476,7 @@ def test_build_payload_thinking_only_for_m3():
     ⚠️ MITM 实测 2026-09-30（dump-001:67-69）把 thinking 的形状补成
     ``{type, display:"summarized"}`` —— 旧断言只比 ``{"type": ...}`` 已不成立；
     display 的专项回归见文末 §11 的 ``test_thinking_carries_display_field``。
+    ⚠️ 实测只覆盖 on（adaptive）；下面 disabled 一侧是 spec 外推（形状对齐 on）。
     """
     base = {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}]}
     assert T.build_anthropic_payload("MiniMax-M3", dict(base, thinking={"type": "adaptive"}))["thinking"] == {
@@ -1524,7 +1525,9 @@ def test_thinking_carries_display_field():
 
     MITM 实测 2026-09-30（dump-001:67-69 / dump-002:1783-1785，count_tokens）：
     ``thinking: {"type":"adaptive","display":"summarized"}`` —— 旧静态假设只知 ``type``。
-    on/off **都带** display（它与开关状态无关），故两个方向都断言。
+    ⚠️ 实测只观测到 **on（adaptive）** 一侧：3 个 dump 里 `disabled` 的命中全是工具
+    描述文本、不是 thinking 取值。off 侧带 display 属 **spec 外推**（形状与 on 对齐），
+    故 off 的断言只锁定"与 on 形状一致"，不声称它是实测结论。
     """
     assert THINKING_DISPLAY_FIELD == "display"
     assert THINKING_DISPLAY_SUMMARIZED == "summarized"
@@ -1532,8 +1535,8 @@ def test_thinking_carries_display_field():
 
     on = T.build_anthropic_payload("MiniMax-M3", dict(base, thinking={"type": "adaptive"}))["thinking"]
     off = T.build_anthropic_payload("MiniMax-M3", dict(base, thinking={"type": "disabled"}))["thinking"]
-    assert on == {"type": "adaptive", "display": THINKING_DISPLAY_SUMMARIZED}
-    assert off == {"type": "disabled", "display": THINKING_DISPLAY_SUMMARIZED}
+    assert on == {"type": "adaptive", "display": THINKING_DISPLAY_SUMMARIZED}   # 实测侧
+    assert off == {"type": "disabled", "display": THINKING_DISPLAY_SUMMARIZED}  # spec 外推侧
     # 值域不编造：实测只见 summarized，别扩成 low/high 之类的臆测档。
     assert on["display"] == "summarized" and off["display"] == "summarized"
 

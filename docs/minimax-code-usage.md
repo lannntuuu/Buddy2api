@@ -89,8 +89,13 @@ Anthropic 方言下 MiniMax 的思考控制是**二值开关**（spec:524-533,69
 
 | 语义 | 下发值 |
 |---|---|
-| 思考 **on** | `thinking: {"type": "adaptive", "display": "summarized"}`（spec:531 + 实测） |
-| 思考 **off** | `thinking: {"type": "disabled", "display": "summarized"}`（spec:531,508 + 实测） |
+| 思考 **on** | `thinking: {"type": "adaptive", "display": "summarized"}`（spec:531 + 实测 `adaptive`） |
+| 思考 **off** | `thinking: {"type": "disabled", "display": "summarized"}`（spec:531,508；`disabled` **未实测**） |
+
+> ⚠️ 上表 off 行的 `disabled` 取自静态规格（spec:508,531），**本次抓包没有观测到**：
+> 实测只出现 `adaptive`（`count_tokens` 请求），3 个 dump 里 `disabled` 的命中全部是
+> 工具描述文本（"...instead of regex" 之类），**不是** `thinking` 取值。
+> `display` 是否在 off 时同样下发也属推断。
 
 - 合法取值只有 `on` / `off`（`THINKING_MODE_VALUES`，spec:528）。
 - `display` 是**伴生字段**：MITM 实测 2026-09-30 在 `count_tokens` 请求里观测到
