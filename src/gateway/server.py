@@ -44,6 +44,8 @@ from accounts import auth_manager
 from accounts import control_plane
 import providers
 from providers.traework.token import adopt_credentials_from_client
+from providers.minimax_code import liveness as _mvs_liveness  # 自刷新活性门（只读探测），见下方对齐小节
+from providers.minimax_code import store as _store  # 磁盘接管原语（同步），见下方对齐小节
 from gateway import router as gateway_router
 from gateway.version import VERSION
 
@@ -149,6 +151,81 @@ def _schedule_traework_sync() -> None:
         return
     try:
         asyncio.get_running_loop().create_task(_traework_sync_loop())
+    except RuntimeError:
+        # No running loop (e.g. in tests or non-asyncio contexts); skip.
+        pass
+
+
+# ============================================================
+# MiniMax Code credential align (startup + lightweight timer)
+# ============================================================
+# 实机验证（.tmp/mitm/minimax-code-20260919/ROTATION-VERDICT.md；spec:694,704）：
+# MiniMax Code 桌面客户端每约 1h 自刷新一次，且**每次自刷新都会轮转 refresh_token**
+# （access token 实测 TTL 约 1h，spec:317 记的 11 天已推翻）⇒ 客户端与网关并用时，
+# 网关库内的 refresh_token 是死票，网关下次 OAuth refresh 被拒（invalid_grant）、
+# 账号被判 expired，即网关周期性失效。选定保守策略：网关**先**从磁盘接管客户端落在
+# auth.json 里更新后的凭据（不轮转、不顶掉对方），只有磁盘没有更新凭据时才由调用方
+# 回退原有 OAuth refresh（token.py），保留"网关是唯一持有者"时的自刷新能力。
+# 风控说明：接管（adopt_credentials_from_client）全程只做**本地文件读取 + DB 写入**，
+# auth.json / auth-state.json **只读**、绝不回写（spec:694），**不发任何**对 MiniMax
+# 生产的网络请求 ⇒ 启动对齐与定时器都不构成额外的上游流量/风控面。
+
+async def _minimax_code_align_loop() -> None:
+    await asyncio.sleep(60)  # delay the first run so startup stays snappy
+    while True:
+        # 停用 minimax_code 通道后必须停止循环：账号行仍为 active 时循环也会白跑，
+        # 故按 enabled 决定是否退出（与 _traework_sync_loop 同款处置）。
+        if not providers.is_channel_enabled("minimax_code"):
+            sys.stderr.write("[minimax-code-align] minimax_code channel disabled; stopping align loop\n")
+            return
+        try:
+            # 同步函数（明文 auth.json，无解密 await）⇒ 直接调，别 await。
+            _align_minimax_code_credentials()
+        except Exception as exc:  # noqa: BLE001 - 整轮兜底：异常只记 stderr，不中断循环
+            sys.stderr.write(f"[minimax-code-align] error: {exc!r}\n")
+        # 间隔可调（默认 300s）；下限 30s 防误配 0/负值把定时器打成忙轮询。
+        await asyncio.sleep(max(30, _env_int("CB_MINIMAX_CODE_ALIGN_INTERVAL_S", 300)))
+        # 若在睡眠期间 minimax_code 被停用，最迟下一个周期开始时退出；不另行实时轮询。
+
+
+def _align_minimax_code_credentials() -> int:
+    """启动/定时 best-effort 凭据对齐：客户端 auth.json 的票比 DB 新就接管进来。
+
+    镜像 _align_traework_credentials（spec §3.3 的同一坑：拿旧 refresh_token 去刷会
+    把客户端刚刷好的票作废）。复用 store.adopt_credentials_from_client 的语义
+    （uid 一致 + 路径硬边界 + 只写非空值 + best-effort，见 store.py:765-841；
+    极性对齐 traework/token.py:140-254）。require_newer=True：**只认 expires_at 更大**
+    的凭据，绝不把网关刚刷新好的新票降级成客户端手里的旧票。
+    与 traework 版唯一实现差异：本通道的接管函数是**同步**的，直接调用即可，
+    不需要 asyncio.run。失败必须静默（逐账号 + 整体两层兜底），绝不阻断启动。
+    返回成功接管的账号数。
+    """
+    try:
+        if not providers.is_channel_enabled("minimax_code"):
+            return 0
+        adopted = 0
+        for account in db.list_accounts(provider="minimax_code"):
+            try:
+                if _store.adopt_credentials_from_client(account, require_newer=True):
+                    adopted += 1
+            except Exception:  # noqa: BLE001 - 单个账号失败不阻断其余账号/启动
+                continue
+        if adopted:
+            sys.stderr.write(
+                f"[startup] minimax_code: aligned {adopted} credential(s) from client auth.json\n"
+            )
+        return adopted
+    except Exception as exc:  # noqa: BLE001 - 整体失败也绝不让启动中断
+        sys.stderr.write(f"[startup] minimax_code credential align skipped: {exc!r}\n")
+        return 0
+
+
+def _schedule_minimax_code_align() -> None:
+    # 仅当启动时 minimax_code 已启用才调度；运行时停用由循环体内的检查负责退出。
+    if not providers.is_channel_enabled("minimax_code"):
+        return
+    try:
+        asyncio.get_running_loop().create_task(_minimax_code_align_loop())
     except RuntimeError:
         # No running loop (e.g. in tests or non-asyncio contexts); skip.
         pass
@@ -531,6 +608,23 @@ def main():
 
     # TraeWork hourly sync (60s grace before first run)
     _schedule_traework_sync()
+
+    # MiniMax Code 启动凭据对齐：客户端自刷新会轮转 refresh_token（ROTATION-VERDICT.md），
+    # 必须在任何一次网关 OAuth 刷新之前，先把磁盘上更新的票接管进 DB；接管只读本地
+    # auth.json + 写 DB，不发网络请求。best-effort，绝不阻断启动。
+    _align_minimax_code_credentials()
+
+    # 活性门（liveness）策略的运维可见性：启动时打印一行当前自刷模式 + 客户端进程探测结果。
+    # startup_note() 只含模式枚举值、进程名匹配子串（配置项本身）与平台名 ⇒ 绝无凭证原文；
+    # 探测只读本地进程表，不读写客户端文件、不发任何对 MiniMax 生产的网络请求（spec:694）。
+    # best-effort：任何异常都兜成一行 stderr，绝不阻断启动。
+    try:
+        sys.stderr.write(_mvs_liveness.startup_note() + "\n")
+    except Exception as exc:  # noqa: BLE001 - 运维摘要失败不影响网关可用性
+        sys.stderr.write(f"[startup] minimax_code liveness note skipped: {exc!r}\n")
+
+    # MiniMax Code 轻量对齐定时器（60s 宽限后按 CB_MINIMAX_CODE_ALIGN_INTERVAL_S 轮询）
+    _schedule_minimax_code_align()
 
     _print_banner(args.host, args.port, admin_token, admin_token_generated)
 

@@ -2,7 +2,11 @@
 enabled by default. GMI and Bailian ship as opt-in data-driven custom
 channels: their definitions live in the `custom_channels` settings key
 (seeded by `providers.custom_channels.seed_initial_definitions()` on first
-boot). User-defined custom channels use the same machinery."""
+boot). User-defined custom channels use the same machinery.
+
+`minimax_code` (MiniMax Code desktop client, Anthropic Messages dialect) is a
+built-in but also opt-in: reverse-engineered login-state channels must not be
+on by default, so it sits with gmi / bailian in `OPT_IN_PROVIDER_IDS`."""
 
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ from providers.protocol import (
     ChannelId,
     Provider,
 )
+from providers.minimax_code import PROVIDER as MINIMAX_CODE_PROVIDER
 from providers.qclaw import PROVIDER as QCLAW_PROVIDER
 from providers.qwenwork import PROVIDER as QWENWORK_PROVIDER
 from providers.qodercn import PROVIDER as QODERCN_PROVIDER
@@ -27,7 +32,7 @@ DEFAULT_PROVIDER_IDS: tuple[str, ...] = ("workbuddy", "qclaw", "qwenwork", "trae
 # Opt-in ids (gmi / bailian seed definitions + future custom channels). They
 # ship with the gateway but are NEVER auto-enabled: the admin must opt in via
 # CB_GATEWAY_PROVIDERS or the admin UI toggle.
-OPT_IN_PROVIDER_IDS: tuple[str, ...] = ("gmi", "bailian")
+OPT_IN_PROVIDER_IDS: tuple[str, ...] = ("gmi", "bailian", "minimax_code")
 
 _LOADED: dict[str, Provider] = {
     "workbuddy": WORKBUDDY_PROVIDER,
@@ -36,6 +41,7 @@ _LOADED: dict[str, Provider] = {
     "qodercn": QODERCN_PROVIDER,
     "traework": TRAEWORK_PROVIDER,
     "traesolo": TRAESOLO_PROVIDER,
+    "minimax_code": MINIMAX_CODE_PROVIDER,
 }
 
 # Settings-table keys for UI-driven overrides.
