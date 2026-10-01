@@ -361,7 +361,9 @@ def _account_dict(
         "access_token": access,
         "refresh_token": refresh,
         # 仓库约定：expires_at **一律毫秒**。spec:293 的 expiresAtMs 就是
-        # `now + expires_in*1000`（auth-core.js:599），本机观测距签发约 11 天（spec:317）。
+        # `now + expires_in*1000`（auth-core.js:599），本机观测 access token 实际 TTL
+        # 约 1 小时（spec:317 的"距签发约 11 天"是误记，已推翻；refresh_token 会轮转，
+        # 见 .tmp/mitm/minimax-code-20260919/ROTATION-VERDICT.md）。
         "expires_at": int(expires_at or 0),
         # 故意**不写** refresh_expires_at：spec 未记录 refresh token 有效期
         # （§10:704 未确认），写了会经 store_common.upsert_account 把刷新逻辑
@@ -723,3 +725,117 @@ def upsert_account(parsed: dict) -> dict:
     return upsert_account_by_uid(
         CHANNEL_ID, payload, extra_fields=("account_type",), merge_extra=True
     )
+
+
+# ============================================================
+# 凭据"从磁盘接管"（客户端自刷新轮转 refresh_token 的保守对策）
+# ============================================================
+# 实机验证（.tmp/mitm/minimax-code-20260919/ROTATION-VERDICT.md）：客户端每约 1h
+# 自刷新一次，且每次自刷新都会轮转 refresh_token（spec:694,704）⇒ 网关库内的
+# refresh_token 变成死票 ⇒ 网关下次 refresh 被拒(invalid_grant)、账号被判 expired。
+# 选定策略：网关**先**从磁盘接管客户端更新后的凭据（只读 auth.json、不轮转、不顶掉
+# 对方），只有磁盘上没有更新凭据时才由调用方回退到原有 OAuth refresh（token.py，
+# 保留"网关是唯一持有者"时的自刷新能力）。启动对齐与轻量定时器都传
+# require_newer=True：只认更新的票，绝不把网关手里的新票降级成客户端旧票。
+
+def _client_credentials_updated(account: dict, parsed: dict, *, require_newer: bool = True) -> bool:
+    """新凭据是否值得接管（语义逐字对齐 traework/token.py:140-160）。
+
+    require_newer=True（启动对齐 / 轻量定时器，本通道默认）：**只认 expires_at 更大**。
+      此时并未发生鉴权失败，若仅凭"token 不同"就接管，会把网关刚刷新好的新票
+      换成客户端手里的旧票（两边不同但客户端更旧），反而弄坏可用凭据。
+      解析不到到期（new_exp 为 0）不视为更新——绝不把有效到期砸成 0。
+    require_newer=False（自愈路径）：expires_at 更大，或 access/refresh token 与现有不同。
+      此时旧凭据已被上游判废，任何"不同的"客户端凭据都比手里的死票强。
+    """
+    old_exp = int(account.get("expires_at") or 0)
+    new_exp = int(parsed.get("expires_at") or 0)
+    if new_exp and new_exp > old_exp:
+        return True
+    if require_newer:
+        return False
+    for field in ("access_token", "refresh_token"):
+        old_v = str(account.get(field) or "")
+        new_v = str(parsed.get(field) or "")
+        if new_v and new_v != old_v:
+            return True
+    return False
+
+
+def adopt_credentials_from_client(account: dict, *, require_newer: bool = True) -> bool:
+    """从磁盘接管客户端落在 auth.json 里更新后的凭据（蓝本：traework/token.py:183-254）。
+
+    与蓝本的三处刻意差异（均由本通道实况决定，不是漏抄）：
+      * **同步**函数：本通道读的是明文 auth.json（spec:269,275），没有需要 await 的
+        解密链路；traework 的 async 语义在这里只会给调用方（gateway 启动/定时器）
+        添 asyncio 的负担。
+      * **默认 require_newer=True**：蓝本默认 False（它是纯"失效自救"场景）；本通道
+        主用法是启动对齐 + 轻量定时器（保守策略），调用方想走自救极性需显式传 False。
+      * **不写 refresh_expires_at**：蓝本第 245-246 行透传该键；本通道 _account_dict
+        刻意不维护该列（spec §10:704 未记录 refresh 有效期），保持一致。
+    另比蓝本严格一处：uid **任一为空即拒绝**（蓝本只在 old_uid 非空时核对）——本通道
+    uid 多为 `loginEpoch:` 派生值，空 uid 无从核对身份，保守不起疑。
+
+    红线：全程只有本地文件读取 + DB 写入，**绝不**对 MiniMax 生产发任何网络请求；
+    auth.json / auth-state.json **只读**、绝不回写（spec:694，与模块 docstring 的
+    "只读快照"决策一致——本函数写的是我们自己的 DB，不是客户端文件）。
+    任何异常 best-effort 降级为 False，绝不外抛打断请求链路。
+    日志只含账号 id、uid 是否一致、到期数值这类元信息，token 原文绝不入日志。
+
+    返回 True 表示已接管（调用方应立即用 DB 里的新凭据重试），False 表示维持原状。
+    """
+    account_id = int(account.get("id") or 0)
+    extra = account.get("extra") if isinstance(account.get("extra"), dict) else {}
+    auth_path = str(extra.get("auth_path") or "")
+    if not auth_path:
+        # 该账号没有记录客户端路径（纯粘贴导入）→ 本就没有自救素材。
+        logger.info(
+            "[minimax-code-adopt] 放弃：账号 %s 未记录客户端 auth.json 路径，无法接管"
+            "（可到管理页重新导入一次以记录路径）",
+            account_id,
+        )
+        return False
+    try:
+        # 复用 import_discovered：内含 prod/cn 命名空间两道硬边界（spec:8,267,289），
+        # 路径越界 / 文件不可读 / 记录不可用都会抛 ValueError → 这里接住即放弃。
+        parsed = import_discovered(auth_path)
+    except Exception as exc:  # noqa: BLE001 - 接管必须 best-effort，绝不外抛
+        # ValueError 文案只含定位信息与字段名（见 _read_document/_parse_auth_json），不含凭证。
+        logger.warning(
+            "[minimax-code-adopt] 放弃接管：读不到客户端凭据（%s）（账号 %s）", exc, account_id
+        )
+        return False
+    # uid 一致才允许接管，防止读到别的账号的凭据；任一为空都无法核对身份，一律拒绝。
+    old_uid = str(account.get("uid") or "")
+    new_uid = str(parsed.get("uid") or "")
+    if not old_uid or not new_uid or old_uid != new_uid:
+        logger.warning(
+            "[minimax-code-adopt] 放弃接管：客户端凭据与本账号 uid 无法核对一致"
+            "（为空或不一致，不打印 uid 原文），拒绝接管；账号 %s",
+            account_id,
+        )
+        return False
+    if not _client_credentials_updated(account, parsed, require_newer=require_newer):
+        # 客户端凭据没有（更新的）可接管内容 → 维持原状，由调用方回退原有 OAuth refresh。
+        # 这是定时器周期调用里最常见的"无需动作"分支，不打日志避免刷屏。
+        return False
+    patch: dict = {"status": "active"}
+    # 仅在解析出非空/非 0 值时才覆盖对应字段：expires_at 解析失败会得到 0，
+    # 无条件写入会把 DB 里有效的到期时间砸成 0（is_token_expired 判定随之错乱）。
+    new_access = str(parsed.get("access_token") or "")
+    new_refresh = str(parsed.get("refresh_token") or "")
+    if new_access:
+        patch["access_token"] = new_access
+    if new_refresh:
+        patch["refresh_token"] = new_refresh
+    new_exp = int(parsed.get("expires_at") or 0)
+    if new_exp:
+        patch["expires_at"] = new_exp
+    from storage import database as db  # 延迟导入，与 store_common/token.py 同款防环
+
+    db.update_account(account_id, patch)
+    logger.info(
+        "[minimax-code-adopt] 已从客户端 auth.json 接管更新后的凭据（账号 %s），状态置回 active",
+        account_id,
+    )
+    return True

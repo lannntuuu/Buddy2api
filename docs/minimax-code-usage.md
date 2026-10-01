@@ -9,6 +9,7 @@
 >
 > **2026-09-30 追加**：本机做了一次**受控 MITM 抓包**（1 条真实推理消息 + 2 次 `count_tokens`，**零重放**），
 > 已把静态推断里被推翻/补全的部分固化成 §10「MITM 实测（2026-09-30）」。
+> 同日追加 §11「凭据轮转实机结论与共存策略」（被动观察 auth.json 刷新前后，零额外流量，非抓包）。
 > 抓包已结束且环境已还原；本文档不触发任何新的抓包，也不向生产 API 发任何真实请求。
 
 ---
@@ -19,10 +20,12 @@
   不是 MiniMax 开放平台的 BYOK 接口（spec:134,141-142）。
 - **登录态**：复用桌面客户端已经登录好的**受管登录态**——凭证来自客户端自己落盘的
   `auth.json`（明文 JSON），网关只**读取快照**（见 §5）。
-- **默认关闭（opt-in）**：`minimax_code` 注册在 `providers/__init__.py` 的 `OPT_IN_PROVIDER_IDS`
-  里，与 `gmi` / `bailian` 同侧。理由：**逆向通道不应默认开启**。启用方式二选一：
-  - 环境变量：`CB_GATEWAY_PROVIDERS=workbuddy,qclaw,qwenwork,traework,traesolo,minimax_code`
-  - 管理页「通道管理」里对该通道点「启用」（`CB_GATEWAY_PROVIDERS` 一旦设置，UI 开关变只读）。
+- **默认已启用（2026-10 订正）**：`minimax_code` 虽仍列在 `providers/__init__.py` 的 `OPT_IN_PROVIDER_IDS`
+  且不在 `DEFAULT_PROVIDER_IDS`，但 `_parse_enabled()` 在**未设 `CB_GATEWAY_PROVIDERS` 且 DB 无
+  `enabled_channels`**（全新安装、没在管理页动过开关）时回退**全量 known 通道集合**——实测本通道
+  默认即启用。只有一种情况需要手动开：曾经管理页保存过 `enabled_channels`（当时没勾它），或显式收窄了
+  `CB_GATEWAY_PROVIDERS`——此时在「通道管理」点「启用」，或把它追加进
+  `CB_GATEWAY_PROVIDERS`（该变量一旦设置，UI 开关变只读）。
 - **模型**：`MiniMax-M3.1-Flash-Preview`（默认，MITM 实测 2026-09-30 dump-003:53）、
   `MiniMax-M3`、`MiniMax-M2.7`、`MiniMax-M2.7-highspeed`（后三档来自内置目录 spec:499-516，**保留**）。
   别名 `auto` 翻到默认模型；客户端 model-ref 写法 `minimax/MiniMax-M3.1-Flash-Preview`、
@@ -160,7 +163,11 @@ Anthropic 方言下 MiniMax 的思考控制是**二值开关**（spec:524-533,69
 - **风险**：spec:694 明确提示——`generation` 会换代、**refresh token 可能轮转**，
   与运行中的桌面客户端共用同一份凭证会**互相顶掉**（一边刷新，另一边的 refresh token 作废）。
   规格给出的建议就是「独立登录态或**只读快照**」，本通道取后者（`READ_ONLY_SNAPSHOT = True`）。
-- 401 恢复路径（spec:216,313）：失效 → 刷新 → **单次重放**；刷新失败或 `loginEpoch`
+  > **2026-09-30 实机坐实**：「可能轮转」已确认——客户端每约 1h 自刷新且**每次都会轮转
+  > refresh_token**（`.tmp/mitm/minimax-code-20260919/ROTATION-VERDICT.md`）。现行处置是
+  > **刷新前先从磁盘接管客户端更新后的凭据**（仍只读、不回写），策略与运维见 §11。
+- 401 恢复路径（spec:216,313）：失效 → **先从磁盘接管客户端新票（§11）** → 磁盘无新票才
+  走 OAuth 刷新 → **单次重放**；刷新失败或 `loginEpoch`
   变化即 logout。刷新打 `https://account.minimax.cn/oauth2/token`，
   `grant_type=refresh_token`（spec:241,312,694）。
 - 凭据导入面：`discover()` / `import_path()` / `parse_credentials()` / `upsert_account()`
@@ -175,6 +182,7 @@ Anthropic 方言下 MiniMax 的思考控制是**二值开关**（spec:524-533,69
 |---|---|
 | `CB_MINIMAX_CODE_AUTH_DIR` * | 覆盖 auth 根目录或凭证目录本身（默认扫 `%USERPROFILE%\.minimax\auth\prod\cn\mcode-public`）。 |
 | `CB_MINIMAX_CODE_REFRESH_SKEW_MS` * | 刷新提前量（毫秒），非 spec 实证值，缺省 `60000`。 |
+| `CB_MINIMAX_CODE_ALIGN_INTERVAL_S` * | 凭据对齐定时器间隔（秒），缺省 `300`、下限 `30`；语义与接管点见 §11。 |
 
 ---
 
@@ -264,7 +272,7 @@ Anthropic 信封常只给 `error.type` 字符串而无数字码，`ANTHROPIC_ERR
 | `Authorization` 之外用 `x-api-key` 传真 token 是否同权（受管 vs BYOK 是否同路径同权） | 仍未验证 | 源码里 `minimax` 与 `minimax_api` 是两个分开的入口（域名/路径不同，spec:706） |
 | `/mavis/api/*` 网关是否要求 `yy` / `x-signature`（账号签名是否外溢到 LLM 前缀） | 仍未验证（实测未发且成功） | 实测主请求 24 个头里**没有** `yy`/`x-signature`/`x-timestamp` ⇒ 至少默认路径不需要；但代码只把签名用在 `/v1/api/user/info`，`proxy.ipc.js` 注释暗示签名属 matrix 网关，**属推断**（spec:707） |
 | 是否存在 UA / 客户端版本的 **WAF 级校验** | 仍未验证 | 属反爬层而非协议层（spec:709）；单次抓包不足以证伪 |
-| access token 真实 TTL 与 refresh token 是否轮转 | 仍未验证 | `expiresAtMs` 是服务端签发值，静态只见客户端读取（spec:704）；本次无 401/刷新样本 |
+| access token 真实 TTL 与 refresh token 是否轮转 | **已实测（2026-09-30，非抓包）** | 被动观察客户端自刷新前后的 auth.json（零额外流量）：refresh_token **会轮转**、access token TTL **约 1 小时**（spec:317「约 11 天」为误记，已推翻）⇒ 详见 §11 与 `.tmp/mitm/minimax-code-20260919/ROTATION-VERDICT.md` |
 | `files/upload` 的 multipart 字段名与 file-id 引用格式 | 仍未验证 | 目录可配置，本机未触发上传（spec:710） |
 | 429/529 的退避参数与 `retry-after` 头 | 仍未验证 | 仅见本地退避表（spec:711）；本次 3 个响应**全是 200**，无错误样本 |
 | 401 / 402 响应体是否含剩余额度 | 仍未验证 | 同上，无错误样本 |
@@ -286,7 +294,9 @@ Anthropic 信封常只给 `error.type` 字符串而无数字码，`ANTHROPIC_ERR
 ## 9. 接入步骤（离线可做的部分）
 
 1. 在桌面客户端完成登录，确认 `%USERPROFILE%\.minimax\auth\prod\cn\mcode-public\auth.json` 存在。
-2. 启用通道：`CB_GATEWAY_PROVIDERS=workbuddy,...,minimax_code`，或管理页点「启用」。
+2. 确认通道已启用：**全新安装默认即启用**（§1 的 2026-10 订正）；只有此前在管理页保存过
+   `enabled_channels` 没勾它、或显式设过 `CB_GATEWAY_PROVIDERS` 时，才需点「启用」
+   或把它追加进 `CB_GATEWAY_PROVIDERS=workbuddy,...,minimax_code`。
 3. 管理页「通道管理」→ 选 MiniMax Code → 「重新检测」→「一键导入」；
    或直接粘贴 `auth.json` 内容 / 裸 JWT 建号（`parse_credentials` 会做形状适配）。
 4. 点该账号的「测试」：返回一句话即说明上游链路通。
@@ -360,3 +370,83 @@ Anthropic 信封常只给 `error.type` 字符串而无数字码，`ANTHROPIC_ERR
 6. **HTTP/2 + Brotli 是否必需**未证（本通道未宣告 br，httpx 自动解压）。
 
 > 上述任何一条要定论，**只能再走受控 MITM 抓包**，绝不用真实生产 API 试探/重放/压测。
+
+---
+
+## 11. 凭据轮转实机结论与共存策略（运维）
+
+§10 讲的是协议面，本节讲**凭据生命周期**——通道与桌面客户端并用时会不会失效、失效了怎么办。
+出处：`.tmp/mitm/minimax-code-20260919/ROTATION-VERDICT.md`（2026-09-30，**被动观察**客户端自刷新
+前后的 auth.json——只比对 refresh_token 的 SHA-256、不落原文，零额外流量，不是 MITM 抓包）。
+
+### 11.1 实机结论（更正 spec:317 与 §8 的旧口径）
+
+- **refresh_token 会轮转**：客户端一次自刷新即换新值（观测到 generation 9→10）。网关与客户端
+  共用同一份 auth.json 时，**任何一方刷新都会作废另一方库内的 refresh_token**
+  ——spec:694 / `SHARED_CREDENTIAL_WARNING` 的「可能轮转」就此坐实为「一定轮转」。
+- **access token 实际 TTL ≈ 1 小时**（刷新后剩余 59.8 min）。**spec:317 记的「观测约 11 天」
+  是误记，已被推翻**（代码注释与 §8 的旧口径已随订正）。
+- **后果链（为什么网关会周期性失效）**：客户端每约 1h 自刷新并轮转 refresh_token
+  ⇒ 网关库内 refresh_token 变**死票** ⇒ 网关下次 OAuth refresh 被拒（`invalid_grant`）
+  ⇒ 账号被判 `expired`。即：**只要客户端和网关并用，网关会周期性失效**——这是 bug 实况，
+  不是设计选择，处置见 11.2。
+
+### 11.2 现策略：刷新前先磁盘接管，无新票才回退 OAuth 刷新
+
+选定**保守策略**：网关在发起任何 refresh **之前**，先从磁盘接管客户端落在 auth.json 里更新后的
+凭据（`providers/minimax_code/store.py::adopt_credentials_from_client`，同步函数，语义逐字对齐
+`providers/traework/token.py:140-254` 的 `_client_credentials_updated` +
+`adopt_credentials_from_client`）；**接管不轮转、不顶掉对方**。只有磁盘上没有更新凭据时才回退
+原有 `grant_type=refresh_token` 的 OAuth 刷新（`token.py`），保留「网关是唯一持有者」时的
+自刷新能力。接管点共三处，**全部 `require_newer=True`**：
+
+| 接管点 | 位置 | 说明 |
+|---|---|---|
+| 请求路径刷新前 | `chat.py::_refresh_to_account` | 接管成功即已拿到新票，直接返回，**不再**打 OAuth |
+| 启动对齐 | `gateway/server.py::_align_minimax_code_credentials`（`startup_scan` 之后） | best-effort，绝不阻断启动 |
+| 轻量定时器 | `gateway/server.py::_minimax_code_align_loop` | 60s 宽限后每 `CB_MINIMAX_CODE_ALIGN_INTERVAL_S`（默认 **300** 秒，下限 30s）一轮；通道停用即退出 |
+
+**`require_newer=True` 的语义是「只认更新、绝不降级」**：仅接管 `expires_at` 比网关库内**更大**的
+凭据。对齐/定时器触发时并未发生鉴权失败，若仅凭「token 不同」就接管，可能把网关刚刷新好的新票
+换成客户端手里的旧票（两边不同但客户端更旧），反而弄坏可用凭据。
+
+接管的硬守护（运维安全面）：
+
+- **只做本地文件读取 + 网关 DB 写入**：auth.json / auth-state.json **只读、绝不回写**
+  （spec:694，`READ_ONLY_SNAPSHOT`；`token.py` 的 `WRITEBACK_TO_CLIENT_AUTH_JSON` 继续默认
+  False 且无实现路径读取）；启动对齐与定时器**不新增任何**对 MiniMax 生产的网络请求，
+  不构成额外风控面。
+- **uid 一致才接管**：任一为空即拒绝（本通道 uid 多为 `loginEpoch:` 派生值，无从核对就不动）。
+- **patch 只写非空值**：`expires_at` 解析失败得到 0 时不写库（避免把 DB 里有效到期砸成 0，
+  `is_token_expired` 判定随之错乱）；接管成功同时把 `status` 置回 `active`。
+- **best-effort 静默失败**：账号未记录 `auth_path`（纯粘贴导入）、文件读不到、命名空间硬边界
+  不过（§6）、任何意外异常 ⇒ 一律降级为「维持原状」，绝不中断启动或请求链路。
+- **日志零凭证**：只含账号 id、uid 是否一致、到期数值这类元信息，token 原文绝不入日志。
+- 若接管与回退刷新都失败（真·唯一持有者且票已死），账号重试走 trae_shared 的指数负缓存
+  （60×2^(n-1)s、封顶 600s 不再对同一账号重放 refresh），不会每请求都重打 OAuth（`chat.py`）。
+
+### 11.3 运维须知
+
+- **客户端保持登录**：网关自动跟随其约 1h 一次的自刷新，长期可用，无需人工干预
+  （请求路径刷新前先看磁盘，最迟一个对齐周期内跟上）。
+- **网关报 `expired`（invalid_grant）时**：① 去客户端发一条消息，让它自刷新、新票落盘；
+  ② 在管理页「通道管理」对该账号**重新导入一次**即可。注意：**接管/重新导入只覆盖网关 DB，
+  绝不动客户端文件**；纯粘贴建号的账号没记录客户端 `auth_path`，对齐与定时器无从接管，
+  必须经这一步重新导入补上路径。
+- **对齐周期调参**：`CB_MINIMAX_CODE_ALIGN_INTERVAL_S`（默认 300 秒）。客户端票约 1h 一轮，
+  5 分钟粒度足够；下限 30s 是防误配 0/负值把定时器打成忙轮询。
+
+### 11.4 暂缓方案（本期不实现）：独立登录
+
+现策略是「共存跟随」，不是治本：只要与桌面客户端共用同一个 refresh_token，互相顶掉的风险就
+还在。**治本方案 = 网关独立登录**：另起一次 device-code OAuth2 + PKCE 登录（spec:231-249:
+`POST {oauth 面}/oauth2/device/code` + `grant_type=urn:ietf:params:oauth:grant-type:device_code`，
+PKCE S256，client_id `mcode-public`，spec:13,243-249），让网关**自持一份凭证**，与客户端不再
+共用 refresh_token，从而彻底消除互相顶掉。**后续按需再做**，本期只登记于此。需要的改动面：
+
+1. `token.py`：新增 `device_code` grant 流程（申请设备码 → 轮询 token 端点直至用户授权 →
+   签发并转入既有自刷新）。
+2. `store.py`：支持独立凭据命名空间（网关自己的 auth 目录，绕开客户端
+   `prod/cn/mcode-public` 目录与 `auth.lock` 跨进程互斥，spec:279,315；§6 的两道硬边界
+   需为独立目录显式放行）。
+3. 管理页：为本通道加「独立登录」入口（展示设备码/验证 URL、轮询登录状态、成功后入库自持账号）。

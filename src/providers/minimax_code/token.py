@@ -67,7 +67,8 @@ FORM_CONTENT_TYPE = getattr(_C, "OAUTH_FORM_CONTENT_TYPE", None) or "application
 # 刷新阈值（可配置）
 # ---------------------------------------------------------------------------
 # spec:312 只给出 minValidityMs 的**比较语义**（expiresAtMs - now >= minValidityMs 则不刷）；
-# TODO(spec:704)：真实 TTL 静态无法确认（spec:317 观测约 11 天），60_000 这个数值来自任务契约
+# 实机验证（ROTATION-VERDICT.md）：access token TTL≈1h、refresh_token 每次刷新轮转
+# （spec:317 记的"观测约 11 天"是误记，已推翻）。60_000 这个数值来自任务契约
 # （TOKEN_REFRESH_SKEW_MS），非 spec 实证——所以做成常量 + 环境变量覆盖，别当事实引用。
 TOKEN_REFRESH_SKEW_MS = 60_000
 

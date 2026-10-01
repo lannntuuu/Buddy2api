@@ -53,6 +53,7 @@ from accounts import auth_manager
 from providers import store_common
 from providers.host_override import channel_host
 from providers.minimax_code import constants as K
+from providers.minimax_code import store as _store
 from providers.minimax_code import translate as T
 from providers.minimax_code.constants import (
     ALIASES,
@@ -343,8 +344,31 @@ async def _refresh_to_account(account: dict) -> dict:
     （第 n 次连续失败后 60×2^(n-1)s、封顶 600s 不再对同一账号重放 refresh）——
     既避免上游 OAuth 故障时每个请求都重放失败的刷新（风控），也让过期账号有机会被
     别的可用账号顶上。
+
+    **刷新前先做磁盘接管**（`.tmp/mitm/minimax-code-20260919/ROTATION-VERDICT.md`；
+    spec:694,704）：桌面客户端每约 1h 自刷新一次、每次自刷新都会**轮转 refresh_token**
+    （access token 实测 TTL 约 1h，spec:317 记的 11 天已推翻）⇒ 客户端与网关并用时网关
+    库内的 refresh_token 是死票，直接走 OAuth 刷新必被拒（invalid_grant）、账号被判
+    expired。故先 `_store.adopt_credentials_from_client`（**只读**客户端 auth.json、
+    不回写、不轮转，spec:694 共存红线）把客户端刚更新的新票接管进 DB；接管成功即已
+    拿到可用新票，直接返回，**不再**打 OAuth。`require_newer=True`：只认磁盘上明确
+    更新的票，绝不把网关手里的新票降级成客户端旧票。磁盘没有更新凭据（读不到 / uid
+    对不上 / 无新票 / 接管自身出任何异常）才回退原有 refresh，保留"网关是唯一持有者"
+    时的自刷新能力。
     """
     aid = int(account.get("id") or 0)
+    try:
+        # 同步函数（明文 auth.json，无解密 await）⇒ 直接调，别 await。
+        # best-effort：路径未记录 / 文件不可读 / uid 核对不上 / 意外异常一律吞掉，
+        # 本函数在**请求路径**上（选号自愈 + 401 单次重放），接管绝不能中断请求。
+        adopted = _store.adopt_credentials_from_client(account, require_newer=True)
+    except Exception:  # noqa: BLE001 - 接管是加分项，失败一律回落到原有 OAuth 刷新
+        adopted = False
+    if adopted:
+        fresh = db.get_account(aid)
+        if fresh:
+            return fresh
+        # 极窄竞态：刚接管完账号行就被删 → 不 return，继续走原有刷新分支处理。
     if not await refresh_account(account):
         # 消息不含任何凭证原文（token.py 的异常同样只含状态码/OAuth error 码）。
         raise MiniMaxCodeAuthError(

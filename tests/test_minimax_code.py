@@ -1699,3 +1699,285 @@ def test_channel_id_prefix_is_stripped():
         assert "/" not in built["model"]
         # 落到具体模型 ⇒ 该带的方言字段也跟着对（M3 族发 thinking）。
         assert built["thinking"] == {"type": "adaptive", "display": THINKING_DISPLAY_SUMMARIZED}
+
+
+# ============================================================
+# 12) 从磁盘接管凭据 + 刷新前置接管（客户端自刷新轮转 refresh_token 的保守对策）
+# ------------------------------------------------------------
+# 实机依据：``.tmp/mitm/minimax-code-20260919/ROTATION-VERDICT.md`` + spec:694,704。
+#   客户端每约 1h 自刷新一次，且每次自刷新都会**轮转 refresh_token**（access token
+#   实测 TTL ≈ 1h，spec:317 记的"11 天"已推翻）⇒ 网关库内的 refresh_token 变成
+#   死票 ⇒ 网关下次 OAuth refresh 被拒（invalid_grant）、账号被判 expired，即
+#   "客户端与网关并用时网关会周期性失效"。
+# 选定策略（保守）：网关**先**从磁盘只读接管客户端更新后的凭据（不轮转、不顶掉
+#   对方），只有磁盘没有更新凭据时才回退原有 OAuth refresh（保留"网关是唯一持有者"
+#   时的自刷新能力）。启动对齐 + 轻量定时器 + 刷新前置接管一律 require_newer=True
+#   （只认更新、绝不降级）。
+# 被测面：``store.adopt_credentials_from_client``（store.py:765-841，语义逐字对齐
+#   traework/token.py:140-254）与 ``chat._refresh_to_account``（chat.py:339-383；
+#   启动/定时器骨架见 gateway/server.py:172-230）。
+# 红线复核：接管只做本地文件读取 + DB 写入，**零网络**；auth.json **只读**（哨兵
+#   字节级 + mtime 双重校验）；下面全部只用合成假值，真实 token 原文绝不出现。
+# ============================================================
+
+# 合成假值（绝不代表真实 token 形状/内容）：DB 侧沿用本文件既有 FAKE_AT/FAKE_RT，
+# 磁盘侧用明显不同的 AT-FROM-DISK / RT-FROM-DISK-ROT（后者模拟客户端轮转后的新票）。
+ADOPT_AT_DISK = "AT-FROM-DISK"
+ADOPT_RT_DISK = "RT-FROM-DISK-ROT"
+ADOPT_AT_OAUTH = "AT-FROM-OAUTH"
+ADOPT_RT_OAUTH = "RT-FROM-OAUTH"
+# 到期时间：网关库里那张已被客户端轮转成死票的旧票 vs 客户端刚写盘的新票。
+EXP_DB_OLD = 1_800_000_000_000
+EXP_DISK_NEW = 1_893_427_200_000
+# 真实 auth.json 记录没有 subject/accountId ⇒ uid 回退 loginEpoch（见
+# test_opaque_token_falls_back_to_login_epoch_uid），接管核对的也是这个派生 uid。
+ADOPT_LOGIN_EPOCH = "xyz-adopt-fake"
+ADOPT_UID = f"loginEpoch:{ADOPT_LOGIN_EPOCH}"
+
+
+def _client_auth_doc(
+    *,
+    access: str,
+    refresh: str,
+    expires_at_ms: int,
+    login_epoch: str = ADOPT_LOGIN_EPOCH,
+    generation: int = 10,
+) -> dict:
+    """一份与本机实测**同形**的合成 auth.json（generation 递增见 ROTATION-VERDICT）。"""
+    return {
+        "schemaVersion": 1,
+        "records": {
+            FROZEN_RECORD_KEY: {
+                "schemaVersion": 1,
+                "accessToken": access,
+                "refreshToken": refresh,
+                "tokenType": "Bearer",
+                "clientId": "mcode-public",
+                "scopes": ["agent.default"],
+                "audience": "agent-backend",
+                "expiresAtMs": expires_at_ms,
+                "generation": generation,
+                "loginEpoch": login_epoch,
+            }
+        },
+    }
+
+
+def _write_client_auth(
+    root: Path, *, access: str, refresh: str, expires_at_ms: int,
+    login_epoch: str = ADOPT_LOGIN_EPOCH,
+) -> Path:
+    """在 ``<root>/prod/cn/mcode-public/auth.json`` 落客户端凭据哨兵文件，返回其路径。"""
+    folder = root / "prod" / "cn" / "mcode-public"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / store.CREDENTIALS_FILENAME
+    path.write_text(
+        json.dumps(
+            _client_auth_doc(
+                access=access, refresh=refresh, expires_at_ms=expires_at_ms,
+                login_epoch=login_epoch,
+            ),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _adopt_account(
+    auth_path,
+    *,
+    uid: str = ADOPT_UID,
+    access: str = FAKE_AT,
+    refresh: str = FAKE_RT,
+    expires_at: int = EXP_DB_OLD,
+    status: str = "active",
+) -> dict:
+    """往隔离 DB 塞一个带（或不带）``extra.auth_path`` 的网关账号，返回账号行。"""
+    extra: dict = {"generation": 9}
+    if auth_path is not None:
+        extra["auth_path"] = str(auth_path)
+    aid = db.add_account({
+        "name": f"{CHANNEL_ID}-adopt",
+        "uid": uid,
+        "provider": CHANNEL_ID,
+        "access_token": access,
+        "refresh_token": refresh,
+        "expires_at": int(expires_at),
+        "status": status,
+        "extra": extra,
+    })
+    return db.get_account(aid)
+
+
+def test_adopt_credentials_newer_token(isolated_db, monkeypatch, auth_root):
+    """磁盘票更新（expires_at 更大）⇒ 接管 True 且只写非空字段；**客户端文件一字未动**。
+
+    本策略的主干：接管 = 读盘 + 写我们自己的 DB，绝不回写 auth.json（spec:694 共存
+    红线）。store.py:765-841 的 patch 只写非空 access/refresh/expires_at + status
+    active，其余列与 extra 原样保留 —— 不整行覆盖。
+    """
+    path = _write_client_auth(
+        auth_root / "auth",
+        access=ADOPT_AT_DISK, refresh=ADOPT_RT_DISK, expires_at_ms=EXP_DISK_NEW,
+    )
+    monkeypatch.setenv(store.ENV_AUTH_DIR, str(path.parent))  # 只把临时目录纳入白名单
+    before_bytes = path.read_bytes()
+    before_mtime = path.stat().st_mtime_ns
+
+    account = _adopt_account(path)  # 库内：死票 + 更旧到期
+    assert account["access_token"] == FAKE_AT and account["expires_at"] == EXP_DB_OLD
+
+    assert store.adopt_credentials_from_client(account, require_newer=True) is True
+
+    after = db.get_account(account["id"])
+    assert after["access_token"] == ADOPT_AT_DISK
+    assert after["refresh_token"] == ADOPT_RT_DISK  # 客户端轮转后的新 refresh 也接管进来
+    assert after["expires_at"] == EXP_DISK_NEW
+    assert after["status"] == "active"
+    # 不整行覆盖：uid / provider / extra（含 provenance 的 auth_path）都得留着。
+    assert after["uid"] == ADOPT_UID and after["provider"] == CHANNEL_ID
+    assert after["extra"]["auth_path"] == str(path)
+
+    # 只读快照红线（哨兵字节级 + mtime 双重校验，与 §9 端到端用例同一手法）。
+    assert path.read_bytes() == before_bytes
+    assert path.stat().st_mtime_ns == before_mtime
+    assert not (path.parent / store.AUTH_STATE_FILENAME).exists()
+
+    # 接管全程不碰网络：autouse 的"拒绝一切真实请求"闸门一次都没被触发。
+    # 凭证也不得被抄进诊断面。
+    assert ADOPT_AT_DISK not in json.dumps(after["extra"], ensure_ascii=False, default=str)
+
+
+def test_adopt_never_downgrades(isolated_db, monkeypatch, auth_root):
+    """磁盘票更旧 ⇒ require_newer=True 必须 False 且 DB 不变（绝不把好票换成旧票）。
+
+    极性出处：``store._client_credentials_updated``（逐字对齐 traework/token.py:140-160）
+    —— 启动对齐/定时器调用时**并未发生鉴权失败**，只凭"token 不同"就接管会把网关
+    刚刷好的新票换成客户端手里的旧票。
+    """
+    path = _write_client_auth(
+        auth_root / "auth",
+        access=ADOPT_AT_DISK, refresh=ADOPT_RT_DISK, expires_at_ms=EXP_DB_OLD,
+    )
+    monkeypatch.setenv(store.ENV_AUTH_DIR, str(path.parent))
+    account = _adopt_account(path, expires_at=EXP_DISK_NEW)  # 网关手里的票更新
+
+    assert store.adopt_credentials_from_client(account, require_newer=True) is False
+
+    after = db.get_account(account["id"])
+    assert after["access_token"] == FAKE_AT
+    assert after["refresh_token"] == FAKE_RT
+    assert after["expires_at"] == EXP_DISK_NEW  # 没被换成更旧的值
+
+    # 对照组：自愈极性（require_newer=False）在"票不同"时才允许接管——
+    # 这条差异就是 require_newer 开关的全部意义（traework 有同款对照用例）。
+    assert store.adopt_credentials_from_client(after, require_newer=False) is True
+    assert db.get_account(account["id"])["access_token"] == ADOPT_AT_DISK
+
+
+def test_adopt_rejects_other_uid(isolated_db, monkeypatch, auth_root):
+    """磁盘凭据属于另一个账号 ⇒ 拒绝接管（uid 一致是硬前提，防读串号）。"""
+    path = _write_client_auth(
+        auth_root / "auth",
+        access=ADOPT_AT_DISK, refresh=ADOPT_RT_DISK, expires_at_ms=EXP_DISK_NEW,
+        login_epoch="someone-else-epoch",
+    )
+    monkeypatch.setenv(store.ENV_AUTH_DIR, str(path.parent))
+    account = _adopt_account(path)  # 本账号 uid 锚在 ADOPT_LOGIN_EPOCH 上
+
+    assert store.adopt_credentials_from_client(account, require_newer=True) is False
+
+    after = db.get_account(account["id"])
+    assert after["access_token"] == FAKE_AT and after["refresh_token"] == FAKE_RT
+    assert after["expires_at"] == EXP_DB_OLD
+
+
+def test_adopt_no_auth_path_is_noop(isolated_db):
+    """纯粘贴账号（extra 没有 auth_path）⇒ False、不抛异常（best-effort 红线）。
+
+    该分支在请求路径上必须安静：粘贴进来的凭据本就没有"客户端素材"可接管，回退
+    原有 OAuth refresh 是调用方的事。
+    """
+    account = _adopt_account(None)
+    assert "auth_path" not in account["extra"]
+
+    assert store.adopt_credentials_from_client(account, require_newer=True) is False
+
+    after = db.get_account(account["id"])
+    assert after["access_token"] == FAKE_AT and after["refresh_token"] == FAKE_RT
+    assert after["status"] == "active"
+
+
+def test_refresh_to_account_adopts_before_oauth(isolated_db, monkeypatch):
+    """刷新入口**先接管**：接管成功即返回 DB 新账号，绝不触发 OAuth refresh。
+
+    这是"客户端与网关并用时网关周期性失效"的正解（ROTATION-VERDICT 策略 1/3）：
+    拿库内那张已被轮转的死票去 POST /oauth2/token 只会 invalid_grant 并把账号判死，
+    而磁盘上的新票是零成本、零风控面的。桩 refresh_account 一旦被 await 就抛
+    AssertionError ⇒ 任何回退都当场红。
+    极性同样钉住：接管必须以 require_newer=True 调用（只认更新、绝不降级）。
+    """
+    account = _adopt_account(None)
+    polarities: list[bool] = []
+
+    def fake_adopt(target: dict, *, require_newer: bool) -> bool:
+        polarities.append(require_newer)
+        db.update_account(
+            int(target["id"]),
+            {
+                "access_token": ADOPT_AT_DISK,
+                "refresh_token": ADOPT_RT_DISK,
+                "expires_at": EXP_DISK_NEW,
+                "status": "active",
+            },
+        )
+        return True
+
+    async def forbidden_refresh(target: dict) -> bool:
+        raise AssertionError("接管成功后不得再打 OAuth refresh（会拿死票换 invalid_grant）")
+
+    monkeypatch.setattr(store, "adopt_credentials_from_client", fake_adopt)
+    monkeypatch.setattr(chat, "refresh_account", forbidden_refresh)
+
+    fresh = asyncio.run(chat._refresh_to_account(account))
+
+    assert polarities == [True]
+    assert int(fresh["id"]) == int(account["id"])
+    assert fresh["access_token"] == ADOPT_AT_DISK
+    assert fresh["refresh_token"] == ADOPT_RT_DISK
+    assert fresh["expires_at"] == EXP_DISK_NEW
+
+
+def test_refresh_to_account_falls_back_when_no_update(isolated_db, monkeypatch):
+    """磁盘没有更新凭据（接管 False）⇒ 回退原有 OAuth refresh，旧行为不破。
+
+    ROTATION-VERDICT 策略 3：接管是**纯新增**，网关作为唯一持有者（磁盘没有新票 /
+    读不到 / uid 对不上）时仍须能自刷新，既有 refresh 语义不能因此退化。
+    """
+    account = _adopt_account(None)
+    calls: list[int] = []
+
+    async def fake_refresh(target: dict) -> bool:
+        calls.append(int(target["id"]))
+        db.update_account(
+            int(target["id"]),
+            {
+                "access_token": ADOPT_AT_OAUTH,
+                "refresh_token": ADOPT_RT_OAUTH,
+                "expires_at": EXP_DISK_NEW,
+                "status": "active",
+            },
+        )
+        return True
+
+    monkeypatch.setattr(
+        store, "adopt_credentials_from_client", lambda target, *, require_newer: False
+    )
+    monkeypatch.setattr(chat, "refresh_account", fake_refresh)
+
+    fresh = asyncio.run(chat._refresh_to_account(account))
+
+    assert calls == [int(account["id"])]  # 恰好一次，不放大
+    assert fresh["access_token"] == ADOPT_AT_OAUTH
+    assert fresh["refresh_token"] == ADOPT_RT_OAUTH

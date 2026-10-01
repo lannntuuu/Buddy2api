@@ -128,8 +128,10 @@ TOKEN_TYPE_BEARER = "Bearer"  # spec:258,291
 JWT_CLAIM_KEYS = ("sub", "account_id", "scope", "scp", "exp")  # spec:258
 # staging 专属：设备码请求带 `X-User-Pre: 1`（spec:259）。**prod 不发**（spec §8=prod）。
 STAGING_PRE_HEADER = ("X-User-Pre", "1")  # spec:259 仅 cn-staging/en-staging
-# TODO(spec:704)：access token 真实 TTL 与 refresh_token 是否轮转，静态只见客户端读
-# expiresAtMs（spec:317 观测约 11 天），故刷新策略按「到期前留足窗口」实现，不写死 TTL。
+# 实机已定论（.tmp/mitm/minimax-code-20260919/ROTATION-VERDICT.md）：access token 实际
+# TTL 约 1 小时（spec:317 记的"约 11 天"是误记，已推翻），且 **refresh_token 每次刷新都轮转**
+# （被动观测 generation 9→10 时 refresh_token 同步换值）。故刷新策略仍按「到期前留足窗口」
+# 实现、不写死 TTL；但"网关先接管磁盘新票"是硬约束（见 store.adopt_credentials_from_client）。
 REFRESH_MIN_VALIDITY_MS = 5 * 60 * 1000  # spec:316 AUTH_LEASE_MAX_MIN_VALIDITY_MS（客户端租约口径）
 REFRESH_MIN_VALIDITY_S = REFRESH_MIN_VALIDITY_MS // 1000  # spec:312 minValidityMs 同窗口（秒）
 LEGACY_COMPATIBILITY_LEASE_MS = 5 * 60 * 1000  # spec:316 legacy 兼容租约（同一量级）
