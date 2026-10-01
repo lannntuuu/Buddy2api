@@ -44,6 +44,7 @@ from accounts import auth_manager
 from accounts import control_plane
 import providers
 from providers.traework.token import adopt_credentials_from_client
+from providers.minimax_code import liveness as _mvs_liveness  # 自刷新活性门（只读探测），见下方对齐小节
 from providers.minimax_code import store as _store  # 磁盘接管原语（同步），见下方对齐小节
 from gateway import router as gateway_router
 from gateway.version import VERSION
@@ -612,6 +613,15 @@ def main():
     # 必须在任何一次网关 OAuth 刷新之前，先把磁盘上更新的票接管进 DB；接管只读本地
     # auth.json + 写 DB，不发网络请求。best-effort，绝不阻断启动。
     _align_minimax_code_credentials()
+
+    # 活性门（liveness）策略的运维可见性：启动时打印一行当前自刷模式 + 客户端进程探测结果。
+    # startup_note() 只含模式枚举值、进程名匹配子串（配置项本身）与平台名 ⇒ 绝无凭证原文；
+    # 探测只读本地进程表，不读写客户端文件、不发任何对 MiniMax 生产的网络请求（spec:694）。
+    # best-effort：任何异常都兜成一行 stderr，绝不阻断启动。
+    try:
+        sys.stderr.write(_mvs_liveness.startup_note() + "\n")
+    except Exception as exc:  # noqa: BLE001 - 运维摘要失败不影响网关可用性
+        sys.stderr.write(f"[startup] minimax_code liveness note skipped: {exc!r}\n")
 
     # MiniMax Code 轻量对齐定时器（60s 宽限后按 CB_MINIMAX_CODE_ALIGN_INTERVAL_S 轮询）
     _schedule_minimax_code_align()

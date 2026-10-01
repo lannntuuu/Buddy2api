@@ -185,6 +185,15 @@ def _clean_process_state(monkeypatch):
         token_module, "get_client",
         lambda: httpx.AsyncClient(transport=httpx.MockTransport(_offline)),
     )
+    # 活性门默认焊成"客户端未运行"⇒ 既有用例不受本机进程表影响：否则在开着
+    # MiniMax Code 的开发机上，"adopt 失败 → 回退 OAuth"这类用例会因网关让位
+    # （真实 _PROBE 扫到客户端进程）而环境相关地飘红。本模块 §13 的活性门用例
+    # 各自 monkeypatch liveness._PROBE / 环境变量覆盖此默认（用例体在 fixture 之后跑，
+    # 后写生效）。这里把 _PROBE 固定返回 False（等价"没检测到客户端"→ 网关照常自刷）。
+    from providers.minimax_code import liveness as _liveness
+    monkeypatch.setattr(_liveness, "_PROBE", lambda _sub: False)
+    monkeypatch.delenv("CB_MINIMAX_CODE_GATEWAY_SELF_REFRESH", raising=False)
+    monkeypatch.delenv("CB_MINIMAX_CODE_CLIENT_PROCESS_MATCH", raising=False)
     yield
     chat.set_transport(None)
     rate_limits.clear()
@@ -1981,3 +1990,472 @@ def test_refresh_to_account_falls_back_when_no_update(isolated_db, monkeypatch):
     assert calls == [int(account["id"])]  # 恰好一次，不放大
     assert fresh["access_token"] == ADOPT_AT_OAUTH
     assert fresh["refresh_token"] == ADOPT_RT_OAUTH
+
+
+# ============================================================
+# 13) 客户端活性门（liveness）+ 「deferred」在刷新/401 重放链路上的处置
+# ------------------------------------------------------------
+# 被测实现：``providers/minimax_code/liveness.py``（``is_client_running`` 经模块级
+#   ``_PROBE`` 注入、``self_refresh_mode`` 读 ``CB_MINIMAX_CODE_GATEWAY_SELF_REFRESH``、
+#   ``allow_gateway_self_refresh`` 的 auto/on/off 三态）；``chat._refresh_to_account``
+#   的活性门分支；``chat.DEFER`` 哨兵在 ``_recover_after_401`` /
+#   ``_post_with_auth_recovery`` / ``_stream_with_auth_recovery`` / ``chat_completions``
+#   （非流式 + 流式）与 ``_deferred_classified`` 里的三态消费。
+# 为什么值得钉住（spec:694 + ROTATION-VERDICT）：网关与桌面客户端**共用同一份 OAuth
+#   凭据**，客户端约每 1h 自刷一次且每次**轮转 refresh_token** ⇒ 客户端在运行时网关
+#   必须让位：
+#     * 不打 OAuth（抢刷会把客户端手里的票作废、把对方顶下线，且绕不过客户端的
+#       auth.lock，spec:279,315）；
+#     * **绝不**把"让位"当成"鉴权失效"去标 expired（那会把没坏的账号踢出选号池，
+#       直到定时器/人工才恢复，比原 bug 更瞎）⇒ 对外只能是可重试 503。
+#   降级方向同样是事实：auto 的探测任何失败判为"客户端没开"⇒ 放行自刷（宁回退旧行为，
+#   也不被探测 bug 弄瞎）；非法 env 取值归约 auto（不因笔误改变行为极性）。
+# 离线保证：进程探测一律换 ``liveness._PROBE`` 桩（真实 Toolhelp32 扫描一次都不跑）、
+#   ``refresh_account`` 一律 monkeypatch（零真实 OAuth）、上游走 ``chat.set_transport``
+#   的 MockTransport，autouse 的"拒绝一切真实请求"闸门兜底；本组用例连
+#   ``store.adopt_credentials_from_client`` 都用桩替换 ⇒ 不读也不写任何客户端文件。
+# 凭证安全：只用本文件既有假值；断言逐个检查异常消息/对外错误体不含凭证原文。
+# ============================================================
+
+def _stub_liveness(monkeypatch, running: bool) -> list[str]:
+    """把活性门接到假探针上，返回探针收到的匹配子串列表（用于数调用次数）。
+
+    ``running`` 决定"客户端在不在运行"；同时清空两个 ``CB_MINIMAX_CODE_*`` 门控 env
+    ⇒ 用例默认落在缺省 ``auto``，不受本机运维遗留配置影响（要 on/off 的用例再显式
+    setenv）。探针是唯一注入点：不扫真实进程表、不碰网络、不碰磁盘。
+    """
+    from providers.minimax_code import liveness
+
+    seen: list[str] = []
+
+    def fake_probe(substring: str) -> bool:
+        seen.append(substring)
+        return running
+
+    monkeypatch.setattr(liveness, "_PROBE", fake_probe)
+    monkeypatch.delenv(liveness.ENV_GATEWAY_SELF_REFRESH, raising=False)
+    monkeypatch.delenv(liveness.ENV_CLIENT_PROCESS_MATCH, raising=False)
+    return seen
+
+
+def _spy_mark_account_failure(monkeypatch) -> list[tuple[int, int]]:
+    """记录 ``mark_account_failure`` 的 (账号 id, 状态码)，并**照常执行**真实现。
+
+    照常执行是刻意的：若实现退化成"deferred 也按 401/403 判死"，本组用例既能在
+    调用清单上红，也能在 DB ``status == "expired"`` 上红（两道信号，不靠单点）。
+    """
+    calls: list[tuple[int, int]] = []
+    real = auth_manager.mark_account_failure
+
+    def spy(aid: int, status_code: int = 0) -> None:
+        calls.append((int(aid), int(status_code)))
+        return real(aid, status_code)
+
+    monkeypatch.setattr(auth_manager, "mark_account_failure", spy)
+    return calls
+
+
+def test_is_client_running_follows_injected_probe(monkeypatch):
+    """注入点有效：True/False 直通；匹配子串每次现读 env；探测异常 fail-open 成 False。"""
+    from providers.minimax_code import liveness
+
+    seen = _stub_liveness(monkeypatch, True)
+    assert liveness.is_client_running() is True
+    assert seen == [liveness.SUBSTRING]  # 缺省匹配子串来自 constants（"minimax code"）
+
+    seen = _stub_liveness(monkeypatch, False)
+    assert liveness.is_client_running() is False
+    assert len(seen) == 1
+
+    # 运维改 ``CB_MINIMAX_CODE_CLIENT_PROCESS_MATCH`` 不必重启：探针每次拿到现读值，
+    # 且这一层**不** lower（大小写归一是探测侧的事）。
+    monkeypatch.setenv(liveness.ENV_CLIENT_PROCESS_MATCH, "MiniMax Code")
+    assert liveness.client_process_match() == "MiniMax Code"
+    assert liveness.is_client_running() is False
+    assert seen == [liveness.SUBSTRING, "MiniMax Code"]
+
+    # 任何异常 ⇒ 判"客户端没开"⇒ auto 下放行自刷（降级方向，docstring 明写）。
+    def boom(substring: str) -> bool:
+        raise RuntimeError("process scan unavailable")
+
+    monkeypatch.setattr(liveness, "_PROBE", boom)
+    assert liveness.is_client_running() is False
+    assert liveness.allow_gateway_self_refresh() is True
+
+
+def test_allow_gateway_self_refresh_mode_matrix(monkeypatch):
+    """三态矩阵（含非法值归约 auto）：门只该在"该让位"时关；on/off 是显式指令不扫进程表。"""
+    from providers.minimax_code import constants as K
+    from providers.minimax_code import liveness
+
+    key = liveness.ENV_GATEWAY_SELF_REFRESH
+    assert key == "CB_MINIMAX_CODE_GATEWAY_SELF_REFRESH" == K.ENV_GATEWAY_SELF_REFRESH
+    assert K.GATEWAY_SELF_REFRESH_MODE_DEFAULT == liveness.MODE_AUTO == "auto"
+    assert liveness.MODE_VALUES == ("auto", "on", "off")
+
+    # (env 取值, 探测到的"客户端在运行", 期望网关可自刷)
+    matrix = (
+        (None, True, False),      # auto（缺省）+ 客户端在 ⇒ 让位
+        (None, False, True),      # auto + 客户端不在 ⇒ 放行
+        ("auto", True, False),
+        ("auto", False, True),
+        ("AUTO", True, False),    # 大小写不敏感
+        ("  on  ", True, True),   # 显式 on：无视探测
+        ("on", False, True),
+        ("OFF", True, False),     # 显式 off：永不自刷
+        ("off", False, False),
+        ("yes", True, False),     # 非法值 ⇒ 归约 auto（按探测）
+        ("yes", False, True),
+        ("", True, False),        # 空串 ⇒ 回落默认 auto
+        ("auto ", True, False),
+    )
+    for raw, running, expected in matrix:
+        seen = _stub_liveness(monkeypatch, running)
+        if raw is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, raw)
+
+        want_mode = (raw or "").strip().lower()
+        if want_mode not in liveness.MODE_VALUES:
+            want_mode = liveness.MODE_AUTO
+        assert liveness.self_refresh_mode() == want_mode, (raw, want_mode)
+        assert liveness.allow_gateway_self_refresh() is expected, (raw, running, expected)
+        # on/off 不需要探测 ⇒ 少一次 ctypes 调用；auto（含归约）恰好一次。
+        assert len(seen) == (1 if want_mode == liveness.MODE_AUTO else 0), (raw, seen)
+
+
+def test_refresh_to_account_defers_when_client_running_and_no_disk_update(isolated_db, monkeypatch):
+    """auto + 客户端在运行 + 磁盘没新票 ⇒ 抛 ``kind="deferred"``，且**一次 OAuth 都不打**。
+
+    活性门的正脸：``adopt`` 失败后先看门（chat.py:389），门关 ⇒ 直接抛错，绝不
+    ``await refresh_account``（抢刷会轮转 refresh_token、把开着的客户端顶下线）。
+    """
+    from providers.minimax_code import liveness
+    from providers.minimax_code import token as token_module
+
+    account = _adopt_account(None)
+    seen = _stub_liveness(monkeypatch, True)
+    polarities: list[bool] = []
+    refresh_calls: list[int] = []
+
+    def fake_adopt(target: dict, *, require_newer: bool) -> bool:
+        polarities.append(require_newer)
+        return False  # 磁盘没有更新凭据（读不到 / uid 对不上 / 无新票）
+
+    async def fake_refresh(target: dict) -> bool:
+        refresh_calls.append(int(target["id"]))
+        return False
+
+    monkeypatch.setattr(store, "adopt_credentials_from_client", fake_adopt)
+    monkeypatch.setattr(chat, "refresh_account", fake_refresh)
+
+    with pytest.raises(token_module.MiniMaxCodeAuthError) as excinfo:
+        asyncio.run(chat._refresh_to_account(account))
+
+    exc = excinfo.value
+    assert exc.kind == chat.DEFER == "deferred"
+    assert exc.retryable is True          # 可重试（不是鉴权失效）
+    assert exc.invalid_grant is False     # 绝不许被当 invalid_grant 处理
+    assert refresh_calls == []            # 红线：OAuth 一次都没打
+    assert polarities == [True]           # 先接管，且 require_newer 极性不变
+    assert len(seen) == 1                 # 门只查一次，不重复扫进程表
+    assert liveness.allow_gateway_self_refresh() is False  # 同一个门的结论稳定
+    # 消息可定位（账号 id）但不含任何凭证原文。
+    assert str(account["id"]) in str(exc)
+    for secret in (FAKE_AT, FAKE_RT, ADOPT_AT_DISK, ADOPT_RT_DISK,
+                   ADOPT_AT_OAUTH, ADOPT_RT_OAUTH):
+        assert secret not in str(exc)
+    # 让位 ≠ 判死：DB 状态一字不动（掉出选号池的是"标 expired"，不是"暂缓刷新"）。
+    assert db.get_account(account["id"])["status"] == "active"
+
+
+def test_refresh_to_account_self_refreshes_when_client_absent(isolated_db, monkeypatch):
+    """auto + 客户端**没**在运行 ⇒ 照旧自刷新（门不得把"网关是唯一持有者"的场景锁死）。
+
+    沿用既有 refresh 成功桩（只写 DB、零网络），断言拿到 fresh 新票 —— 与 §12 的
+    回落用例同口径，差别只在这里显式钉住"探针返回 False"这一前置。
+    """
+    account = _adopt_account(None)
+    seen = _stub_liveness(monkeypatch, False)
+    calls: list[int] = []
+
+    async def fake_refresh(target: dict) -> bool:
+        calls.append(int(target["id"]))
+        db.update_account(
+            int(target["id"]),
+            {
+                "access_token": ADOPT_AT_OAUTH,
+                "refresh_token": ADOPT_RT_OAUTH,
+                "expires_at": EXP_DISK_NEW,
+                "status": "active",
+            },
+        )
+        return True
+
+    monkeypatch.setattr(
+        store, "adopt_credentials_from_client", lambda target, *, require_newer: False
+    )
+    monkeypatch.setattr(chat, "refresh_account", fake_refresh)
+
+    fresh = asyncio.run(chat._refresh_to_account(account))
+
+    assert calls == [int(account["id"])]  # 恰好一次，不放大
+    assert len(seen) == 1                 # auto ⇒ 确实做了活性探测
+    assert fresh["access_token"] == ADOPT_AT_OAUTH
+    assert fresh["refresh_token"] == ADOPT_RT_OAUTH
+    assert fresh["status"] == "active"
+
+
+def test_refresh_to_account_defers_when_mode_off_even_without_client(isolated_db, monkeypatch):
+    """``off`` 压过探测：客户端没在运行也**从不**自刷（纯被动部署只靠接管磁盘新票）。"""
+    from providers.minimax_code import liveness
+    from providers.minimax_code import token as token_module
+
+    account = _adopt_account(None)
+    seen = _stub_liveness(monkeypatch, False)      # 探针说"客户端没开"
+    monkeypatch.setenv(liveness.ENV_GATEWAY_SELF_REFRESH, "off")
+    refresh_calls: list[int] = []
+
+    async def fake_refresh(target: dict) -> bool:
+        refresh_calls.append(int(target["id"]))
+        return True
+
+    monkeypatch.setattr(
+        store, "adopt_credentials_from_client", lambda target, *, require_newer: False
+    )
+    monkeypatch.setattr(chat, "refresh_account", fake_refresh)
+
+    with pytest.raises(token_module.MiniMaxCodeAuthError) as excinfo:
+        asyncio.run(chat._refresh_to_account(account))
+
+    assert excinfo.value.kind == chat.DEFER
+    assert refresh_calls == []
+    assert seen == []  # off 是显式指令 ⇒ 连进程表都不必扫
+    assert db.get_account(account["id"])["status"] == "active"
+
+
+def test_recover_after_401_maps_deferred_to_retryable_sentinel(isolated_db, monkeypatch):
+    """核心红线（单元面）：deferred ⇒ 第三态 ``DEFER``，**不是** ``None``（None = 真判死）。
+
+    ``_recover_after_401`` 的返回槽是三态：新账号行 / ``DEFER`` / ``None``。把
+    ``DEFER`` 写成 ``None`` 就是"让位被当成凭证失效" ⇒ 调用方标 expired、账号掉出选号池。
+    ⚠️ ``DEFER`` 是**真值字符串**：消费方必须先 ``== DEFER`` 判掉，不能只判真假。
+    """
+    from providers.minimax_code import token as token_module
+
+    account = _add_account("uid-recover-defer")
+    # 同一个词，两处不漂移：哨兵取值 == 异常 kind 名。
+    assert chat.DEFER == token_module.MiniMaxCodeAuthError("x", kind="deferred").kind
+
+    async def deferred(target: dict) -> dict:
+        raise token_module.MiniMaxCodeAuthError(
+            f"minimax-code account {target['id']} self-refresh deferred", kind="deferred"
+        )
+
+    async def rejected(target: dict) -> dict:
+        raise token_module.MiniMaxCodeAuthError(
+            f"minimax-code refresh rejected for account {target['id']}", kind="invalid_grant"
+        )
+
+    monkeypatch.setattr(chat, "_refresh_to_account", deferred)
+    verdict = asyncio.run(chat._recover_after_401(account))
+    assert verdict == chat.DEFER
+    assert verdict is not None
+    assert verdict is not True          # 不是"真鉴权失效"那张票
+    assert bool(verdict) is True        # 陷阱登记：真值 ⇒ 只判真假的老代码会走错分支
+
+    # 对照组 1：真被拒（invalid_grant）仍返回 None（调用方据此标 expired）。
+    monkeypatch.setattr(chat, "_refresh_to_account", rejected)
+    assert asyncio.run(chat._recover_after_401(account)) is None
+
+    # 对照组 2：无换票素材也返回 None —— 三分不塌成两分。
+    bare = _add_account("uid-recover-bare", refresh="")
+    monkeypatch.setattr(chat, "_refresh_to_account", deferred)
+    assert asyncio.run(chat._recover_after_401(bare)) is None
+
+
+def test_auth_recovery_wrappers_report_defer_not_auth_dead(isolated_db, monkeypatch):
+    """两个 401 wrapper（非流式 + 流式）在 deferred 时给 ``DEFER``，不是 ``True``。
+
+    wrapper 层只负责把三态如实传出去（标不标 expired 是调用方的事）；同时钉住
+    "重放没有发生"：拿回来的仍是那张 401 响应，且 OAuth 零调用。
+    """
+    from providers.minimax_code import token as token_module
+
+    account = _adopt_account(None)
+    bare = _adopt_account(None, uid="loginEpoch:defer-ctl", refresh="")
+    seen = _stub_liveness(monkeypatch, True)
+    refresh_calls: list[int] = []
+
+    monkeypatch.setattr(
+        store, "adopt_credentials_from_client", lambda target, *, require_newer: False
+    )
+
+    async def fake_refresh(target: dict) -> bool:
+        refresh_calls.append(int(target["id"]))
+        return True
+
+    monkeypatch.setattr(chat, "refresh_account", fake_refresh)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"type": "error", "error": {
+            "type": "authentication_error", "message": "token expired"}})
+
+    url = chat.chat_url()
+    sid = chat.new_session_id()
+
+    async def _drive() -> dict:
+        out: dict = {}
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            response, _used, verdict = await chat._post_with_auth_recovery(
+                client, url, b"{}", account, sid)
+            out["post"] = verdict
+            out["post_status"] = int(response.status_code)
+            _r2, _a2, out["control"] = await chat._post_with_auth_recovery(
+                client, url, b"{}", bare, sid)
+            async with chat._stream_with_auth_recovery(
+                client, url, b"{}", account, sid
+            ) as pair:
+                out["stream"] = pair[2]
+                out["stream_status"] = int(pair[0].status_code)
+        return out
+
+    verdicts = asyncio.run(_drive())
+
+    assert verdicts["post"] == chat.DEFER
+    assert verdicts["stream"] == chat.DEFER
+    assert verdicts["control"] is True       # 对照：素材缺失才是"真 auth 死亡"
+    assert verdicts["post_status"] == 401    # 没有重放，交回原始 401
+    assert verdicts["stream_status"] == 401
+    assert refresh_calls == []               # 门挡在前面：一次 OAuth 都没打
+    assert len(seen) == 2                    # 两条 wrapper 各查一次门
+    # 账号行没被 wrapper 动过（判死只发生在调用方消费 True 之后）。
+    assert db.get_account(account["id"])["status"] == "active"
+    assert token_module.MiniMaxCodeAuthError("x", kind="deferred").retryable is True
+
+
+def test_deferred_classified_is_retryable_503_and_not_auth():
+    """对外分类的形状红线：``auth=False``（任何按 ``classified["auth"]`` 判死的分支吃不到）+ 503 可重试。"""
+    classified = chat._deferred_classified()
+    assert classified["http"] == 503
+    assert classified["retryable"] is True
+    assert classified["auth"] is False
+    assert classified["rate_limited"] is False
+    assert classified["quota"] is False
+    assert classified["code"] is None
+    assert classified["type"] == "channel_unavailable"
+    assert classified["message"] == chat.DEFER_HINT
+    assert classified["name"] == ""
+
+    body = chat._error_body(classified)
+    assert "code" not in body["error"]              # 无业务码（不是上游报的错）
+    assert body["error"]["provider"] == CHANNEL_ID
+    assert body["error"]["type"] == "channel_unavailable"
+    for secret in (FAKE_AT, FAKE_RT):
+        assert secret not in json.dumps(body, ensure_ascii=False)
+    # 自定义文案同样截断（对外文案体积面）。
+    assert chat._deferred_classified("x" * 500)["message"] == "x" * 240
+
+
+def test_chat_completions_deferred_returns_retryable_503_and_never_expires(
+    isolated_db, monkeypatch, no_retry_delay
+):
+    """端到端红线：客户端在运行 + 磁盘没新票 ⇒ 401 后对外 503，账号**绝不**被标 expired。
+
+    这是本组最贵的用例：以前 deferred 走 ``auth_dead`` 真值分支 ⇒ ``mark_account_failure(
+    aid, 401)`` → DB ``status=expired`` → 账号掉出选号池直到定时器/人工。现在消费点
+    必须先 ``== DEFER`` 判掉（chat.py:1432），零延迟换号，且不叠账号级连坐冷却。
+    """
+    account = _add_account("uid-defer-503")
+    seen = _stub_liveness(monkeypatch, True)
+    refresh_calls: list[int] = []
+    upstream_auths: list[str] = []
+    failure_calls = _spy_mark_account_failure(monkeypatch)
+
+    monkeypatch.setattr(
+        store, "adopt_credentials_from_client", lambda target, *, require_newer: False
+    )
+
+    async def fake_refresh(target: dict) -> bool:
+        refresh_calls.append(int(target["id"]))
+        return True
+
+    monkeypatch.setattr(chat, "refresh_account", fake_refresh)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        upstream_auths.append(request.headers.get("Authorization", ""))
+        return httpx.Response(401, json={"type": "error", "error": {
+            "type": "authentication_error", "message": "token expired"}})
+
+    chat.set_transport(httpx.MockTransport(handler))
+    kind, (status, body) = asyncio.run(chat.chat_completions(
+        {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+        None))
+
+    assert kind == "error" and status == 503
+    error = body["error"]
+    assert error["type"] == "channel_unavailable"
+    assert "authentication_error" not in json.dumps(body, ensure_ascii=False)
+    assert error["provider"] == CHANNEL_ID
+    assert FAKE_AT not in json.dumps(body, ensure_ascii=False)
+    assert FAKE_RT not in json.dumps(body, ensure_ascii=False)
+
+    # 红线①：没打 OAuth（门挡在 refresh 前面）。
+    assert refresh_calls == []
+    # 红线②：没有以 401/403 记失败（503 档冷却若启用属允许，判死绝不允许）。
+    assert [call for call in failure_calls if call[1] in (401, 403)] == []
+    # 红线③：DB 状态原样 active（账号没坏，只是这条路暂时让位）。
+    after = db.get_account(account["id"])
+    assert after["status"] == "active"
+    assert after["access_token"] == FAKE_AT and after["refresh_token"] == FAKE_RT
+    # 单次重放纪律：deferred 不重放 ⇒ 恰好一个上游请求；零退避。
+    assert upstream_auths == [f"Bearer {FAKE_AT}"]
+    assert no_retry_delay == []
+    assert len(seen) >= 1
+
+
+def test_stream_deferred_frames_retryable_error_and_never_expires(
+    isolated_db, monkeypatch, no_retry_delay
+):
+    """流式同款红线：deferred ⇒ 成帧可重试 503（``channel_unavailable``），**不**补 [DONE]、不标 expired。
+
+    流式对外状态码改不了（``gateway/routers/v1.py`` 直接当 SSE 消费）⇒ 失败必须成帧送达，
+    且成的是"可重试"那一类；把它成帧成 ``authentication_error`` 会诱导运维重导一份没坏的凭证。
+    """
+    account = _add_account("uid-defer-stream")
+    seen = _stub_liveness(monkeypatch, True)
+    refresh_calls: list[int] = []
+    failure_calls = _spy_mark_account_failure(monkeypatch)
+
+    monkeypatch.setattr(
+        store, "adopt_credentials_from_client", lambda target, *, require_newer: False
+    )
+
+    async def fake_refresh(target: dict) -> bool:
+        refresh_calls.append(int(target["id"]))
+        return True
+
+    monkeypatch.setattr(chat, "refresh_account", fake_refresh)
+    chat.set_transport(httpx.MockTransport(
+        lambda request: httpx.Response(401, json={"type": "error", "error": {
+            "type": "authentication_error", "message": "token expired"}})))
+
+    kind, stream = asyncio.run(chat.chat_completions(
+        {"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        None))
+    assert kind == "stream"
+    text = _drain_text((kind, stream))
+    frames = _sse_payloads(text.encode("utf-8"))
+
+    assert len(frames) == 1
+    assert frames[0]["error"]["type"] == "channel_unavailable"
+    assert "[DONE]" not in text                     # 让位不是成功结束（spec:595 反面）
+    assert "authentication_error" not in text
+    assert FAKE_AT not in text and FAKE_RT not in text
+
+    assert refresh_calls == []
+    assert [call for call in failure_calls if call[1] in (401, 403)] == []
+    assert db.get_account(account["id"])["status"] == "active"
+    assert no_retry_delay == []
+    assert len(seen) >= 1

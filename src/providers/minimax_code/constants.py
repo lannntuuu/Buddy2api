@@ -136,6 +136,17 @@ REFRESH_MIN_VALIDITY_MS = 5 * 60 * 1000  # spec:316 AUTH_LEASE_MAX_MIN_VALIDITY_
 REFRESH_MIN_VALIDITY_S = REFRESH_MIN_VALIDITY_MS // 1000  # spec:312 minValidityMs 同窗口（秒）
 LEGACY_COMPATIBILITY_LEASE_MS = 5 * 60 * 1000  # spec:316 legacy 兼容租约（同一量级）
 
+# --- 客户端活性门（网关是否允许**主动** OAuth 刷新；运维配置键，非协议事实） ---
+# 共用同一份 OAuth 凭据时任何一方主动刷新都会轮转 refresh_token、作废对方手里的票
+# （spec:694 + .tmp/mitm/minimax-code-20260919/ROTATION-VERDICT.md：客户端约每 1h 自刷
+# 且每次都换 refresh_token）。故：**客户端进程在 ⇒ 网关不主动刷**（把刷新让给客户端，
+# 网关随后从磁盘接管新票，见 store.adopt_credentials_from_client）；客户端不在 ⇒ 网关
+# 可以主动刷以维持自身可用。判定实现见 liveness.py；本文件只登记键名与默认值。
+ENV_GATEWAY_SELF_REFRESH = "CB_MINIMAX_CODE_GATEWAY_SELF_REFRESH"  # 取值 auto|on|off（缺省/非法 ⇒ auto）
+GATEWAY_SELF_REFRESH_MODE_DEFAULT = "auto"  # auto=按进程探测决定；on=总是自刷；off=从不自刷
+ENV_CLIENT_PROCESS_MATCH = "CB_MINIMAX_CODE_CLIENT_PROCESS_MATCH"  # 进程名匹配子串（大小写不敏感）
+CLIENT_PROCESS_MATCH_DEFAULT = "minimax code"  # 客户端真实进程名是 "MiniMax Code"，探测侧统一 lower() 后比子串
+
 # --- 凭证落盘（spec:261-296,694；本机已验证目录存在，值未读取） ---
 DATA_DIR_NAME = ".minimax"  # spec:273（legacy 基名 `.mavis`）
 LEGACY_DATA_DIR_NAME = ".mavis"  # spec:273

@@ -102,7 +102,9 @@ class MiniMaxCodeAuthError(RuntimeError):
       invalid_grant —— refresh 被拒（400/401）：换票失败，调用方应把账号打成 expired；
       bad_response  —— 协议异常（非 JSON / 200 但缺 access_token）：不重试也不判死，交调用方；
       network       —— 连接/超时等传输层错误：可重试；
-      server        —— 429/5xx 及其余未分类状态：可重试。
+      server        —— 429/5xx 及其余未分类状态：可重试；
+      deferred      —— 活性门让位（客户端在运行，网关**主动拒刷**，见 liveness.py）：
+                       可重试、非鉴权失效，调用方**绝不**据此把账号标 expired。
     """
 
     def __init__(self, message: str, status: int = 0, kind: str = "server"):
@@ -112,7 +114,9 @@ class MiniMaxCodeAuthError(RuntimeError):
 
     @property
     def retryable(self) -> bool:
-        return self.kind in ("network", "server")
+        # deferred 属"可重试、非鉴权失效"（活性门让位）：漏进这张白名单会让调用方把
+        # 一个没坏的账号往 expired 上推，正是要防的反向故障（见 chat.py 的 DEFER 哨兵）。
+        return self.kind in ("network", "server", "deferred")
 
     @property
     def invalid_grant(self) -> bool:

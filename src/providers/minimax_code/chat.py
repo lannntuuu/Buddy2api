@@ -85,6 +85,7 @@ from providers.minimax_code.constants import (
     UPSTREAM_STATUS_CODE_MAP,
     USAGE_LIMIT_EXCEEDED,
 )
+from providers.minimax_code.liveness import allow_gateway_self_refresh
 from providers.minimax_code.token import MiniMaxCodeAuthError, refresh_account
 from providers.model_config import channel_aliases
 from providers.retry import MAX_ATTEMPTS, RETRYABLE_STATUS, retry_delay
@@ -336,6 +337,15 @@ def _get_client() -> httpx.AsyncClient:
 # 选号 / 刷新
 # ============================================================
 
+#: 「活性门让位」哨兵（第三个返回槽用它区分两种失败，别拿 bool 混）：
+#: ``_recover_after_401`` / ``_post_with_auth_recovery`` / ``_stream_with_auth_recovery``
+#: 返回它 = **网关主动拒刷**（客户端在运行，deferred）⇒ 可重试、**绝不**标 expired；
+#: 返回 ``True`` = 真鉴权失效（无换票素材 / OAuth 面 invalid_grant）⇒ 标 expired 换号。
+#: 取值就是 ``MiniMaxCodeAuthError`` 的 kind 名（同一个词，两处不漂移）；比较一律用
+#: ``== DEFER``（调用方可能返回同值字符串字面量，别依赖身份）。
+DEFER = "deferred"
+
+
 async def _refresh_to_account(account: dict) -> dict:
     """``token.refresh_account``（返回 bool）→ ``pick_with_refresh_fallback``（要 dict）。
 
@@ -355,6 +365,13 @@ async def _refresh_to_account(account: dict) -> dict:
     更新的票，绝不把网关手里的新票降级成客户端旧票。磁盘没有更新凭据（读不到 / uid
     对不上 / 无新票 / 接管自身出任何异常）才回退原有 refresh，保留"网关是唯一持有者"
     时的自刷新能力。
+
+    **活性门（``liveness.allow_gateway_self_refresh``）**：磁盘没接管到新票、而客户端
+    又在运行（``auto`` 探测到其进程）或自刷被显式关掉（``off``）⇒ **不打 OAuth**
+    （抢刷会轮转 refresh_token、把开着的客户端顶下线，spec:694）。此时抛
+    ``kind="deferred"``：**可重试、非鉴权失效**，调用方绝不据此把账号标 expired
+    （那会让它掉出选号池，直到定时器/人工才恢复，比原 bug 更瞎）。客户端下一次自刷
+    落盘后，由本函数的磁盘接管或启动/定时对齐把新票接进来。
     """
     aid = int(account.get("id") or 0)
     try:
@@ -369,6 +386,16 @@ async def _refresh_to_account(account: dict) -> dict:
         if fresh:
             return fresh
         # 极窄竞态：刚接管完账号行就被删 → 不 return，继续走原有刷新分支处理。
+    if not allow_gateway_self_refresh():
+        # 活性门关着（auto 且客户端进程在，或显式 off）且磁盘暂无更新票 ⇒ 网关让位。
+        # 只读探测，不发任何 OAuth/上游请求；kind="deferred" 是"可重试、非鉴权失效"，
+        # 绝不许被当成 invalid_grant 去标 expired（见 _recover_after_401 与两处消费点）。
+        # 消息只含账号 id 与策略说明，无任何凭证原文。
+        raise MiniMaxCodeAuthError(
+            f"minimax-code account {aid} self-refresh deferred: 客户端运行中，网关暂缓主动刷新"
+            "以免顶掉客户端；下次请求或定时对齐会接管磁盘新票",
+            kind="deferred",
+        )
     if not await refresh_account(account):
         # 消息不含任何凭证原文（token.py 的异常同样只含状态码/OAuth error 码）。
         raise MiniMaxCodeAuthError(
@@ -408,16 +435,24 @@ async def _pick(tried: set[int]) -> Optional[dict]:
     * ``tried`` 由调用方维护，入口处 seed 了该模型受限账号（``_limited_ids``）⇒
       "sticky/pin 只对可用账号生效"的既有调度语义天然覆盖限流跳过；
     * 冷却（401/403/429 连坐退避）由 pick_account 内部的 cooling-down 过滤负责；
-    * token 过期 ⇒ 就地 refresh（trae_shared 的负缓存限流），成功返回新账号行。
+    * token 过期 ⇒ 就地 refresh（trae_shared 的负缓存限流），成功返回新账号行；
+    * 活性门让位（``kind="deferred"``）落进 trae_shared 的**内存**负缓存、**不改 DB
+      status**（见 trae_shared.py:165-178）⇒ 账号留在 active，只是这条路挑不出号，
+      调用方照常走"无可用账号"的可重试 503（绝不被误标 expired）。
     """
     return await pick_with_refresh_fallback(CHANNEL_ID, _refresh_to_account, exclude_ids=tried)
 
 
-async def _recover_after_401(account: dict) -> Optional[dict]:
+async def _recover_after_401(account: dict) -> dict | str | None:
     """401 ⇒ 刷新一次（spec:313 失效→刷新→**单次重放**；spec:216-220 客户端同构）。
 
-    返回新账号行 = 可以重放；返回 None = 换票素材缺失/被拒（调用方标 expired 换号）。
-    网络/5xx 类刷新异常也按"不可重放"处理：本函数在**请求路径**上，宁可换号也不把
+    三种结果（**别把 ``DEFER`` 读成 ``None``**）：
+      * 新账号行 = 可以重放；
+      * ``DEFER`` = 活性门让位（客户端在运行 ⇒ 网关主动拒刷，``kind="deferred"``）⇒ 本次
+        不重放，但账号**没坏**：调用方不得标 expired（那会把它踢出选号池，直到定时器/
+        人工才恢复，比原 bug 更瞎），只对外产出可重试 503；
+      * ``None``  = 换票素材缺失 / OAuth 面被拒 / 网络类刷新异常 ⇒ 调用方标 expired 换号。
+    网络/5xx 类刷新异常仍按"不可重放"处理：本函数在**请求路径**上，宁可换号也不把
     异常原样抛给客户端；OAuth 面持续故障由 trae_shared 的负缓存兜住后续请求。
     """
     aid = int(account.get("id") or 0)
@@ -427,7 +462,14 @@ async def _recover_after_401(account: dict) -> Optional[dict]:
         return None
     try:
         fresh = await _refresh_to_account(account)
-    except (MiniMaxCodeAuthError, httpx.HTTPError) as exc:
+    except MiniMaxCodeAuthError as exc:
+        if exc.kind == DEFER:
+            # 活性门让位：既不能重放（票没换）、也不能判死（票没坏）。exc 消息无凭证。
+            logger.info("minimax-code account %s 401 recovery deferred: %s", aid, exc)
+            return DEFER
+        logger.warning("minimax-code 401 recovery failed for account %s: %s", aid, exc)
+        return None
+    except httpx.HTTPError as exc:
         logger.warning("minimax-code 401 recovery failed for account %s: %s", aid, exc)
         return None
     logger.info("minimax-code account %s token refreshed, 重放一次", aid)
@@ -639,6 +681,34 @@ def _server_error_classified(message: str) -> dict:
         "quota": False,
         "auth": False,
         "name": UPSTREAM_ERROR_CODES[LLM_UPSTREAM_ERROR]["name"],
+    }
+
+
+#: 活性门让位对外的文案（只含策略说明，无账号 id / 无凭证）。
+DEFER_HINT = (
+    "minimax-code 客户端运行中，网关暂缓主动刷新以免顶掉客户端；"
+    "下次请求或定时对齐会接管磁盘新票"
+)
+
+
+def _deferred_classified(message: str = DEFER_HINT) -> dict:
+    """活性门让位（``DEFER``）的对外分类：**可重试 503、auth=False**。
+
+    ``auth=False`` 是刻意的：这条分类绝不能被任何按 ``classified["auth"]`` 判死的分支
+    吃掉（标 expired 会把账号踢出选号池）。形状与 ``_server_error_classified`` 同款，
+    ``type``/兜底口径对齐本文件既有的 503 ``channel_unavailable`` 出口。
+    """
+    return {
+        "http": 503,
+        "code": None,
+        "upstream_code": None,
+        "type": "channel_unavailable",
+        "message": (message or DEFER_HINT)[:240],
+        "retryable": True,
+        "rate_limited": False,
+        "quota": False,
+        "auth": False,
+        "name": "",
     }
 
 
@@ -997,9 +1067,12 @@ async def _stream_with_auth_recovery(client: httpx.AsyncClient, url: str, raw: b
                                      account: dict, session_id: str):
     """开流 + 401 单次重放（spec:313），把"重放"这件易被写坏的事收在一处。
 
-    yield ``(response, account, auth_dead)``：
-      * ``auth_dead=False`` ⇒ 拿到最终响应（可能仍是 4xx/5xx，交调用方分类）；
-      * ``auth_dead=True``  ⇒ 401 且换票素材缺失/被拒 ⇒ 调用方标 expired 后**换号**。
+    yield ``(response, account, auth_dead)``（三态，**别只判真假**：``DEFER`` 是字符串、
+    真值，必须先于 ``True`` 判掉）：
+      * ``False``      ⇒ 拿到最终响应（可能仍是 4xx/5xx，交调用方分类）；
+      * ``DEFER``      ⇒ 401 且活性门让位（客户端在运行，网关主动拒刷）⇒ 不重放、
+                        换号，但**绝不标 expired**（账号票没坏，见 ``_recover_after_401``）；
+      * ``True``       ⇒ 401 且换票素材缺失/被拒 ⇒ 调用方标 expired 后**换号**。
     重放最多一次（``UNAUTHORIZED_RETRY_LIMIT=1``），不做重放放大；首个流在重放前
     已随 ``async with`` 退出（连接归还池），不会两条流并存。
     """
@@ -1009,6 +1082,9 @@ async def _stream_with_auth_recovery(client: httpx.AsyncClient, url: str, raw: b
             yield response, account, False
             return
         fresh = await _recover_after_401(account)
+        if fresh == DEFER:
+            yield response, account, DEFER
+            return
         if fresh is None:
             yield response, account, True
             return
@@ -1053,6 +1129,17 @@ async def _stream(raw: bytes, url: str, upstream_model: str, model_name: str,
                 response, account, auth_dead = pair
                 aid = int(account.get("id") or aid)
                 status = int(response.status_code)
+
+                if auth_dead == DEFER:
+                    # 活性门让位（客户端在运行 ⇒ 网关主动拒刷）：**不调用
+                    # mark_account_failure**（401/403 档会把 status 置 expired、把账号踢出
+                    # 选号池，直到定时器/人工才恢复）⇒ 只对外产出可重试 503 并换号。
+                    last_classified = _deferred_classified()
+                    last_status = 503
+                    last_error = _stream_error_bytes(last_classified["message"], last_classified)
+                    await _log(api_key_info, account, model_name, True, "error", 503,
+                               last_classified["message"], t0)
+                    continue
 
                 if auth_dead:
                     # 401 且刷新不可用 ⇒ mark_account_failure 内部把 status 置 expired（换号）
@@ -1196,12 +1283,16 @@ async def _post_with_auth_recovery(client: httpx.AsyncClient, url: str, raw: byt
                                    account: dict, session_id: str) -> tuple:
     """POST + 401 单次重放（spec:313）→ ``(response, account, auth_dead)``。
 
-    与流式侧同构：重放最多一次，刷新不可用 ⇒ ``auth_dead=True``（调用方标 expired 换号）。
+    与流式侧同构（第三个槽的三态取值见 ``_stream_with_auth_recovery``）：重放最多一次；
+    ``True`` ⇒ 真鉴权失效（调用方标 expired 换号）；``DEFER`` ⇒ 活性门让位（可重试，
+    **调用方不得标 expired**，对外产出 503）。
     """
     response = await _post_once(client, url, raw, request_headers(account, session_id))
     if int(response.status_code) != 401:
         return response, account, False
     fresh = await _recover_after_401(account)
+    if fresh == DEFER:
+        return response, account, DEFER
     if fresh is None:
         return response, account, True
     response = await _post_once(client, url, raw, request_headers(fresh, session_id))
@@ -1337,6 +1428,16 @@ async def chat_completions(payload: dict, api_key_info: dict | None) -> tuple:
             )
             aid = int(account.get("id") or aid)
             status = int(response.status_code)
+
+            if auth_dead == DEFER:
+                # 活性门让位（客户端在运行、磁盘暂无新票）：与流式侧同款处置——
+                # **不调用 mark_account_failure**（401/403 档会把账号置 expired 掉出
+                # 选号池），对外可重试 503，零延迟换下一个号。
+                last_classified = _deferred_classified()
+                last_error = ("error", (503, _error_body(last_classified)))
+                await _log(api_key_info, account, model_name, False, "error", 503,
+                           last_classified["message"], t0)
+                continue
 
             if auth_dead:
                 auth_manager.mark_account_failure(aid, 401)  # → status=expired，换号
@@ -1499,6 +1600,11 @@ async def test_chat(account: dict, model: str = "", prompt: str = "") -> dict:
             _get_client(), chat_url(), raw, account, session_id
         )
         status = int(response.status_code)
+        if auth_dead == DEFER:
+            # 活性门让位（探活也走同一个 wrapper）：报可重试 503，而不是把 deferred
+            # 显示成 authentication_error —— 后者会误导运维去重导一份本来没坏的凭证。
+            # 本路径不改任何账号状态（run_test_chat 不标 failed/expired）。
+            return 503, _deferred_classified()["message"], None
         if status >= 400 or auth_dead:
             classified = _classify_error(status, response.content or response.text[:400])
             return classified["http"], classified["message"], None
