@@ -9,6 +9,7 @@ from accounts import auth_manager
 from storage import database as db
 from upstream import proxy
 from providers.protocol import ChannelId
+from providers.workbuddy import models
 
 
 class WorkBuddyProvider:
@@ -31,11 +32,56 @@ class WorkBuddyProvider:
         return []
 
     def fetch_model_rates(self) -> list[dict]:
-        """WorkBuddy 上游直接报 usage.credit，无独立的 per-model 倍率概念；仅返回生效白名单。"""
-        return [
-            {"id": m["id"], "display_name": m["id"], "rate": None, "context_window": None, "official": False}
-            for m in self.list_models()
-        ]
+        """返回当前生效白名单里每个模型的明细（含官方消耗倍率 rate）。
+
+        上游 /v3/config 提供官方 credits（x 系数），优先用缓存的官方明细
+        （official=True）；缓存未命中（无可用账号/未拉过）时回退到当前白名单
+        （official=False，rate 仍为 None，与旧行为一致）。
+
+        大小写不敏感官方 lookup：官方 id 可能是全小写（如 deepseek-v4.1-flash），
+        白名单里常是混合大小写，因此用 lower() 建索引再以 lower() 查询。
+        """
+        effective = self.list_models()
+        # 大小写不敏感映射：官方 id 统一以 lower() 做 key
+        details = {d["id"].lower(): d for d in models.official_model_details()}
+        out: list[dict] = []
+        for m in effective:
+            mid = str(m.get("id") or "")
+            if not mid:
+                continue
+            d = details.get(mid.lower())
+            if d is not None and d.get("official"):
+                out.append({
+                    "id": mid,
+                    "display_name": d.get("display_name") or mid,
+                    "rate": d.get("rate"),
+                    "context_window": d.get("context_window"),
+                    "official": True,
+                })
+            else:
+                out.append({
+                    "id": mid,
+                    "display_name": mid,
+                    "rate": None,
+                    "context_window": None,
+                    "official": False,
+                })
+        return out
+
+    async def refresh_dynamic_models(self, force: bool = False) -> bool:
+        """强制重新拉取官方模型表（/v3/config），成功缓存 1h。"""
+        return await models.refresh_dynamic_models(force=force)
+
+    def official_model_details(self) -> list[dict]:
+        """完整官方可见模型明细（不含白名单过滤），供模型选择弹窗使用。
+
+        返回 models.official_model_details()——即按 §1 过滤后（剔除生图类等
+        maxInputTokens 非正整数条目）的官方可见模型列表，每项含
+        id / display_name / rate / context_window / official=True。
+        TTL 外（未拉过或缓存过期）返回空 list。control_plane 通过
+        getattr(provider, "official_model_details", None) 探测调用。
+        """
+        return models.official_model_details()
 
     def alias_map(self) -> dict[str, str]:
         return proxy.effective_builtin_aliases()

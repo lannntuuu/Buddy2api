@@ -182,7 +182,7 @@ async def admin_set_channel_models(
 async def admin_refresh_channel_models(
     channel: str, authorization: str | None = Header(default=None)
 ):
-    """Force-refresh a channel's official model list. Only traesolo supports
+    """Force-refresh a channel's official model list. traesolo and workbuddy support
     dynamic fetching; other channels return a static whitelist."""
     _check_admin(authorization)
     try:

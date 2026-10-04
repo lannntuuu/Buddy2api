@@ -7,8 +7,10 @@ export default {props:['token','toast'],setup(p){
   const um=ref([]),umLd=ref(true),umBusy=ref(false),umErr=ref(''),channels=ref([]);
   // 各平台设置（可切换列表）
   const chs=ref([]),chLoaded=ref(false),chErr=ref(''),chBusy=ref({}),activeCh=ref('');
-  // Trae SOLO 官方可用模型选择弹窗状态
+  // Trae SOLO / WorkBuddy 官方可用模型选择弹窗状态
   const picker=ref({open:false,channel:'',rows:[],busy:false,error:''});
+  // 弹窗标题用的通道展示名（写死映射即可：会打开这个弹窗的通道只有这两个）
+  const PICKER_TITLE={traesolo:'Trae SOLO',workbuddy:'WorkBuddy'};
 
   // 契约 4/6:PUT /admin/channels/{ch}/models 响应带生效模型 id 列表(models),
   // 据此本地回写白名单行;缺 models 或形状不符返回 false → 调用方回退整表 loadAll()。
@@ -112,14 +114,14 @@ export default {props:['token','toast'],setup(p){
     catch(e){p.toast('重置失败：'+apiErr(e),'err')}
     setChBusy(c,false);
   }
-  function canRefreshOfficial(c){return c&&(c.kind==='apikey'||c.channel==='traesolo')}
+  function canRefreshOfficial(c){return c&&(c.kind==='apikey'||c.channel==='traesolo'||c.channel==='workbuddy')}
   async function refreshOfficialModels(){
     const c=chOf();if(!c||chBusyOf(c)||!canRefreshOfficial(c))return;
     setChBusy(c,true);
     try{
       const r=await api.post('/admin/channels/'+c.channel+'/models/refresh',{},p.token,{timeoutMs:60000});
-      // Trae SOLO：直接弹出官方可用模型选择弹窗
-      if(c.channel==='traesolo'){
+      // Trae SOLO / WorkBuddy：直接弹出官方可用模型选择弹窗
+      if(c.channel==='traesolo'||c.channel==='workbuddy'){
         if(r&&r.refreshed&&Array.isArray(r.official_models)&&r.official_models.length){
           openPicker(c,r.official_models);
         }else{
@@ -235,7 +237,7 @@ export default {props:['token','toast'],setup(p){
   onMounted(loadAll);
   onMounted(()=>{rlTimer=setInterval(refreshRateLimits,60000)});
   onUnmounted(()=>{clearInterval(rlTimer)});
-  return{um,umLd,umErr,umBusy,channels,addUM,rmUM,umCell,umSet,umWarn,saveUM,chs,chLoaded,chErr,activeCh,chOf,chBusyOf,addModelRow,rmModelRow,chDefaultText,saveChActive,resetChActive,canRefreshOfficial,refreshOfficialModels,openPicker,closePicker,pickerToggleAll,savePicker,picker,rlEarliest,rlDetail,I}
+  return{um,umLd,umErr,umBusy,channels,addUM,rmUM,umCell,umSet,umWarn,saveUM,chs,chLoaded,chErr,activeCh,chOf,chBusyOf,addModelRow,rmModelRow,chDefaultText,saveChActive,resetChActive,canRefreshOfficial,refreshOfficialModels,openPicker,closePicker,pickerToggleAll,savePicker,picker,PICKER_TITLE,rlEarliest,rlDetail,I}
 },template:`
 <div>
   <div class="phead"><h1>模型配置</h1><p>统一模型翻译 · 各通道白名单与别名 · 改动即时生效</p></div>
@@ -272,7 +274,7 @@ export default {props:['token','toast'],setup(p){
           <button class="btn s" @click="resetChActive" :disabled="chBusyOf(chOf())">重置默认</button>
         </div>
       </div>
-      <div style="margin-bottom:14px"><label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">模型白名单（保存 = 按列表整体保存；空白名单保存 = 该平台所有模型请求 400；列表外的模型 400）<span v-if="canRefreshOfficial(chOf())&&chOf().channel==='traesolo'" style="margin-left:8px;color:var(--fg3)">· 倍率来自官方 consumption_rate（原值）</span><span v-else-if="canRefreshOfficial(chOf())" style="margin-left:8px;color:var(--fg3)">· 倍率来自上游 /v1/models</span><span v-else style="margin-left:8px;color:var(--fg3)">· 该通道上游不提供倍率，显示「-」</span></label>
+      <div style="margin-bottom:14px"><label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">模型白名单（保存 = 按列表整体保存；空白名单保存 = 该平台所有模型请求 400；列表外的模型 400）<span v-if="canRefreshOfficial(chOf())&&chOf().channel==='traesolo'" style="margin-left:8px;color:var(--fg3)">· 倍率来自官方 consumption_rate（原值）</span><span v-else-if="chOf()&&chOf().channel==='workbuddy'" style="margin-left:8px;color:var(--fg3)">· 倍率来自官方 /v3/config credits（x 系数）</span><span v-else-if="canRefreshOfficial(chOf())" style="margin-left:8px;color:var(--fg3)">· 倍率来自上游 /v1/models</span><span v-else style="margin-left:8px;color:var(--fg3)">· 该通道上游不提供倍率，显示「-」</span></label>
         <div class="hint" style="margin:0 0 8px">「展示名」就是 <code>GET /v1/models</code> 列出的名字，也是客户端该请求的名字（保存后即时生效）；留空则直接用模型 ID。多个名字用英文逗号分隔。</div>
         <div v-if="chOf().modelRows.length" class="table-scroll" style="margin-bottom:8px">
           <table style="font-size:12px">
@@ -361,7 +363,7 @@ export default {props:['token','toast'],setup(p){
     <div class="modal wide" style="width:880px;max-width:94vw;display:flex;flex-direction:column;max-height:88vh">
       <div class="modal-h">
         <div>
-          <h3>Trae SOLO 官方可用模型</h3>
+          <h3>{{(PICKER_TITLE[picker.channel]||picker.channel)+' 官方可用模型'}}</h3>
           <div class="hint" style="margin:4px 0 0">勾选要启用的模型 · 保存后写入该通道白名单（思考档位 / 上下文限额不变）</div>
         </div>
         <button class="x" @click="closePicker()">&times;</button>
