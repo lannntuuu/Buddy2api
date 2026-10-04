@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import secrets
 import threading
 import time
@@ -52,6 +53,8 @@ from providers.traesolo.token import (
     solo_headers,
 )
 from providers.host_override import channel_host
+
+logger = logging.getLogger(__name__)
 
 # 测试注入点：模块级 MockTransport（tests/test_traesolo.py 设置）。
 _TRANSPORT: Optional[httpx.AsyncBaseTransport] = None
@@ -839,28 +842,53 @@ async def fetch_model_details(account: dict) -> list[dict]:
     return out
 
 
+def _log_models_refresh_failure(force: bool, message: str, *args, exc_info: bool = False) -> None:
+    """模型表刷新失败留痕。
+
+    前台（管理页「刷新官方模型表」，force=True）记 warning——用户在等结果；
+    后台 kick（force=False）记 debug——否则上游故障时会周期性刷屏。
+    """
+    logger.log(logging.WARNING if force else logging.DEBUG, message, *args, exc_info=exc_info)
+
+
 async def refresh_dynamic_models(force: bool = False) -> bool:
-    """动态拉模型（任一可用账号），成功缓存 1h / 失败负缓存 5min。best-effort。"""
+    """动态拉模型（任一可用账号），成功缓存 1h / 失败负缓存 5min。best-effort。
+
+    force=True（管理页「刷新官方模型表」）忽略成功缓存与失败负缓存，真正重试一次；
+    force=False（请求前 kick）两者都保留，避免上游故障时每个请求都重放。
+
+    取号走 _pick 而非裸 pick_account：账号被标记 expired 时能先刷新 token 再拉表，
+    与聊天链路一致（旧实现只有 pick_account，账号一旦 expired 就再也拉不到模型表，
+    而管理页「测试」是按 id 直取账号、不经取号，于是表现为「测试通过但刷新失败」）。
+    """
     now = time.time()
     with _model_cache.lock:
-        if not force and _model_cache.ids and now - _model_cache.fetched_at < DYNAMIC_MODELS_TTL:
-            return True
-        if _model_cache.last_fail_at and now - _model_cache.last_fail_at < MODELS_FAIL_COOLDOWN:
-            return False
-    account = auth_manager.pick_account(None, provider=CHANNEL_ID)
+        if not force:
+            if _model_cache.ids and now - _model_cache.fetched_at < DYNAMIC_MODELS_TTL:
+                return True
+            if _model_cache.last_fail_at and now - _model_cache.last_fail_at < MODELS_FAIL_COOLDOWN:
+                return False
+    account = await _pick(set())
     if account is None:
         with _model_cache.lock:
             _model_cache.last_fail_at = now
+        _log_models_refresh_failure(force, "traesolo 刷新模型表失败：无可用账号")
         return False
     try:
         details = await fetch_model_details(account)
-    except Exception:
+    except Exception as exc:
         with _model_cache.lock:
             _model_cache.last_fail_at = now
+        _log_models_refresh_failure(
+            force, "traesolo 刷新模型表失败（account=%s）：%s", account.get("id"), exc, exc_info=True
+        )
         return False
     if not details:
         with _model_cache.lock:
             _model_cache.last_fail_at = now
+        _log_models_refresh_failure(
+            force, "traesolo 刷新模型表失败：官方返回空列表（account=%s）", account.get("id")
+        )
         return False
     with _model_cache.lock:
         _model_cache.details = details

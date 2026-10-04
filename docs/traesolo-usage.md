@@ -267,6 +267,10 @@ model_provider = "b2api_traesolo"
 | 502 / 上游 5xx | TRAE 上游故障/限流 | 重试；连续 3 次会自动冷却该账号 |
 | 登录页转完没跳回 | 远程够不到回调地址 | 2.1 节：改回调基地址或手动闭环 |
 | token 频繁失效 | refresh_token 过期（约 30 天） | 重新走 Web 登录导入 |
+| 「刷新官方模型表」失败（"可能无可用账号或上游不可达"），但同账号「测试」却通过 | 两条路径不同：**测试**按 id 直取账号、不经取号；**刷新**必须先取号（只认 `status=active`，且受 5 分钟失败负缓存约束）。旧实现里 `force=True` 同样被负缓存挡住、账号被标 `expired` 时也不会先刷 token，于是表现为"测试通过但刷新永远失败" | 已修：`force=True` 绕过成功/失败两种缓存并真正重试；取号改走 `_pick`（账号 expired 会先刷 token）。升级代码后**重启服务** |
+
+> 模型表刷新失败进的是**控制台日志**（前台点按钮记 `warning`、后台自动 kick 记 `debug`），
+> **不写**上面的 `logs` 表；要连后台也看到就加 `--log-level debug` 启动。
 
 ## 9. 验证记录（2026-08-27，真实账号 E2E）
 
@@ -283,7 +287,9 @@ model_provider = "b2api_traesolo"
 | `GET /admin/accounts/1/checkin`（签到） | 200，`already_claimed=true`、credit=200（当日已领） |
 | `POST /admin/accounts/1/test`（测试对话） | 200，返回上游回答 |
 
-单元测试：`tests/test_traesolo.py`（50 个用例，全部 mock HTTP），全量 272 用例通过。
+单元测试：`tests/test_traesolo.py`（56 个用例，全部 mock HTTP）全部通过；全量 910 用例中 909 通过，
+唯一失败 `tests/test_minimax_code.py::test_facade_models_aliases_and_translation` 与本通道无关
+（该用例未用隔离库，断言依赖本机真实库里的 `minimax_code.aliases` 自定义设置）。
 
 ### 9.1 验证记录（模型表实测，真实 prod 账号直连上游）
 

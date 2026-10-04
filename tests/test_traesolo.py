@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import time
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -541,6 +542,51 @@ def test_dynamic_models_negative_cache(isolated_db):
     mock.models = ["glm-5.2"]
     assert _async(tsc.refresh_dynamic_models()) is False
     assert tsc.dynamic_model_ids() == []
+
+
+def test_dynamic_models_force_bypasses_negative_cache(isolated_db):
+    """force=True（管理页「刷新官方模型表」）必须真正重试一次，不被失败负缓存挡住。
+
+    BUG 回归：旧实现里 5 分钟负缓存对 force=True 同样生效，导致点一次刷新失败后，
+    5 分钟内的每次「强制刷新」都 0ms 直接返回失败、根本不发上游请求。
+    """
+    mock = use_mock()
+    mock.models = None  # 上游 500 → 首次失败并写入负缓存
+    add_solo_account()
+    assert _async(tsc.refresh_dynamic_models()) is False
+    # 上游已恢复，但负缓存未过期：普通调用仍不重试（负缓存语义保留）
+    mock.models = ["glm-5.2", "brand-new-model"]
+    assert _async(tsc.refresh_dynamic_models()) is False
+    # force=True 必须绕过负缓存真正拉一次
+    assert _async(tsc.refresh_dynamic_models(force=True)) is True
+    assert "brand-new-model" in tsc.dynamic_model_ids()
+
+
+def test_dynamic_models_failure_is_logged(isolated_db, caplog):
+    """刷新失败必须留痕：前台 force=True 记 warning，后台 force=False 记 debug。
+
+    回归：旧实现 `except Exception` 静默吞异常，管理页只显示"可能无可用账号或
+    上游不可达"，无法区分是取号失败、鉴权 401 还是上游 5xx。
+    """
+    mock = use_mock()
+    mock.models = None  # 上游 500 → fetch_model_details 抛错
+    add_solo_account()
+
+    def chat_records():
+        return [r for r in caplog.records if r.name == "providers.traesolo.chat"]
+
+    with caplog.at_level(logging.DEBUG, logger="providers.traesolo.chat"):
+        assert _async(tsc.refresh_dynamic_models(force=True)) is False
+    assert [r.levelno for r in chat_records()] == [logging.WARNING]
+    assert "刷新模型表失败" in caplog.text
+
+    # 后台 kick：清掉负缓存让它真正尝试一次，此时应降为 debug（避免刷屏）
+    caplog.clear()
+    tsc._model_cache.last_fail_at = 0.0
+    with caplog.at_level(logging.DEBUG, logger="providers.traesolo.chat"):
+        assert _async(tsc.refresh_dynamic_models()) is False
+    assert [r.levelno for r in chat_records()] == [logging.DEBUG]
+    assert "刷新模型表失败" in caplog.text
 
 
 def test_dynamic_models_no_account(isolated_db):
