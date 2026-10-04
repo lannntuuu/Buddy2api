@@ -7,8 +7,10 @@ export default {props:['token','toast'],setup(p){
   const um=ref([]),umLd=ref(true),umBusy=ref(false),umErr=ref(''),channels=ref([]);
   // 各平台设置（可切换列表）
   const chs=ref([]),chLoaded=ref(false),chErr=ref(''),chBusy=ref({}),activeCh=ref('');
-  // Trae SOLO 官方可用模型选择弹窗状态
+  // Trae SOLO / WorkBuddy 官方可用模型选择弹窗状态
   const picker=ref({open:false,channel:'',rows:[],busy:false,error:''});
+  // 弹窗标题用的通道展示名（写死映射即可：会打开这个弹窗的通道只有这两个）
+  const PICKER_TITLE={traesolo:'Trae SOLO',workbuddy:'WorkBuddy'};
 
   // 契约 4/6:PUT /admin/channels/{ch}/models 响应带生效模型 id 列表(models),
   // 据此本地回写白名单行;缺 models 或形状不符返回 false → 调用方回退整表 loadAll()。
@@ -235,7 +237,7 @@ export default {props:['token','toast'],setup(p){
   onMounted(loadAll);
   onMounted(()=>{rlTimer=setInterval(refreshRateLimits,60000)});
   onUnmounted(()=>{clearInterval(rlTimer)});
-  return{um,umLd,umErr,umBusy,channels,addUM,rmUM,umCell,umSet,umWarn,saveUM,chs,chLoaded,chErr,activeCh,chOf,chBusyOf,addModelRow,rmModelRow,chDefaultText,saveChActive,resetChActive,canRefreshOfficial,refreshOfficialModels,openPicker,closePicker,pickerToggleAll,savePicker,picker,rlEarliest,rlDetail,I}
+  return{um,umLd,umErr,umBusy,channels,addUM,rmUM,umCell,umSet,umWarn,saveUM,chs,chLoaded,chErr,activeCh,chOf,chBusyOf,addModelRow,rmModelRow,chDefaultText,saveChActive,resetChActive,canRefreshOfficial,refreshOfficialModels,openPicker,closePicker,pickerToggleAll,savePicker,picker,PICKER_TITLE,rlEarliest,rlDetail,I}
 },template:`
 <div>
   <div class="phead"><h1>模型配置</h1><p>统一模型翻译 · 各通道白名单与别名 · 改动即时生效</p></div>
@@ -361,7 +363,7 @@ export default {props:['token','toast'],setup(p){
     <div class="modal wide" style="width:880px;max-width:94vw;display:flex;flex-direction:column;max-height:88vh">
       <div class="modal-h">
         <div>
-          <h3>Trae SOLO 官方可用模型</h3>
+          <h3>{{(PICKER_TITLE[picker.channel]||picker.channel)+' 官方可用模型'}}</h3>
           <div class="hint" style="margin:4px 0 0">勾选要启用的模型 · 保存后写入该通道白名单（思考档位 / 上下文限额不变）</div>
         </div>
         <button class="x" @click="closePicker()">&times;</button>
