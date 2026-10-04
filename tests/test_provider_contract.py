@@ -72,7 +72,7 @@ def test_capability_matrix(monkeypatch):
         "CB_GATEWAY_PROVIDERS", ",".join(ALL_PROVIDERS)
     )
     matrix = {
-        "workbuddy": set(),
+        "workbuddy": {"dynamic_models"},
         "qclaw": {"store", "refresh", "test_chat", "quota", "qclaw_login"},
         "qwenwork": {"store", "refresh", "test_chat", "quota", "upsert"},
         "qodercn": {"store", "refresh", "test_chat", "quota", "upsert"},

@@ -112,14 +112,14 @@ export default {props:['token','toast'],setup(p){
     catch(e){p.toast('重置失败：'+apiErr(e),'err')}
     setChBusy(c,false);
   }
-  function canRefreshOfficial(c){return c&&(c.kind==='apikey'||c.channel==='traesolo')}
+  function canRefreshOfficial(c){return c&&(c.kind==='apikey'||c.channel==='traesolo'||c.channel==='workbuddy')}
   async function refreshOfficialModels(){
     const c=chOf();if(!c||chBusyOf(c)||!canRefreshOfficial(c))return;
     setChBusy(c,true);
     try{
       const r=await api.post('/admin/channels/'+c.channel+'/models/refresh',{},p.token,{timeoutMs:60000});
-      // Trae SOLO：直接弹出官方可用模型选择弹窗
-      if(c.channel==='traesolo'){
+      // Trae SOLO / WorkBuddy：直接弹出官方可用模型选择弹窗
+      if(c.channel==='traesolo'||c.channel==='workbuddy'){
         if(r&&r.refreshed&&Array.isArray(r.official_models)&&r.official_models.length){
           openPicker(c,r.official_models);
         }else{
@@ -272,7 +272,7 @@ export default {props:['token','toast'],setup(p){
           <button class="btn s" @click="resetChActive" :disabled="chBusyOf(chOf())">重置默认</button>
         </div>
       </div>
-      <div style="margin-bottom:14px"><label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">模型白名单（保存 = 按列表整体保存；空白名单保存 = 该平台所有模型请求 400；列表外的模型 400）<span v-if="canRefreshOfficial(chOf())&&chOf().channel==='traesolo'" style="margin-left:8px;color:var(--fg3)">· 倍率来自官方 consumption_rate（原值）</span><span v-else-if="canRefreshOfficial(chOf())" style="margin-left:8px;color:var(--fg3)">· 倍率来自上游 /v1/models</span><span v-else style="margin-left:8px;color:var(--fg3)">· 该通道上游不提供倍率，显示「-」</span></label>
+      <div style="margin-bottom:14px"><label style="font-size:12px;color:var(--fg-2);display:block;margin-bottom:6px">模型白名单（保存 = 按列表整体保存；空白名单保存 = 该平台所有模型请求 400；列表外的模型 400）<span v-if="canRefreshOfficial(chOf())&&chOf().channel==='traesolo'" style="margin-left:8px;color:var(--fg3)">· 倍率来自官方 consumption_rate（原值）</span><span v-else-if="chOf()&&chOf().channel==='workbuddy'" style="margin-left:8px;color:var(--fg3)">· 倍率来自官方 /v3/config credits（x 系数）</span><span v-else-if="canRefreshOfficial(chOf())" style="margin-left:8px;color:var(--fg3)">· 倍率来自上游 /v1/models</span><span v-else style="margin-left:8px;color:var(--fg3)">· 该通道上游不提供倍率，显示「-」</span></label>
         <div class="hint" style="margin:0 0 8px">「展示名」就是 <code>GET /v1/models</code> 列出的名字，也是客户端该请求的名字（保存后即时生效）；留空则直接用模型 ID。多个名字用英文逗号分隔。</div>
         <div v-if="chOf().modelRows.length" class="table-scroll" style="margin-bottom:8px">
           <table style="font-size:12px">

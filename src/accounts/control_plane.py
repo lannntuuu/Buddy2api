@@ -518,7 +518,7 @@ def channel_model_view(channel: str) -> dict:
 
 
 async def refresh_channel_models(channel: str) -> dict:
-    """强制刷新某通道的官方模型表（仅支持动态拉取的通道，如 traesolo）。
+    """强制刷新某通道的官方模型表（仅支持动态拉取的通道，如 traesolo / workbuddy）。
 
     返回：
       {
