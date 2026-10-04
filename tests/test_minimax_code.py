@@ -1303,12 +1303,15 @@ def test_facade_fetch_quota_is_honestly_unsupported():
     assert calls == []
 
 
-def test_facade_models_aliases_and_translation():
+def test_facade_models_aliases_and_translation(isolated_db):
     """facade 的模型面：目录四档、别名翻回原生 id、目录外 id 宽松兜底。
 
     ⚠️ MITM 实测 2026-09-30（dump-003:53）：默认模型已改为
     ``MiniMax-M3.1-Flash-Preview``（旧断言写死 ``MiniMax-M3`` 已不成立），
     目录随之多出该档；模型目录的专项回归见文末 §11。
+
+    isolated_db：alias_map 走 channel_aliases()，会合并 {channel}.aliases 库设置；
+    本地 dev 库若被手动改过别名就会污染本用例（断言的是出厂默认表）。
     """
     assert [item["id"] for item in PROVIDER.list_models()] == list(STATIC_MODELS)
     for item in PROVIDER.list_models():
