@@ -557,6 +557,49 @@ def _resolve_admin_token(args, ap) -> tuple[str, bool]:
     return sys.modules[__name__].ADMIN_TOKEN, admin_token_generated
 
 
+def _summarize_discover(startup: dict) -> str:
+    """把 startup_scan() 的返回值压成一行计数摘要（+ 有问题才追加的问题行）。
+
+    为什么不再整包打印 dict：startup_scan 的返回值带着每个凭据目录的绝对路径
+    （[control_plane.startup_scan] 取的 preview["dirs"]），整包 str() 出来是一行
+    500+ 字符的噪音，还会把本机凭据目录路径写进常被重定向/粘贴的启动日志。
+    完整结构化结果在 /admin/accounts/discover（带 importable_count /
+    already_imported / reason 等更细字段），要看细节去那里，启动时只需要计数。
+
+    但**问题绝不吞掉**：扫描报错、凭据目录不存在（客户端没装/换路径了）、
+    自动导入有文件失败——这三类各自单独成行，否则「0 valid」这种静默退化
+    会被当成正常状态读过去。grep `[startup] discover` 即可定位。
+    """
+    channels = startup.get("channels") or []
+    files = valid = 0
+    problems: list[str] = []
+    for entry in channels:
+        name = str(entry.get("channel") or "?")
+        error = entry.get("error")
+        if error:
+            problems.append(f"{name} 扫描失败: {error}")
+            continue
+        files += int(entry.get("file_count") or 0)
+        valid += int(entry.get("valid_count") or 0)
+        dirs = entry.get("dirs") or []
+        missing = sum(1 for d in dirs if not d.get("exists"))
+        if missing:
+            problems.append(f"{name}: {missing}/{len(dirs)} 个凭据目录不存在")
+        result = entry.get("import")
+        if isinstance(result, dict) and result.get("errors"):
+            first = (result["errors"][0] or {}).get("error", "?")
+            problems.append(
+                f"{name}: 自动导入 {len(result['errors'])} 个文件失败（首个: {first}）"
+            )
+    summary = (
+        f"{len(channels)} channels, {files} files, {valid} valid"
+        f" (auto_import={'on' if startup.get('auto_import') else 'off'})"
+    )
+    if problems:
+        summary += "\n" + "\n".join(f"[startup] discover 问题: {p}" for p in problems)
+    return summary
+
+
 def _print_banner(host: str, port: int, admin_token: str, admin_token_generated: bool) -> None:
     accounts = db.list_accounts()
     sys.stderr.write(f"\n")
@@ -600,7 +643,7 @@ def main():
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.WARNING))
 
     startup = control_plane.startup_scan()
-    sys.stderr.write(f"[startup] discover: {startup}\n")
+    sys.stderr.write(f"[startup] discover: {_summarize_discover(startup)}\n")
 
     # TraeWork 启动凭据对齐：在调度 sync 之前，先把客户端可能已更新的凭据
     # 采用进来，避免拿旧票去刷把客户端刚刷好的票作废（spec §3.3）。
