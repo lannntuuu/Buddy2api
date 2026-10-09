@@ -1,4 +1,4 @@
-"""Historical cache backfill (v2) �?robust model matching + sensible default ratio.
+"""Historical cache backfill (v2) – robust model matching + sensible default ratio.
 
 The 51 official sessions give us a per-model cache ratio oracle. For models with no
 official data on a given day, fall back to model-average; for models with no
@@ -18,7 +18,7 @@ with open("analyze-data.json", encoding="utf-8") as f:
 
 def norm(name):
     n = (name or "").strip().lower().replace(" ", "")
-    for suf in ("官方�?, "正式�?, "official", "official-version", "officialversion"):
+    for suf in ("官方版", "正式版", "official", "official-version", "officialversion"):
         n = n.replace(suf, "")
     return n.strip("-")
 

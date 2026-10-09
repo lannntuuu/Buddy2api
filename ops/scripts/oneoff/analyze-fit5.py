@@ -12,7 +12,7 @@ USD = 0.025
 
 def norm(name):
     n = (name or "").strip().lower().replace(" ", "")
-    return n.replace("官方�?, "").replace("official", "")
+    return n.replace("官方版", "").replace("official", "")
 
 recs = []
 for s in D["sessions"]:

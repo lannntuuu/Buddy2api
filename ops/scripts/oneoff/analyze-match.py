@@ -10,7 +10,7 @@ D = json.load(open("analyze-data.json", encoding="utf-8"))
 
 def norm(name):
     n = (name or "").strip().lower().replace(" ", "")
-    return n.replace("官方�?, "").replace("official", "")
+    return n.replace("官方版", "").replace("official", "")
 
 sess = []
 for s in D["sessions"]:
