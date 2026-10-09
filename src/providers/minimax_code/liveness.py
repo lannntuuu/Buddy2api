@@ -192,24 +192,30 @@ def allow_gateway_self_refresh() -> bool:
 
 
 def startup_note() -> str:
-    """给运维看的一句中文摘要（启动/状态面用）：模式 + 是否检测到客户端进程 + 净决策。
+    """给运维看的一句中文摘要（启动/状态面用）：模式 + 净决策 + 让位/放行的原因。
 
-    只含模式枚举值、进程名匹配子串（配置项本身）与平台名 ⇒ 不含任何凭证原文。
+    只含模式枚举值与进程名匹配子串（配置项本身）⇒ 不含任何凭证原文。
+
+    精简说明：原实现把同一个 _decide() 结论说了两遍（前半句「主动刷新允许」与
+    后半句 why 的结论重复），且 why 在 auto 下又复述了一遍前面已给出的
+    mode + 探测结果，一行 118 字符。现在每个事实只出现一次。
+    探测结论用「未检测到」而非「客户端没开」：前者是一律归约后的结果
+    （进程表不可读 / 非 Windows / 探针异常都落这里，见 is_client_running），
+    照实表述，不把探测失败讲成确定事实。
     """
     mode = self_refresh_mode()
     running = is_client_running()
     allowed = _decide(mode, running)
     if mode == MODE_ON:
-        why = "模式 on => 无视进程探测"
+        why = "显式 on，无视进程探测"
     elif mode == MODE_OFF:
-        why = "模式 off => 永不主动刷，只靠接管客户端落盘的凭据"
+        why = "显式 off，永不主动刷"
     elif running:
-        why = "模式 auto 且检测到客户端进程 => 让位，刷新权交客户端"
+        why = "检测到客户端在运行，让位给客户端"
     else:
-        why = "模式 auto 且未检测到客户端进程（含探测不可用）=> 网关可主动刷"
-    return (
-        f"[minimax-code] 自刷新活性门：mode={mode}，"
-        f"客户端进程检测={'在运行' if running else '未检测到'}"
-        f"（匹配子串 {client_process_match()!r}，平台 {os.name}）=> "
-        f"网关主动刷新{'允许' if allowed else '禁止'}；{why}"
-    )
+        why = "未检测到客户端（含探测不可用）"
+    verdict = "允许" if allowed else "禁止"
+    # 匹配子串只在 auto 下才有意义（on/off 是显式指令，不看进程表）；
+    # 它也是 CB_MINIMAX_CODE_CLIENT_PROCESS_MATCH 是否覆盖生效的唯一可见处。
+    suffix = f"；匹配子串 {client_process_match()!r}" if mode == MODE_AUTO else ""
+    return f"[minimax-code] 自刷新活性门：mode={mode}，主动刷新{verdict}（{why}）{suffix}"
